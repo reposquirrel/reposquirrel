@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>repo-squirrel Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Chart.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="header-top">
+          <!-- Hamburger Menu -->
+          <button class="hamburger-button" id="hamburger-button">
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+          </button>
+          <div class="header-text">
+            <div class="logo-container">
+              <img src="/static/logo-small.png" alt="repo-squirrel Logo" class="header-logo" />
+              <div class="title-container">
+                <h1>repo-squirrel</h1>
+                <p class="sidebar-subtitle">Repository Analytics</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <h2>Mode</h2>
+        <div class="mode-toggle">
+          <button id="mode-users" class="mode-button">Users</button>
+          <button id="mode-teams" class="mode-button">Teams</button>
+          <button id="mode-subsystems" class="mode-button active">Subsystems</button>
+        </div>
+      </div>
+
+      <div class="sidebar-section" id="sidebar-users">
+        <h2>Users</h2>
+        <div class="sidebar-list primary" id="user-list"></div>
+        <h3>Time Periods</h3>
+        <div class="sidebar-list small" id="user-month-list"></div>
+      </div>
+
+      <div class="sidebar-section" id="sidebar-teams">
+        <h2>Teams</h2>
+        <div class="sidebar-list primary" id="team-list"></div>
+        <h3>Time Periods</h3>
+        <div class="sidebar-list small" id="team-period-list"></div>
+      </div>
+
+      <div class="sidebar-section" id="sidebar-subsystems">
+        <h2>Subsystems</h2>
+        <div class="sidebar-list primary" id="subsystem-list"></div>
+        <h3>Time Periods</h3>
+        <div class="sidebar-list small" id="subsystem-period-list"></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="main-header">
+        <div>
+          <h1 id="view-title">Select a user or repo</h1>
+          <p id="view-subtitle"></p>
+        </div>
+        <div id="view-pill" class="pill"></div>
+      </header>
+
+      <section id="main-content">
+        <div class="empty-state">
+          <p>Use the selector on the left to pick a user/month or repo/month.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Hamburger Dropdown (outside sidebar for proper z-index) -->
+  <div class="hamburger-dropdown" id="hamburger-dropdown">
+    <a href="#" id="run-update-link">🔄 Run Update</a>
+    <a href="#" id="settings-link">⚙️ Settings</a>
+    <a href="#" id="about-link">ℹ️ About</a>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>⚙️ Settings</h2>
+        <button class="modal-close" id="settings-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="ignore-users">Ignore Users</button>
+          <button class="settings-tab" data-tab="aliases">User Aliases</button>
+          <button class="settings-tab" data-tab="teams">Teams</button>
+          <button class="settings-tab" data-tab="repositories">Repositories</button>
+          <button class="settings-tab" data-tab="subsystems">Subsystems</button>
+          <button class="settings-tab" data-tab="team-responsibilities">Team Responsibilities</button>
+        </div>
+        
+        <div class="settings-content">
+          <div id="ignore-users-tab" class="settings-tab-content active">
+            <h3>Ignore Users</h3>
+            <p>Select users to exclude from statistics. These are typically bots, automated accounts, or other non-human contributors.</p>
+            
+            <div class="ignore-users-ui">
+              <div class="ignore-users-selector">
+                <h4>Available Users</h4>
+                <div class="search-box">
+                  <input type="text" id="ignore-users-search" placeholder="Search users..." />
+                </div>
+                <div id="ignore-users-list" class="users-checkbox-list">
+                  <!-- Dynamically populated with available users -->
+                </div>
+              </div>
+              
+              <div class="currently-ignored">
+                <h4>Currently Ignored Users</h4>
+                <div id="ignored-users-summary" class="ignored-users-list">
+                  <!-- Shows currently ignored users -->
+                </div>
+              </div>
+            </div>
+            
+            <div class="settings-actions">
+              <button id="save-ignore-users" class="btn btn-primary">Save Changes</button>
+              <button id="reset-ignore-users" class="btn btn-secondary">Reset</button>
+            </div>
+          </div>
+          
+          <div id="aliases-tab" class="settings-tab-content">
+            <h3>User Aliases</h3>
+            <p>Merge multiple user identities into one. Select users that represent the same person to consolidate their statistics.</p>
+            
+            <div class="aliases-ui-v2">
+              <!-- Step 1: Create New Group -->
+              <div class="alias-creation-section">
+                <h4>🔗 Create User Group</h4>
+                <p class="help-text">Select multiple users that represent the same person. Their statistics will be merged under a single identity.</p>
+                
+                <div class="user-selection-area">
+                  <div class="selected-users-box">
+                    <div class="selected-users-header">
+                      <strong>Selected Users:</strong>
+                      <button id="clear-selection" class="btn-link">Clear</button>
+                    </div>
+                    <div id="selected-users-list" class="selected-users-list">
+                      <div class="empty-state">No users selected</div>
+                    </div>
+                  </div>
+                  
+                  <div class="primary-user-selection">
+                    <label for="primary-user-select">Primary Identity (keep this one):</label>
+                    <select id="primary-user-select" disabled>
+                      <option value="">Select primary user...</option>
+                    </select>
+                  </div>
+                  
+                  <button id="create-alias-group" class="btn btn-primary" disabled>Create Group</button>
+                </div>
+              </div>
+              
+              <!-- Step 2: Available Users -->
+              <div class="available-users-section">
+                <h4>👥 Available Users</h4>
+                <div class="user-filter">
+                  <input type="text" id="user-search" placeholder="🔍 Search users..." />
+                  <label>
+                    <input type="checkbox" id="show-aliased" />
+                    Show already grouped users
+                  </label>
+                </div>
+                <div id="available-users-grid" class="available-users-grid">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+              
+              <!-- Step 3: Current Groups -->
+              <div class="aliases-list-section">
+                <h4>📋 Current User Groups</h4>
+                <div id="aliases-list" class="aliases-list-v2">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+            </div>
+            
+            <div class="settings-actions">
+              <button id="save-aliases" class="btn btn-primary">Save All Changes</button>
+              <button id="reset-aliases" class="btn btn-secondary">Reset</button>
+              <button id="import-export-aliases" class="btn btn-secondary">Import/Export JSON</button>
+            </div>
+            
+            <!-- JSON Import/Export Modal -->
+            <div id="json-modal" class="json-import-modal">
+              <div class="json-modal-content">
+                <div class="json-modal-header">
+                  <h4>Import/Export JSON</h4>
+                  <button id="close-json-modal">&times;</button>
+                </div>
+                <div class="json-modal-body">
+                  <textarea id="json-content" rows="15" placeholder='{"canonical-name": ["alias1", "alias2"]}'></textarea>
+                  <div class="json-modal-actions">
+                    <button id="import-json" class="btn btn-primary">Import</button>
+                    <button id="export-json" class="btn btn-secondary">Copy Current JSON</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div id="teams-tab" class="settings-tab-content">
+            <h3>Team Management</h3>
+            <p>Create and manage development teams for better organization and team-based statistics.</p>
+            
+            <div class="teams-ui">
+              <div class="add-team-section">
+                <h4>Create New Team</h4>
+                <div class="team-form">
+                  <input type="hidden" id="team-id" />
+                  <div class="form-group">
+                    <label for="team-name">Team Name:</label>
+                    <input type="text" id="team-name" placeholder="e.g., Frontend Team" />
+                  </div>
+                  <div class="form-group">
+                    <label for="team-description">Description:</label>
+                    <input type="text" id="team-description" placeholder="Brief description of the team" />
+                  </div>
+                  <div class="form-group">
+                    <label for="team-members">Team Members:</label>
+                    <div id="team-member-selector" class="member-selector">
+                      <!-- Dynamically populated with available users -->
+                    </div>
+                  </div>
+                  <button id="add-team" class="btn btn-primary">Create Team</button>
+                </div>
+              </div>
+              
+              <div class="teams-list-section">
+                <h4>Current Teams</h4>
+                <div id="teams-list" class="teams-list">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+            </div>
+            
+            <div class="settings-actions">
+              <button id="save-teams" class="btn btn-primary">Save Changes</button>
+              <button id="reset-teams" class="btn btn-secondary">Reset</button>
+              <button id="import-export-teams" class="btn btn-secondary">Import/Export JSON</button>
+            </div>
+            
+            <!-- JSON Import/Export Modal for Teams -->
+            <div id="teams-json-modal" class="json-import-modal">
+              <div class="json-modal-content">
+                <div class="json-modal-header">
+                  <h4>Import/Export Teams JSON</h4>
+                  <button id="close-teams-json-modal">&times;</button>
+                </div>
+                <div class="json-modal-body">
+                  <textarea id="teams-json-content" rows="15" placeholder='{"team-id": {"name": "Team Name", "description": "Description", "members": ["user1", "user2"]}}'></textarea>
+                  <div class="json-modal-actions">
+                    <button id="import-teams-json" class="btn btn-primary">Import</button>
+                    <button id="export-teams-json" class="btn btn-secondary">Copy Current JSON</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div id="repositories-tab" class="settings-tab-content">
+            <h3>Git Repositories</h3>
+            <p>Add Git repositories to analyze. repo-squirrel supports GitHub, GitLab, Bitbucket, and any Git hosting service. Changes are automatically saved.</p>
+            
+            <div class="repos-ui">
+              <div class="add-repo-section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                  <h4 style="margin: 0;">Add New Repository</h4>
+                  <button id="refresh-repos" class="btn btn-secondary" style="padding: 5px 10px; font-size: 12px;" title="Refresh repository list">🔄 Refresh</button>
+                </div>
+                <div class="repo-form">
+                  <div class="form-group">
+                    <label for="repo-url">Repository URL:</label>
+                    <input type="text" id="repo-url" placeholder="https://github.com/owner/repo.git" />
+                    <small style="color: #666; font-size: 0.85em;">Supported formats: HTTPS, SSH, or owner/repo</small>
+                  </div>
+                  <div class="form-group">
+                    <label for="repo-name">Repository Name (owner/repo):</label>
+                    <input type="text" id="repo-name" placeholder="Repository name will be auto-filled from URL" />
+                    <small style="color: #666; font-size: 0.85em;">Auto-derived from URL, but you can edit if needed</small>
+                  </div>
+                  <button id="add-repo" class="btn btn-primary">Add Repository</button>
+                </div>
+              </div>
+              
+              <div class="repos-list-section">
+                <h4>Current Repositories</h4>
+                <div id="repos-list" class="repos-list">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div id="subsystems-tab" class="settings-tab-content">
+            <h3>Subsystem Configuration</h3>
+            <p>Configure how repositories are divided into subsystems/services for better organization.</p>
+            
+            <div class="subsystems-ui">
+              <div class="add-subsystem-section">
+                <h4>Add Subsystem Mapping</h4>
+                <div class="subsystem-form">
+                  <div class="form-group">
+                    <label for="subsystem-repo">Repository:</label>
+                    <select id="subsystem-repo">
+                      <option value="">Select a repository...</option>
+                    </select>
+                  </div>
+                  <div class="form-group">
+                    <label for="subsystem-name">Subsystem Name:</label>
+                    <input type="text" id="subsystem-name" placeholder="e.g., service1, service2, main" />
+                  </div>
+                  <div class="form-group">
+                    <label for="subsystem-paths">Paths (one per line, empty = entire repo):</label>
+                    <textarea id="subsystem-paths" rows="3" placeholder="service1/&#10;service2/&#10;(leave empty for entire repo)"></textarea>
+                  </div>
+                  <button id="add-subsystem" class="btn btn-primary">Add Subsystem</button>
+                </div>
+              </div>
+              
+              <div class="subsystems-list-section">
+                <h4>Current Subsystem Mappings</h4>
+                <div id="subsystems-list" class="subsystems-list">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+            </div>
+            
+            <div class="settings-actions">
+              <button id="save-subsystems" class="btn btn-primary">Save Changes</button>
+              <button id="reset-subsystems" class="btn btn-secondary">Reset</button>
+              <button id="import-export-subsystems" class="btn btn-secondary">Import/Export JSON</button>
+            </div>
+            
+            <!-- JSON Import/Export Modal for Subsystems -->
+            <div id="subsystems-json-modal" class="json-import-modal">
+              <div class="json-modal-content">
+                <div class="json-modal-header">
+                  <h4>Import/Export Subsystems JSON</h4>
+                  <button id="close-subsystems-json-modal">&times;</button>
+                </div>
+                <div class="json-modal-body">
+                  <textarea id="subsystems-json-content" rows="15" placeholder='{"repo/name": {"subsystem": ["path1/", "path2/"]}}'></textarea>
+                  <div class="json-modal-actions">
+                    <button id="import-subsystems-json" class="btn btn-primary">Import</button>
+                    <button id="export-subsystems-json" class="btn btn-secondary">Copy Current JSON</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div id="team-responsibilities-tab" class="settings-tab-content">
+            <h3>Team-Subsystem Responsibilities</h3>
+            <p>Configure which teams are responsible for which subsystems. This helps track ownership and accountability.</p>
+            
+            <div class="team-responsibilities-ui">
+              <div class="team-responsibility-form">
+                <div class="form-group">
+                  <label for="responsibility-team">Team:</label>
+                  <select id="responsibility-team">
+                    <option value="">Select a team...</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="responsibility-subsystems">Responsible Subsystems:</label>
+                  <div id="responsibility-subsystems" class="subsystem-checkboxes">
+                    <!-- Dynamically populated -->
+                  </div>
+                </div>
+                <button id="update-responsibilities" class="btn btn-primary">Update Responsibilities</button>
+              </div>
+              
+              <div class="current-responsibilities">
+                <h4>Current Team Responsibilities</h4>
+                <div id="responsibilities-overview" class="responsibilities-list">
+                  <!-- Dynamically populated -->
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update Progress Modal -->
+  <div id="update-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>🔄 Running Update</h2>
+        <!-- No close button - update must complete -->
+      </div>
+      <div class="modal-body">
+        <div class="update-progress">
+          <div class="update-status">
+            <h3 id="update-status-title">Initializing...</h3>
+            <div class="progress-bar-container">
+              <div class="progress-bar">
+                <div id="update-progress-bar" class="progress-fill"></div>
+              </div>
+              <span id="update-progress-text">0%</span>
+            </div>
+          </div>
+          
+          <div class="update-log">
+            <h4>Progress Log</h4>
+            <div id="update-log-content" class="log-content">
+              <!-- Progress messages will be inserted here -->
+            </div>
+          </div>
+          
+          <div class="update-actions" id="update-actions" style="display: none;">
+            <button id="update-close" class="btn btn-primary">Close</button>
+            <button id="refresh-page" class="btn btn-secondary">Refresh Page</button>
+            <button id="download-update-logs" class="btn btn-secondary">📥 Download Full Logs</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Confirmation Dialog for First Update -->
+  <div id="first-update-dialog" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 500px;">
+      <div class="modal-header">
+        <h2>📊 Generate Statistics</h2>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 20px; line-height: 1.6;">
+          You have configured repositories but no statistics data yet.
+        </p>
+        <p style="margin-bottom: 20px; line-height: 1.6;">
+          Would you like to run an update now to generate statistics?
+        </p>
+        <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
+          This will analyze your repositories and may take some time.
+        </p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button id="first-update-cancel" class="btn btn-secondary">Maybe Later</button>
+          <button id="first-update-confirm" class="btn btn-primary">Yes, Run Update</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Interface Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a1a; color: #fff; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #333; border-radius: 5px; }
+        .test-button { padding: 10px 15px; margin: 5px; background: #2a2a2a; color: #fff; border: 1px solid #555; cursor: pointer; border-radius: 3px; }
+        .test-button:hover { background: #3a3a3a; }
+        .test-result { margin: 10px 0; padding: 10px; background: #2d4a2d; border-radius: 3px; }
+        .test-error { background: #4a2d2d; }
+        .user-list, .subsystem-list { max-height: 200px; overflow-y: auto; margin: 10px 0; padding: 10px; border: 1px solid #555; background: #222; }
+        .list-item { padding: 5px; cursor: pointer; border-bottom: 1px solid #333; }
+        .list-item:hover { background: #333; }
+    </style>
+</head>
+<body>
+    <h1>repo-squirrel Dashboard Interface Test</h1>
+    
+    <div class="test-section">
+        <h2>API Connectivity Test</h2>
+        <button class="test-button" onclick="testAPIs()">Test APIs</button>
+        <div id="api-results"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Users List</h2>
+        <button class="test-button" onclick="loadUsers()">Load Users</button>
+        <div class="user-list" id="user-list"></div>
+        <div id="user-results"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Subsystems List</h2>
+        <button class="test-button" onclick="loadSubsystems()">Load Subsystems</button>
+        <div class="subsystem-list" id="subsystem-list"></div>
+        <div id="subsystem-results"></div>
+    </div>
+    
+    <script>
+        async function testAPIs() {
+            const resultsDiv = document.getElementById('api-results');
+            resultsDiv.innerHTML = 'Testing...';
+            
+            try {
+                // Test users API
+                const usersResponse = await fetch('/api/users');
+                const usersData = await usersResponse.json();
+                
+                // Test subsystems API  
+                const subsystemsResponse = await fetch('/api/subsystems');
+                const subsystemsData = await subsystemsResponse.json();
+                
+                resultsDiv.innerHTML = `
+                    <div class="test-result">
+                        ✓ Users API: ${usersData.users.length} users found<br>
+                        ✓ Subsystems API: ${subsystemsData.subsystems.length} subsystems found
+                    </div>
+                `;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result test-error">✗ Error: ${error.message}</div>`;
+            }
+        }
+        
+        async function loadUsers() {
+            const listDiv = document.getElementById('user-list');
+            const resultsDiv = document.getElementById('user-results');
+            
+            try {
+                const response = await fetch('/api/users');
+                const data = await response.json();
+                
+                listDiv.innerHTML = '';
+                data.users.forEach(user => {
+                    const item = document.createElement('div');
+                    item.className = 'list-item';
+                    item.textContent = `${user.display_name} (${user.months.length} periods)`;
+                    item.onclick = () => testUserData(user);
+                    listDiv.appendChild(item);
+                });
+                
+                resultsDiv.innerHTML = `<div class="test-result">✓ ${data.users.length} users loaded</div>`;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result test-error">✗ Error: ${error.message}</div>`;
+            }
+        }
+        
+        async function loadSubsystems() {
+            const listDiv = document.getElementById('subsystem-list');
+            const resultsDiv = document.getElementById('subsystem-results');
+            
+            try {
+                const response = await fetch('/api/subsystems');
+                const data = await response.json();
+                
+                listDiv.innerHTML = '';
+                data.subsystems.forEach(subsystem => {
+                    const item = document.createElement('div');
+                    item.className = 'list-item';
+                    item.textContent = `${subsystem.name} (${subsystem.periods.length} periods)`;
+                    item.onclick = () => testSubsystemData(subsystem);
+                    listDiv.appendChild(item);
+                });
+                
+                resultsDiv.innerHTML = `<div class="test-result">✓ ${data.subsystems.length} subsystems loaded</div>`;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result test-error">✗ Error: ${error.message}</div>`;
+            }
+        }
+        
+        async function testUserData(user) {
+            const resultsDiv = document.getElementById('user-results');
+            resultsDiv.innerHTML = 'Loading user data...';
+            
+            try {
+                // Test loading a yearly summary if available
+                const yearlyPeriod = user.months.find(m => m.is_yearly);
+                if (yearlyPeriod) {
+                    const year = parseInt(yearlyPeriod.label);
+                    const response = await fetch(`/api/users/${encodeURIComponent(user.slug)}/year/${year}`);
+                    const data = await response.json();
+                    
+                    resultsDiv.innerHTML = `
+                        <div class="test-result">
+                            ✓ User: ${data.author_name}<br>
+                            ✓ Total commits: ${data.total_commits}<br>
+                            ✓ Period: ${data.from} to ${data.to}
+                        </div>
+                    `;
+                } else {
+                    // Try first monthly period
+                    const firstPeriod = user.months[0];
+                    const response = await fetch(`/api/users/${encodeURIComponent(user.slug)}/month/${firstPeriod.from}/${firstPeriod.to}`);
+                    const data = await response.json();
+                    
+                    resultsDiv.innerHTML = `
+                        <div class="test-result">
+                            ✓ User: ${data.author_name}<br>
+                            ✓ Total commits: ${data.total_commits}<br>
+                            ✓ Period: ${data.from} to ${data.to}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result test-error">✗ Error loading user data: ${error.message}</div>`;
+            }
+        }
+        
+        async function testSubsystemData(subsystem) {
+            const resultsDiv = document.getElementById('subsystem-results');
+            resultsDiv.innerHTML = 'Loading subsystem data...';
+            
+            try {
+                // Test loading a yearly summary if available
+                const yearlyPeriod = subsystem.periods.find(p => p.is_yearly);
+                if (yearlyPeriod) {
+                    const year = parseInt(yearlyPeriod.label);
+                    const response = await fetch(`/api/subsystems/${encodeURIComponent(subsystem.name)}/year/${year}`);
+                    const data = await response.json();
+                    
+                    resultsDiv.innerHTML = `
+                        <div class="test-result">
+                            ✓ Subsystem: ${data.service}<br>
+                            ✓ Total commits: ${data.total_commits}<br>
+                            ✓ Period: ${data.from} to ${data.to}
+                        </div>
+                    `;
+                } else {
+                    // Try first period
+                    const firstPeriod = subsystem.periods[0];
+                    const response = await fetch(`/api/subsystems/${encodeURIComponent(subsystem.name)}/month/${firstPeriod.from}/${firstPeriod.to}`);
+                    const data = await response.json();
+                    
+                    resultsDiv.innerHTML = `
+                        <div class="test-result">
+                            ✓ Subsystem: ${data.service}<br>
+                            ✓ Total commits: ${data.total_commits}<br>
+                            ✓ Period: ${data.from} to ${data.to}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result test-error">✗ Error loading subsystem data: ${error.message}</div>`;
+            }
+        }
+        
+        // Auto-run tests on load
+        window.onload = function() {
+            testAPIs();
+        };
+    </script>
+</body>
+</html>
