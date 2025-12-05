@@ -90,7 +90,7 @@ pip3 install flask
 ### 2. Clone and Start
 ```bash
 git clone <repository-url>
-cd GIT_REPO_SQUIRREL_NEW
+cd reposquirrel
 python3 dashboard_server.py
 ```
 
