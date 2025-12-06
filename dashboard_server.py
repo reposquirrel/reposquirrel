@@ -1171,18 +1171,32 @@ def api_subsystem_maintainer_timeline(subsystem_name: str):
         current_ownership = {}  # {dev_slug: lines_owned}
         total_current_lines = 0
         
-        # Look for blame data for this subsystem
+        # Look for blame data for this subsystem (could be a repo or a service)
         for root, dirs, files in os.walk(repos_path):
             if "blame.json" in files:
                 blame_file = os.path.join(root, "blame.json")
                 try:
                     blame_data = load_json(blame_file)
-                    # Check if this is the right subsystem
+                    
+                    # Check if this is a direct repo match
                     if subsystem_name.lower() in blame_data.get("repo", "").lower():
                         developers = blame_data.get("developers", {})
                         total_current_lines = blame_data.get("total_lines", 0)
                         for dev_slug, dev_data in developers.items():
                             current_ownership[dev_slug] = dev_data.get("lines", 0)
+                        break
+                    
+                    # Check if this is a service within a repo
+                    services = blame_data.get("services", {})
+                    if subsystem_name in services:
+                        service_data = services[subsystem_name]
+                        developers = service_data.get("developers", {})
+                        total_current_lines = service_data.get("total_lines", 0)
+                        for dev_slug, dev_data in developers.items():
+                            if isinstance(dev_data, dict):
+                                current_ownership[dev_slug] = dev_data.get("lines", 0)
+                            else:
+                                current_ownership[dev_slug] = dev_data
                         break
                 except Exception as e:
                     continue
