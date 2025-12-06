@@ -1694,6 +1694,9 @@ def api_subsystem_size_rankings():
         # Sort by total lines (descending)
         subsystem_sizes.sort(key=lambda x: x["total_lines"], reverse=True)
         
+        # Calculate total system lines
+        total_system_lines = sum(s["total_lines"] for s in subsystem_sizes)
+        
         # Create rankings dictionary
         rankings = {}
         for i, subsystem in enumerate(subsystem_sizes):
@@ -1730,7 +1733,8 @@ def api_subsystem_size_rankings():
         return jsonify({
             "rankings": rankings,
             "buckets": buckets,
-            "total_subsystems": total_count
+            "total_subsystems": total_count,
+            "total_system_lines": total_system_lines
         })
         
     except Exception as e:

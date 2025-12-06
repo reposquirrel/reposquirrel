@@ -3667,6 +3667,31 @@ async function showSubsystemsOverviewDashboard() {
     clearMain();
     setViewHeader("Subsystems Overview", "System-wide subsystem statistics and rankings", "Subsystems");
     
+    // System statistics KPI cards
+    const kpiContainer = document.createElement("div");
+    kpiContainer.className = "kpi-grid";
+    
+    const totalSystemLines = overviewData.size_data?.total_system_lines || 0;
+    const totalSubsystems = overviewData.total_subsystems || 0;
+    const deadSubsystems = overviewData.dead_subsystems?.count || 0;
+    const averageLinesPerSubsystem = totalSubsystems > 0 ? Math.round(totalSystemLines / totalSubsystems) : 0;
+    
+    const kpis = [
+      { label: "Total System Lines", value: totalSystemLines.toLocaleString() },
+      { label: "Total Subsystems", value: totalSubsystems.toLocaleString() },
+      { label: "Average Lines/Subsystem", value: averageLinesPerSubsystem.toLocaleString() },
+      { label: "Dead Subsystems", value: deadSubsystems.toLocaleString() }
+    ];
+    
+    kpis.forEach((k) => {
+      const card = document.createElement("div");
+      card.className = "kpi-card";
+      card.innerHTML = '<div class="kpi-label">' + k.label + '</div><div class="kpi-value">' + k.value + '</div>';
+      kpiContainer.appendChild(card);
+    });
+    
+    main.appendChild(kpiContainer);
+    
     // Top largest subsystems
     const topSizeSection = document.createElement("div");
     topSizeSection.className = "card";
