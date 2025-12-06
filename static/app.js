@@ -3672,20 +3672,39 @@ async function showSubsystemsOverviewDashboard() {
     kpiContainer.className = "kpi-grid";
     
     const totalSystemLines = overviewData.size_data?.total_system_lines || 0;
+    const totalGitLines = overviewData.size_data?.total_git_lines || 0;
     const totalSubsystems = overviewData.total_subsystems || 0;
     const deadSubsystems = overviewData.dead_subsystems?.count || 0;
     const averageLinesPerSubsystem = totalSubsystems > 0 ? Math.round(totalSystemLines / totalSubsystems) : 0;
+    const ratio = totalSystemLines > 0 ? (totalGitLines / totalSystemLines).toFixed(1) : 0;
     
     const kpis = [
-      { label: "Total System Lines", value: totalSystemLines.toLocaleString() },
-      { label: "Total Subsystems", value: totalSubsystems.toLocaleString() },
-      { label: "Average Lines/Subsystem", value: averageLinesPerSubsystem.toLocaleString() },
-      { label: "Dead Subsystems", value: deadSubsystems.toLocaleString() }
+      { 
+        label: "Total Code Lines (cloc)", 
+        value: totalSystemLines.toLocaleString(),
+        tooltip: "Actual code lines only, excluding blanks and comments. Measured by cloc tool."
+      },
+      { 
+        label: "Total Git Lines (blame)", 
+        value: totalGitLines.toLocaleString(),
+        tooltip: `All lines in tracked files including blanks and comments. Git blame counts ~${ratio}x more lines than cloc.`
+      },
+      { 
+        label: "Total Subsystems", 
+        value: totalSubsystems.toLocaleString(),
+        tooltip: "Number of subsystems/repositories in the codebase."
+      },
+      { 
+        label: "Dead Subsystems", 
+        value: deadSubsystems.toLocaleString(),
+        tooltip: "Subsystems with no commits in the last 3 months."
+      }
     ];
     
     kpis.forEach((k) => {
       const card = document.createElement("div");
       card.className = "kpi-card";
+      card.title = k.tooltip || "";
       card.innerHTML = '<div class="kpi-label">' + k.label + '</div><div class="kpi-value">' + k.value + '</div>';
       kpiContainer.appendChild(card);
     });
@@ -4581,17 +4600,11 @@ async function addOwnershipStatistics(container, abortSignal) {
         const topCodeOwnersCard = document.createElement("div");
         topCodeOwnersCard.className = "ranking-list-no-scroll";
         topCodeOwnersCard.style.marginTop = "20px";
-        topCodeOwnersCard.innerHTML = `
-          <div class="ranking-header">
-            <span class="ranking-emoji">💎</span>
-            <div class="title-with-help">
-              <div>
-                <h3 style="margin: 0;">Top 20 Code Owners</h3>
-                <p class="ranking-subtitle">By total lines owned across all subsystems</p>
-              </div>
-            </div>
-          </div>
-        `;
+        topCodeOwnersCard.innerHTML = createTitleWithTooltip(
+          "💎 Top 20 Code Owners", 
+          "Ranked by total lines owned (git blame) across all subsystems. Note: Git blame counts all lines in tracked files including blanks and comments, which is typically 2-3x more than actual code lines (from cloc). This metric shows breadth of contribution across the codebase.",
+          "h3"
+        );
         
         const topCodeOwnersList = document.createElement("div");
         topCodeOwnersList.className = "ranking-items";

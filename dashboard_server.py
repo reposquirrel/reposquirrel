@@ -842,43 +842,56 @@ def api_developers_total_ownership():
         developer_lines = defaultdict(lambda: {"lines": 0, "subsystems": [], "display_name": ""})
         
         # Walk through all blame files
+        # Track repos we've already processed to avoid double-counting (standalone vs monorepo)
         repos_path = os.path.join(STATS_ROOT, "repos")
+        processed_repos = set()
         
         for root, dirs, files in os.walk(repos_path):
             if "blame.json" in files:
                 blame_file = os.path.join(root, "blame.json")
                 try:
                     blame_data = load_json(blame_file)
-                    repo_name = blame_data.get("repo", "").split("/")[-1]
+                    repo_full_name = blame_data.get("repo", "")
+                    repo_name = repo_full_name.split("/")[-1]
                     
-                    # Process main repo developers
-                    developers = blame_data.get("developers", {})
-                    for dev_slug, dev_data in developers.items():
-                        lines = dev_data.get("lines", 0)
-                        if lines > 0:
-                            developer_lines[dev_slug]["lines"] += lines
-                            developer_lines[dev_slug]["subsystems"].append(repo_name)
-                            if not developer_lines[dev_slug]["display_name"]:
-                                developer_lines[dev_slug]["display_name"] = dev_data.get("display_name", dev_slug)
+                    # Skip if we've already processed this repo name (avoid standalone + monorepo duplicates)
+                    if repo_name in processed_repos:
+                        continue
                     
-                    # Process service-level developers
+                    processed_repos.add(repo_name)
+                    
+                    # Check if this repo has services - if so, use service-level data to avoid double counting
                     services = blame_data.get("services", {})
-                    for service_name, service_data in services.items():
-                        service_developers = service_data.get("developers", {})
-                        for dev_slug, dev_data in service_developers.items():
-                            if isinstance(dev_data, dict):
-                                lines = dev_data.get("lines", 0)
-                                display_name = dev_data.get("display_name", dev_slug)
-                            else:
-                                lines = dev_data if isinstance(dev_data, int) else 0
-                                display_name = dev_slug
-                            
+                    
+                    if services:
+                        # Process service-level developers (more granular)
+                        for service_name, service_data in services.items():
+                            service_developers = service_data.get("developers", {})
+                            for dev_slug, dev_data in service_developers.items():
+                                if isinstance(dev_data, dict):
+                                    lines = dev_data.get("lines", 0)
+                                    display_name = dev_data.get("display_name", dev_slug)
+                                else:
+                                    lines = dev_data if isinstance(dev_data, int) else 0
+                                    display_name = dev_slug
+                                
+                                if lines > 0:
+                                    developer_lines[dev_slug]["lines"] += lines
+                                    if service_name not in developer_lines[dev_slug]["subsystems"]:
+                                        developer_lines[dev_slug]["subsystems"].append(service_name)
+                                    if not developer_lines[dev_slug]["display_name"]:
+                                        developer_lines[dev_slug]["display_name"] = display_name
+                    else:
+                        # No services, process main repo developers
+                        developers = blame_data.get("developers", {})
+                        for dev_slug, dev_data in developers.items():
+                            lines = dev_data.get("lines", 0)
                             if lines > 0:
                                 developer_lines[dev_slug]["lines"] += lines
-                                if service_name not in developer_lines[dev_slug]["subsystems"]:
-                                    developer_lines[dev_slug]["subsystems"].append(service_name)
+                                if repo_name not in developer_lines[dev_slug]["subsystems"]:
+                                    developer_lines[dev_slug]["subsystems"].append(repo_name)
                                 if not developer_lines[dev_slug]["display_name"]:
-                                    developer_lines[dev_slug]["display_name"] = display_name
+                                    developer_lines[dev_slug]["display_name"] = dev_data.get("display_name", dev_slug)
                 
                 except Exception as e:
                     print(f"Error processing blame file {blame_file}: {e}")
@@ -1665,6 +1678,29 @@ def api_subsystem_size_rankings():
         if not os.path.exists(subsystems_root):
             return jsonify({"rankings": {}, "buckets": {"big": [], "medium": [], "small": []}})
         
+        # Calculate total git blame lines across all repos
+        # Important: Deduplicate repos that appear both standalone and in monorepos
+        # Track by the final repo name component to avoid double-counting
+        total_git_lines = 0
+        repos_path = os.path.join(STATS_ROOT, "repos")
+        counted_repos = set()
+        
+        for root, dirs, files in os.walk(repos_path):
+            if "blame.json" in files:
+                blame_file = os.path.join(root, "blame.json")
+                try:
+                    blame_data = load_json(blame_file)
+                    repo_full_name = blame_data.get("repo", "")
+                    # Get the last component (e.g., "appgate-docker" from "appgate-sdp-int/appgate-docker")
+                    repo_name = repo_full_name.split("/")[-1]
+                    
+                    # Only count each unique repo name once (prefer monorepo version if duplicate)
+                    if repo_name not in counted_repos:
+                        total_git_lines += blame_data.get("total_lines", 0)
+                        counted_repos.add(repo_name)
+                except Exception as e:
+                    continue
+        
         # Collect language statistics for all subsystems
         subsystem_sizes = []
         
@@ -1734,7 +1770,8 @@ def api_subsystem_size_rankings():
             "rankings": rankings,
             "buckets": buckets,
             "total_subsystems": total_count,
-            "total_system_lines": total_system_lines
+            "total_system_lines": total_system_lines,
+            "total_git_lines": total_git_lines
         })
         
     except Exception as e:
