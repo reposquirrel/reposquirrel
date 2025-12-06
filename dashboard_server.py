@@ -1804,6 +1804,56 @@ def api_subsystem_size_rankings():
         return jsonify({"rankings": {}, "buckets": {"big": [], "medium": [], "small": []}, "error": str(e)})
 
 
+@app.route("/api/subsystems/language-lines")
+def api_subsystem_language_lines():
+    """Get total lines of code per programming language across all subsystems."""
+    try:
+        subsystems_root = os.path.join(STATS_ROOT, "subsystems")
+        if not os.path.exists(subsystems_root):
+            return jsonify({"languages": {}, "total_lines": 0})
+        
+        language_lines = {}
+        
+        for subsystem_name in os.listdir(subsystems_root):
+            subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+            if not os.path.isdir(subsystem_dir):
+                continue
+                
+            languages_file = os.path.join(subsystem_dir, "languages.json")
+            if not os.path.exists(languages_file):
+                continue
+                
+            try:
+                with open(languages_file, "r", encoding="utf-8") as f:
+                    language_data = json.load(f)
+                
+                languages = language_data.get("languages", {})
+                for lang, lang_data in languages.items():
+                    code_lines = lang_data.get("code_lines", 0)
+                    if code_lines > 0:
+                        if lang not in language_lines:
+                            language_lines[lang] = 0
+                        language_lines[lang] += code_lines
+                        
+            except (json.JSONDecodeError, IOError):
+                continue
+        
+        total_lines = sum(language_lines.values())
+        
+        # Sort by lines descending
+        sorted_languages = dict(sorted(language_lines.items(), key=lambda x: x[1], reverse=True))
+        
+        return jsonify({
+            "languages": sorted_languages,
+            "total_lines": total_lines,
+            "language_count": len(sorted_languages)
+        })
+        
+    except Exception as e:
+        print(f"Error in api_subsystem_language_lines: {str(e)}")
+        return jsonify({"languages": {}, "total_lines": 0, "error": str(e)})
+
+
 @app.route("/api/subsystems/overview")
 def api_subsystems_overview():
     """Get overview data for all subsystems including size comparison and activity."""

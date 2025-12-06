@@ -3770,6 +3770,15 @@ async function showSubsystemsOverviewDashboard() {
       main.appendChild(errorSection);
     }
     
+    // Language lines distribution
+    try {
+      console.log("About to call addLanguageLinesDistribution");
+      await addLanguageLinesDistribution(main);
+      console.log("addLanguageLinesDistribution completed");
+    } catch (error) {
+      console.error("Error loading language lines distribution:", error);
+    }
+    
     // Activity section
     if (overviewData.activity) {
       const activitySection = document.createElement("div");
@@ -5711,6 +5720,128 @@ async function addSubsystemLanguageDistribution(container) {
       container.appendChild(errorSection);
       console.log("🔍 DEBUG: Added error section due to exception");
     }
+  }
+}
+
+async function addLanguageLinesDistribution(container) {
+  try {
+    const languageData = await fetchJSON('/api/subsystems/language-lines');
+    
+    if (!languageData.languages || Object.keys(languageData.languages).length === 0) {
+      return;
+    }
+    
+    // Filter out markup/config languages (same as getPrimaryLanguage)
+    const excludeLanguages = new Set([
+      'HTML', 'CSS', 'SCSS', 'Sass', 'Less',
+      'JSON', 'YAML', 'XML', 'TOML', 'INI',
+      'Markdown', 'reStructuredText', 'AsciiDoc', 'LaTeX', 'TeX',
+      'CSV', 'TSV', 'Properties', 'Dockerfile', 'Makefile',
+      'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
+      'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
+      'Mustache', 'Handlebars', 'Jinja', 'Smarty',
+      'SVG', 'PostScript', 'Rich Text Format'
+    ]);
+    
+    // Filter languages
+    const filteredLanguages = Object.entries(languageData.languages)
+      .filter(([lang, _]) => !excludeLanguages.has(lang));
+    
+    if (filteredLanguages.length === 0) {
+      return;
+    }
+    
+    const section = document.createElement("div");
+    section.className = "card language-distribution-section";
+    section.innerHTML = createTitleWithTooltip(
+      "📊 Lines of Code by Language", 
+      "Total lines of code across all subsystems, broken down by programming language. Excludes markup and configuration languages (HTML, CSS, JSON, YAML, etc.).",
+      "h2"
+    );
+    
+    const chartContainer = document.createElement("div");
+    chartContainer.style.height = "400px";
+    chartContainer.style.marginTop = "20px";
+    
+    const canvas = document.createElement("canvas");
+    chartContainer.appendChild(canvas);
+    section.appendChild(chartContainer);
+    container.appendChild(section);
+    
+    // Show all filtered languages (no "Others" category)
+    const labels = filteredLanguages.map(([lang, _]) => lang);
+    const data = filteredLanguages.map(([_, lines]) => lines);
+    const total = data.reduce((sum, val) => sum + val, 0);
+    
+    // Create chart
+    new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Lines of Code',
+          data: data,
+          backgroundColor: [
+            '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
+            '#06B6D4', '#84CC16', '#F97316', '#EC4899', '#14B8A6',
+            '#F43F5E', '#6366F1', '#A855F7', '#22D3EE', '#6B7280'
+          ],
+          borderColor: [
+            '#1D4ED8', '#059669', '#D97706', '#DC2626', '#7C3AED',
+            '#0891B2', '#65A30D', '#EA580C', '#DB2777', '#0D9488',
+            '#E11D48', '#4F46E5', '#9333EA', '#06B6D4', '#4B5563'
+          ],
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: false
+          },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const lines = context.parsed.y;
+                const percentage = ((lines / total) * 100).toFixed(1);
+                return `${lines.toLocaleString()} lines (${percentage}%)`;
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              color: '#9CA3AF',
+              callback: function(value) {
+                if (value >= 1000) {
+                  return (value / 1000).toFixed(0) + 'K';
+                }
+                return value;
+              }
+            },
+            grid: {
+              color: '#374151'
+            }
+          },
+          x: {
+            ticks: {
+              color: '#9CA3AF',
+              maxRotation: 45,
+              minRotation: 45
+            },
+            grid: {
+              display: false
+            }
+          }
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error loading language lines distribution:", error);
   }
 }
 
