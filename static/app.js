@@ -4288,6 +4288,112 @@ async function addBadgeStatistics(container, abortSignal) {
       topHoldersDiv.appendChild(holdersList);
       contentLayout.appendChild(topHoldersDiv);
       badgeSection.appendChild(contentLayout);
+      
+      // Add Top 10 Badge Holders ranking list
+      const rankingGrid = document.createElement("div");
+      rankingGrid.className = "ranking-grid";
+      rankingGrid.style.marginTop = "20px";
+      
+      // Top 10 Total Badge Holders
+      const topBadgesCard = document.createElement("div");
+      topBadgesCard.className = "ranking-list";
+      topBadgesCard.innerHTML = `
+        <div class="ranking-header">
+          <span class="ranking-emoji">🏆</span>
+          <div class="title-with-help">
+            <div>
+              <h3 style="margin: 0;">Top 20 Badge Holders</h3>
+              <p class="ranking-subtitle">By total number of badges</p>
+            </div>
+          </div>
+        </div>
+      `;
+      
+      const topBadgesList = document.createElement("div");
+      topBadgesList.className = "ranking-items";
+      
+      usersWithBadges
+        .sort((a, b) => b.badgeCount - a.badgeCount)
+        .slice(0, 20)
+        .forEach((holder, index) => {
+          const item = document.createElement("div");
+          item.className = "ranking-item clickable";
+          item.onclick = () => navigateToUser(holder.user.slug);
+          
+          const badges = holder.badges;
+          const productivityBadges = badges.filter(b => b.type === 'productivity').length;
+          const ownershipBadges = badges.filter(b => b.type === 'ownership_percentage').length;
+          const maintainerBadges = badges.filter(b => b.type === 'maintainer').length;
+          
+          item.innerHTML = `
+            <span class="ranking-position">#${index + 1}</span>
+            <span class="ranking-name">${holder.user.display_name || holder.user.slug}</span>
+            <div class="ranking-meta">
+              <span class="ranking-value">${holder.badgeCount} total</span>
+              <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;">
+                ${productivityBadges > 0 ? `🚀${productivityBadges} ` : ''}${ownershipBadges > 0 ? `👑${ownershipBadges} ` : ''}${maintainerBadges > 0 ? `🔧${maintainerBadges}` : ''}
+              </span>
+            </div>
+          `;
+          topBadgesList.appendChild(item);
+        });
+      
+      topBadgesCard.appendChild(topBadgesList);
+      rankingGrid.appendChild(topBadgesCard);
+      
+      // Top 10 Ownership Badge Holders
+      const ownershipBadgesCard = document.createElement("div");
+      ownershipBadgesCard.className = "ranking-list";
+      ownershipBadgesCard.innerHTML = `
+        <div class="ranking-header">
+          <span class="ranking-emoji">👑</span>
+          <div class="title-with-help">
+            <div>
+              <h3 style="margin: 0;">Top 20 Ownership Badge Holders</h3>
+              <p class="ranking-subtitle">By number of ownership badges</p>
+            </div>
+          </div>
+        </div>
+      `;
+      
+      const ownershipBadgesList = document.createElement("div");
+      ownershipBadgesList.className = "ranking-items";
+      
+      const usersWithOwnershipBadges = usersWithBadges
+        .map(holder => ({
+          ...holder,
+          ownershipBadgeCount: holder.badges.filter(b => b.type === 'ownership_percentage').length
+        }))
+        .filter(holder => holder.ownershipBadgeCount > 0)
+        .sort((a, b) => b.ownershipBadgeCount - a.ownershipBadgeCount)
+        .slice(0, 20);
+      
+      usersWithOwnershipBadges.forEach((holder, index) => {
+        const item = document.createElement("div");
+        item.className = "ranking-item clickable";
+        item.onclick = () => navigateToUser(holder.user.slug);
+        
+        // Get ownership badge details
+        const ownershipBadges = holder.badges.filter(b => b.type === 'ownership_percentage');
+        const subsystems = ownershipBadges.map(b => b.subsystem).join(', ');
+        
+        item.innerHTML = `
+          <span class="ranking-position">#${index + 1}</span>
+          <span class="ranking-name">${holder.user.display_name || holder.user.slug}</span>
+          <div class="ranking-meta">
+            <span class="ranking-value">${holder.ownershipBadgeCount} subsystems</span>
+            <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;" title="${subsystems}">
+              ${subsystems.length > 30 ? subsystems.substring(0, 30) + '...' : subsystems}
+            </span>
+          </div>
+        `;
+        ownershipBadgesList.appendChild(item);
+      });
+      
+      ownershipBadgesCard.appendChild(ownershipBadgesList);
+      rankingGrid.appendChild(ownershipBadgesCard);
+      
+      badgeSection.appendChild(rankingGrid);
     }
 
   } catch (error) {

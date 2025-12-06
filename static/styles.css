@@ -3760,3 +3760,17 @@ body {
 .link-list-item:last-child {
   border-bottom: none;
 }
+
+/* Ranking Grid for side-by-side ranking lists */
+.ranking-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+@media (max-width: 768px) {
+  .ranking-grid {
+    grid-template-columns: 1fr;
+  }
+}
