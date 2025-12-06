@@ -839,6 +839,25 @@ def api_developers_total_ownership():
     try:
         from collections import defaultdict
         
+        # Load aliases to merge developers
+        alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+        alias_map = {}
+        if os.path.exists(alias_file):
+            try:
+                alias_map = load_json(alias_file)
+            except:
+                pass
+        
+        # Helper function to get canonical slug
+        def get_canonical_slug(slug):
+            """Apply aliases to get canonical developer slug."""
+            for canonical, aliases in alias_map.items():
+                if isinstance(aliases, list) and slug in aliases:
+                    return canonical
+                elif isinstance(aliases, str) and slug == aliases:
+                    return canonical
+            return slug
+        
         developer_lines = defaultdict(lambda: {"lines": 0, "subsystems": [], "display_name": ""})
         
         # Walk through all blame files
@@ -868,6 +887,9 @@ def api_developers_total_ownership():
                         for service_name, service_data in services.items():
                             service_developers = service_data.get("developers", {})
                             for dev_slug, dev_data in service_developers.items():
+                                # Apply alias mapping
+                                canonical_slug = get_canonical_slug(dev_slug)
+                                
                                 if isinstance(dev_data, dict):
                                     lines = dev_data.get("lines", 0)
                                     display_name = dev_data.get("display_name", dev_slug)
@@ -876,22 +898,25 @@ def api_developers_total_ownership():
                                     display_name = dev_slug
                                 
                                 if lines > 0:
-                                    developer_lines[dev_slug]["lines"] += lines
-                                    if service_name not in developer_lines[dev_slug]["subsystems"]:
-                                        developer_lines[dev_slug]["subsystems"].append(service_name)
-                                    if not developer_lines[dev_slug]["display_name"]:
-                                        developer_lines[dev_slug]["display_name"] = display_name
+                                    developer_lines[canonical_slug]["lines"] += lines
+                                    if service_name not in developer_lines[canonical_slug]["subsystems"]:
+                                        developer_lines[canonical_slug]["subsystems"].append(service_name)
+                                    if not developer_lines[canonical_slug]["display_name"]:
+                                        developer_lines[canonical_slug]["display_name"] = display_name
                     else:
                         # No services, process main repo developers
                         developers = blame_data.get("developers", {})
                         for dev_slug, dev_data in developers.items():
+                            # Apply alias mapping
+                            canonical_slug = get_canonical_slug(dev_slug)
+                            
                             lines = dev_data.get("lines", 0)
                             if lines > 0:
-                                developer_lines[dev_slug]["lines"] += lines
-                                if repo_name not in developer_lines[dev_slug]["subsystems"]:
-                                    developer_lines[dev_slug]["subsystems"].append(repo_name)
-                                if not developer_lines[dev_slug]["display_name"]:
-                                    developer_lines[dev_slug]["display_name"] = dev_data.get("display_name", dev_slug)
+                                developer_lines[canonical_slug]["lines"] += lines
+                                if repo_name not in developer_lines[canonical_slug]["subsystems"]:
+                                    developer_lines[canonical_slug]["subsystems"].append(repo_name)
+                                if not developer_lines[canonical_slug]["display_name"]:
+                                    developer_lines[canonical_slug]["display_name"] = dev_data.get("display_name", dev_slug)
                 
                 except Exception as e:
                     print(f"Error processing blame file {blame_file}: {e}")
@@ -4003,14 +4028,17 @@ def aggregate_user_data_for_period(user_slug, from_date, to_date):
 
 @app.route("/api/settings/available-users")
 def api_settings_available_users():
-    """Get list of available users for team member selection and ignore list management."""
-    # Use the same logic as the main api_users endpoint to ensure consistency
+    """Get list of available users for team member selection and ignore list management.
+    Includes both active users (with recent commits) and inactive users (with ownership/blame)."""
+    from collections import defaultdict
+    
+    users_dict = {}
+    
+    # Get active users from summaries
     user_months = list_user_months()
-    users = []
     for slug, months in user_months.items():
         # Try to get a display name from any summary.json
         display_name = slug
-        # load first summary for that user to see if we have author_name
         try:
             any_month = months[0]
             path = find_user_summary(slug, any_month["from"], any_month["to"])
@@ -4018,13 +4046,50 @@ def api_settings_available_users():
             if data and data.get("author_name"):
                 display_name = data["author_name"]
         except Exception as e:
-            # fallback: use slug
             pass
         
-        users.append({
+        users_dict[slug] = {
             "slug": slug,
-            "display_name": display_name
-        })
+            "display_name": display_name,
+            "active": True
+        }
+    
+    # Also get inactive users from blame files (historical contributors)
+    repos_path = os.path.join(STATS_ROOT, "repos")
+    for root, dirs, files in os.walk(repos_path):
+        if "blame.json" in files:
+            blame_file = os.path.join(root, "blame.json")
+            try:
+                blame_data = load_json(blame_file)
+                
+                # Check repo-level developers
+                developers = blame_data.get("developers", {})
+                for dev_slug, dev_data in developers.items():
+                    if dev_slug not in users_dict:
+                        display_name = dev_data.get("display_name", dev_slug) if isinstance(dev_data, dict) else dev_slug
+                        users_dict[dev_slug] = {
+                            "slug": dev_slug,
+                            "display_name": display_name,
+                            "active": False
+                        }
+                
+                # Check service-level developers
+                services = blame_data.get("services", {})
+                for service_data in services.values():
+                    service_developers = service_data.get("developers", {})
+                    for dev_slug, dev_data in service_developers.items():
+                        if dev_slug not in users_dict:
+                            display_name = dev_data.get("display_name", dev_slug) if isinstance(dev_data, dict) else dev_slug
+                            users_dict[dev_slug] = {
+                                "slug": dev_slug,
+                                "display_name": display_name,
+                                "active": False
+                            }
+            except Exception as e:
+                continue
+    
+    # Convert to list
+    users = list(users_dict.values())
     
     # Sort by display name for better UX
     users.sort(key=lambda u: u["display_name"].lower())

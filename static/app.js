@@ -6561,16 +6561,20 @@ function renderAvailableUsers() {
   filteredUsers.forEach(user => {
     const isSelected = window.aliasUIState.selectedUserSlugs.includes(user.slug);
     const isAliased = aliasedSlugs.has(user.slug);
+    const isInactive = user.active === false;
     
     const userCard = document.createElement("div");
-    userCard.className = `user-card ${isSelected ? 'selected' : ''} ${isAliased ? 'aliased' : ''}`;
+    userCard.className = `user-card ${isSelected ? 'selected' : ''} ${isAliased ? 'aliased' : ''} ${isInactive ? 'inactive-user' : ''}`;
     userCard.onclick = () => toggleUserSelection(user.slug);
+    
+    const inactiveBadge = isInactive ? '<div class="inactive-badge" title="No recent commits, but has code ownership">Inactive</div>' : '';
     
     userCard.innerHTML = `
       <div class="user-card-content">
         <div class="user-display-name">${user.display_name}</div>
         <div class="user-slug">${user.slug}</div>
         ${isAliased ? '<div class="aliased-badge">Grouped</div>' : ''}
+        ${inactiveBadge}
       </div>
       <div class="user-card-check">${isSelected ? '✓' : ''}</div>
     `;

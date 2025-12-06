@@ -3628,6 +3628,27 @@ body {
   text-transform: uppercase;
 }
 
+.inactive-badge {
+  display: inline-block;
+  margin-top: 4px;
+  margin-left: 6px;
+  padding: 2px 6px;
+  background: #dc2626;
+  color: white;
+  font-size: 10px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.user-card.inactive-user {
+  opacity: 0.8;
+}
+
+.user-card.inactive-user .user-display-name {
+  font-style: italic;
+  color: #f87171;
+}
+
 .user-card-check {
   width: 24px;
   height: 24px;
