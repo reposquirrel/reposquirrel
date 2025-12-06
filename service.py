@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
         help="Text file listing users to ignore, one per line (default: configuration/ignore_user.txt)",
     )
     parser.add_argument(
+        "--alias-file",
+        dest="alias_file",
+        default="configuration/alias.json",
+        help="JSON file mapping user aliases to canonical names (default: configuration/alias.json)",
+    )
+    parser.add_argument(
         "--parallel",
         dest="parallel",
         action="store_true",
@@ -591,6 +597,7 @@ def main() -> None:
     output_root = args.output_root
     services_file = args.services_file
     ignore_file = args.ignore_file
+    alias_file = args.alias_file
     date_from = args.date_from
     date_to = args.date_to
     parallel = args.parallel
@@ -602,6 +609,7 @@ def main() -> None:
     print(f"Repos root  : {repos_root}")
     print(f"Output root : {output_root}")
     print(f"Services    : {services_file}")
+    print(f"Alias       : {alias_file}")
     print(f"Ignore      : {ignore_file}")
     if parallel:
         print(f"Parallel    : Enabled (max workers: {max_workers if max_workers else 'auto-detect'})")
@@ -610,7 +618,7 @@ def main() -> None:
     print()
 
     # Load configuration
-    alias_map = load_aliases("configuration/alias.json")
+    alias_map = load_aliases(alias_file)
     ignored_slugs = load_ignored_users(ignore_file)
     services_config = load_services_config(services_file)
     

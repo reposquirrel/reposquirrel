@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         help="Text file listing users to ignore (default: configuration/ignore_user.txt)",
     )
     parser.add_argument(
+        "--alias-file",
+        dest="alias_file",
+        default="configuration/alias.json",
+        help="JSON file mapping user aliases to canonical names (default: configuration/alias.json)",
+    )
+    parser.add_argument(
         "--skip-blame",
         action="store_true",
         help="Skip running blame.py (ownership analysis) to save time",
@@ -112,6 +118,7 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
     repos_root = month_data["repos_root"]
     output_root = month_data["output_root"]
     services_file = month_data["services_file"]
+    alias_file = month_data["alias_file"]
     ignore_file = month_data["ignore_file"]
     use_parallel_repos = month_data.get("use_parallel_repos", True)  # Enable repo-level parallelization
     
@@ -130,6 +137,10 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
             repos_root,
             "--output-root",
             output_root,
+            "--alias-file",
+            alias_file,
+            "--ignore-file",
+            ignore_file,
         ]
         
         if use_parallel_repos:
@@ -155,6 +166,8 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
             output_root,
             "--services-file",
             services_file,
+            "--alias-file",
+            alias_file,
             "--ignore-file",
             ignore_file,
         ]
@@ -184,6 +197,7 @@ def main() -> None:
     output_root = args.output_root
     services_file = args.services_file
     ignore_file = args.ignore_file
+    alias_file = args.alias_file
     skip_blame = args.skip_blame
     parallel = args.parallel
     max_workers = args.max_workers
@@ -228,6 +242,7 @@ def main() -> None:
     print(f"Repos root  : {repos_root}")
     print(f"Output root : {output_root}")
     print(f"Services    : {services_file}")
+    print(f"Alias       : {alias_file}")
     print(f"Ignore      : {ignore_file}")
     if parallel:
         print(f"Parallel    : Enabled (max workers: {max_workers})")
@@ -283,6 +298,7 @@ def main() -> None:
                 "repos_root": repos_root,
                 "output_root": output_root,
                 "services_file": services_file,
+                "alias_file": alias_file,
                 "ignore_file": ignore_file,
                 "use_parallel_repos": True,  # Enable repo-level parallelization when doing month-level parallelization
             })
@@ -344,6 +360,10 @@ def main() -> None:
                 repos_root,
                 "--output-root",
                 output_root,
+                "--alias-file",
+                alias_file,
+                "--ignore-file",
+                ignore_file,
             ]
             if parallel:  # Use repo-level parallelization when month-level parallelization is disabled
                 summery_cmd.append("--parallel")
@@ -367,6 +387,8 @@ def main() -> None:
                 output_root,
                 "--services-file",
                 services_file,
+                "--alias-file",
+                alias_file,
                 "--ignore-file",
                 ignore_file,
             ]
@@ -407,6 +429,8 @@ def main() -> None:
             output_root,
             "--services-file",
             services_file,
+            "--alias-file",
+            alias_file,
             "--ignore-file",
             ignore_file,
         ]

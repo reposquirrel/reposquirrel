@@ -2611,6 +2611,37 @@ def run_full_update_async(force_update=False):
             'progress': 2
         })
         
+        # Phase 1.5: Clean up old statistics
+        cleanup_start_time = datetime.now()
+        log_update_message({
+            'type': 'info',
+            'message': f'🧹 Cleaning up old statistics... [{cleanup_start_time.strftime("%H:%M:%S")}]',
+            'progress': 2
+        })
+        
+        stats_dir = os.path.join(BASE_DIR, "stats")
+        if os.path.exists(stats_dir):
+            try:
+                import shutil
+                shutil.rmtree(stats_dir)
+                log_update_message({
+                    'type': 'info',
+                    'message': f'✅ Old statistics removed [{datetime.now().strftime("%H:%M:%S")}]',
+                    'progress': 2
+                })
+            except Exception as e:
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'⚠️ Could not remove old statistics: {str(e)}',
+                    'progress': 2
+                })
+        else:
+            log_update_message({
+                'type': 'info',
+                'message': f'✅ No old statistics to clean [{datetime.now().strftime("%H:%M:%S")}]',
+                'progress': 2
+            })
+        
         # Phase 2: Analysis script execution (98% of total progress)
         analysis_start_time = datetime.now()
         log_update_message({
@@ -2706,6 +2737,7 @@ def run_full_update_async(force_update=False):
                     "--repos-root", os.path.join(BASE_DIR, "repos"),
                     "--output-root", BASE_DIR,
                     "--services-file", os.path.join(BASE_DIR, "configuration", "services.json"),
+                    "--alias-file", os.path.join(BASE_DIR, "configuration", "alias.json"),
                     "--ignore-file", os.path.join(BASE_DIR, "configuration", "ignore_user.txt"),
                     "--parallel",
                     "--max-workers", "4"
@@ -2873,6 +2905,7 @@ def run_full_update_async(force_update=False):
                         "--repos-root", "repos/appgate-sdp-int",
                         "--output-root", ".",
                         "--services-file", "configuration/services.json",
+                        "--alias-file", "configuration/alias.json",
                         "--ignore-file", "configuration/ignore_user.txt"
                         # NOTE: No --parallel flag to avoid pickle issues
                     ], cwd=BASE_DIR, capture_output=True, text=True, timeout=36000)  # 10 hours for subsystem stats with massive enterprise repos
@@ -2947,6 +2980,7 @@ def run_full_update_async(force_update=False):
                     "--repos-root", "repos/appgate-sdp-int",
                     "--output-root", ".",
                     "--services-file", "configuration/services.json",
+                    "--alias-file", "configuration/alias.json",
                     "--ignore-file", "configuration/ignore_user.txt",
                     "--parallel"  # blame.py parallel works fine, it's only service.py that has issues
                 ], cwd=BASE_DIR, capture_output=True, text=True, timeout=72000)  # 20 hour timeout for ownership analysis with enterprise-scale repos

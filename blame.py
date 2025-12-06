@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
         help="Text file listing users to ignore, one per line (default: configuration/ignore_user.txt)",
     )
     parser.add_argument(
+        "--alias-file",
+        dest="alias_file",
+        default="configuration/alias.json",
+        help="JSON file mapping user aliases to canonical names (default: configuration/alias.json)",
+    )
+    parser.add_argument(
         "--parallel",
         dest="parallel",
         action="store_true",
@@ -728,6 +734,7 @@ def main() -> None:
     output_root = args.output_root
     services_file = args.services_file
     ignore_file = args.ignore_file
+    alias_file = args.alias_file
     parallel = args.parallel
     max_workers = args.max_workers
 
@@ -752,9 +759,9 @@ def main() -> None:
     else:
         print("📊 Processing repositories sequentially")
 
-    alias_map = load_aliases("configuration/alias.json")
+    alias_map = load_aliases(alias_file)
     if alias_map:
-        print(f"Loaded {len(alias_map)} alias mappings from configuration/alias.json")
+        print(f"Loaded {len(alias_map)} alias mappings from {alias_file}")
 
     services_config = load_services_config(services_file)
     if services_config:
