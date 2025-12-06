@@ -833,6 +833,133 @@ def api_user_badges(user_slug: str):
         return jsonify({"badges": [], "error": str(e)})
 
 
+@app.route("/api/users/<user_slug>/ownership-timeline")
+def api_user_ownership_timeline(user_slug: str):
+    """Get ownership timeline for subsystems where this user is a top maintainer."""
+    try:
+        from datetime import datetime, timedelta
+        from collections import defaultdict
+        
+        # First, find which subsystems this user is a top maintainer of
+        all_badges = analyze_developer_badges()
+        user_badges = all_badges.get(user_slug, [])
+        
+        # Extract subsystems where user is top maintainer
+        maintainer_subsystems = set()
+        for badge in user_badges:
+            if badge.get("badge_type") == "top_maintainer":
+                maintainer_subsystems.add(badge.get("subsystem"))
+        
+        if not maintainer_subsystems:
+            return jsonify({"timelines": {}})
+        
+        # For each subsystem, calculate the ownership timeline
+        result = {}
+        
+        for subsystem_name in maintainer_subsystems:
+            try:
+                # Get current ownership from blame
+                repos_path = os.path.join(STATS_ROOT, "repos")
+                current_ownership_lines = 0
+                total_current_lines = 0
+                
+                for root, dirs, files in os.walk(repos_path):
+                    if "blame.json" in files:
+                        blame_file = os.path.join(root, "blame.json")
+                        blame_data = load_json(blame_file)
+                        
+                        # Check repo match
+                        if subsystem_name.lower() in blame_data.get("repo", "").lower():
+                            developers = blame_data.get("developers", {})
+                            total_current_lines = blame_data.get("total_lines", 0)
+                            dev_data = developers.get(user_slug, {})
+                            current_ownership_lines = dev_data.get("lines", 0) if isinstance(dev_data, dict) else 0
+                            break
+                        
+                        # Check service match
+                        services = blame_data.get("services", {})
+                        if subsystem_name in services:
+                            service_data = services[subsystem_name]
+                            developers = service_data.get("developers", {})
+                            total_current_lines = service_data.get("total_lines", 0)
+                            dev_data = developers.get(user_slug, {})
+                            if isinstance(dev_data, dict):
+                                current_ownership_lines = dev_data.get("lines", 0)
+                            else:
+                                current_ownership_lines = dev_data if dev_data else 0
+                            break
+                
+                if total_current_lines == 0:
+                    continue
+                
+                # Get monthly changes
+                subsystem_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name)
+                if not os.path.exists(subsystem_path):
+                    continue
+                
+                monthly_net_changes = defaultdict(lambda: defaultdict(int))
+                
+                for period_dir in os.listdir(subsystem_path):
+                    if period_dir == 'languages.json' or '_12-31' in period_dir:
+                        continue
+                    
+                    try:
+                        from_date_str = period_dir.split('_')[0]
+                        period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+                        month_label = period_date.strftime("%Y-%m")
+                        
+                        summary_file = os.path.join(subsystem_path, period_dir, "summary.json")
+                        if not os.path.exists(summary_file):
+                            continue
+                        
+                        summary_data = load_json(summary_file)
+                        for repo_data in summary_data.get("repositories", {}).values():
+                            for dev_slug, dev_data in repo_data.get("developers", {}).items():
+                                lines_added = dev_data.get("lines_added", 0)
+                                lines_deleted = dev_data.get("lines_deleted", 0)
+                                net_lines = lines_added - lines_deleted
+                                monthly_net_changes[dev_slug][month_label] += net_lines
+                    except:
+                        continue
+                
+                # Calculate backward timeline
+                all_months = sorted(set(month for dev_data in monthly_net_changes.values() for month in dev_data.keys()))
+                if not all_months:
+                    continue
+                
+                percentages = []
+                dev_lines = current_ownership_lines
+                total_lines = total_current_lines
+                
+                for month in reversed(all_months):
+                    percentage = (dev_lines / total_lines * 100) if total_lines > 0 else 0
+                    percentages.insert(0, round(percentage, 1))
+                    
+                    dev_lines -= monthly_net_changes[user_slug].get(month, 0)
+                    total_lines -= sum(monthly_net_changes[dev].get(month, 0) for dev in monthly_net_changes.keys())
+                    
+                    dev_lines = max(0, dev_lines)
+                    total_lines = max(1, total_lines)
+                
+                result[subsystem_name] = {
+                    "months": all_months,
+                    "ownership": percentages,
+                    "current_ownership": round((current_ownership_lines / total_current_lines * 100), 1) if total_current_lines > 0 else 0
+                }
+                
+            except Exception as e:
+                print(f"Error calculating timeline for {subsystem_name}: {e}")
+                continue
+        
+        return jsonify({"timelines": result})
+        
+    except Exception as e:
+        print(f"Error generating ownership timeline for user {user_slug}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"timelines": {}, "error": str(e)})
+
+
 @app.route("/api/users/<user_slug>/month/<from_date>/<to_date>")
 def api_user_month(user_slug: str, from_date: str, to_date: str):
     path = find_user_summary(user_slug, from_date, to_date)
@@ -1251,8 +1378,34 @@ def api_subsystem_maintainer_timeline(subsystem_name: str):
                 print(f"Error processing summary file {summary_file}: {e}")
                 continue
         
-        # Get top 5 maintainers by current ownership
-        top_maintainers = sorted(current_ownership.items(), key=lambda x: x[1], reverse=True)[:5]
+        # Get top 5 maintainers by recent activity (last 3 months) - same as top-maintainers endpoint
+        from datetime import timedelta
+        three_months_ago = datetime.now() - timedelta(days=90)
+        recent_activity = defaultdict(int)
+        
+        for period_dir in os.listdir(subsystem_path):
+            if period_dir == 'languages.json' or '_12-31' in period_dir:
+                continue
+            
+            try:
+                from_date_str = period_dir.split('_')[0]
+                period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+                if period_date < three_months_ago:
+                    continue
+                
+                summary_file = os.path.join(subsystem_path, period_dir, "summary.json")
+                if not os.path.exists(summary_file):
+                    continue
+                
+                summary_data = load_json(summary_file)
+                for repo_data in summary_data.get("repositories", {}).values():
+                    for dev_slug, dev_data in repo_data.get("developers", {}).items():
+                        recent_activity[dev_slug] += dev_data.get("commits", 0)
+            except:
+                continue
+        
+        # Select top 5 by recent commits
+        top_maintainers = sorted(recent_activity.items(), key=lambda x: x[1], reverse=True)[:5]
         top_maintainers_slugs = [slug for slug, _ in top_maintainers]
         
         # Build backward timeline

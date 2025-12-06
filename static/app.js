@@ -1944,6 +1944,19 @@ async function renderUserDashboard(user, month, summary) {
       console.error("Error loading user badges:", error);
       // Don't break the UI, just log the error
     });
+    
+    // Load and render ownership timelines for subsystems where user is top maintainer
+    loadUserOwnershipTimeline(user.slug).then(timelines => {
+      try {
+        if (timelines && Object.keys(timelines).length > 0) {
+          renderUserOwnershipTimelines(user.slug, timelines, main);
+        }
+      } catch (error) {
+        console.error("Error rendering ownership timelines:", error);
+      }
+    }).catch(error => {
+      console.error("Error loading ownership timelines:", error);
+    });
   }
 
   // Per-repo breakdown
@@ -3069,10 +3082,9 @@ async function addTopMaintainersSection(container, subsystemName) {
     );
     
     const maintainersPromise = fetchJSON("/api/subsystems/" + encodeURIComponent(subsystemName) + "/top-maintainers");
-    const timelinePromise = fetchJSON("/api/subsystems/" + encodeURIComponent(subsystemName) + "/maintainer-timeline");
     
-    const [maintainers, timeline] = await Promise.race([
-      Promise.all([maintainersPromise, timelinePromise]),
+    const maintainers = await Promise.race([
+      maintainersPromise,
       timeoutPromise
     ]);
     
@@ -3100,22 +3112,6 @@ async function addTopMaintainersSection(container, subsystemName) {
         li.appendChild(nameElement);
         li.appendChild(statsElement);
         maintainerList.appendChild(li);
-        
-        // Add monthly timeline chart for this maintainer if data exists
-        if (timeline.timeline && timeline.timeline[maintainer.slug]) {
-          const chartContainer = document.createElement("div");
-          chartContainer.className = "maintainer-timeline-chart";
-          
-          const canvas = document.createElement("canvas");
-          canvas.id = `maintainer-timeline-${subsystemName}-${index}`;
-          chartContainer.appendChild(canvas);
-          li.appendChild(chartContainer);
-          
-          // Create chart after DOM insertion
-          setTimeout(() => {
-            createMaintainerTimelineChart(canvas.id, maintainer.display_name, timeline.timeline[maintainer.slug]);
-          }, 100);
-        }
       });
 
       maintainerCard.appendChild(maintainerList);
@@ -8430,4 +8426,146 @@ function showDateNotification(formattedDate, commits, dateStr) {
     };
     document.addEventListener('click', clickOutsideHandler);
   }, 100);
+}
+async function loadUserOwnershipTimeline(userSlug) {
+  try {
+    const response = await fetchJSON(`/api/users/${encodeURIComponent(userSlug)}/ownership-timeline`);
+    return response.timelines || {};
+  } catch (err) {
+    console.error("Failed to load ownership timeline for", userSlug, ":", err);
+    return {};
+  }
+}
+
+function renderUserOwnershipTimelines(userSlug, timelines, container) {
+  if (!timelines || Object.keys(timelines).length === 0) {
+    return;
+  }
+  
+  const timelineCard = document.createElement("div");
+  timelineCard.className = "card";
+  timelineCard.innerHTML = '<h2>📈 Ownership Evolution</h2><p style="margin-bottom: 16px; color: #94a3b8;">Your ownership trends in subsystems where you are a top maintainer</p>';
+  
+  const timelinesContainer = document.createElement("div");
+  timelinesContainer.style.display = "grid";
+  timelinesContainer.style.gap = "20px";
+  
+  Object.entries(timelines).forEach(([subsystemName, timelineData], index) => {
+    const subsystemContainer = document.createElement("div");
+    subsystemContainer.style.marginBottom = "10px";
+    
+    // Subsystem title with current ownership
+    const titleDiv = document.createElement("div");
+    titleDiv.style.marginBottom = "8px";
+    titleDiv.innerHTML = `<strong style="color: #e2e8f0;">${subsystemName}</strong> <span style="color: #94a3b8; font-size: 0.9em;">(Current: ${timelineData.current_ownership}%)</span>`;
+    subsystemContainer.appendChild(titleDiv);
+    
+    // Chart container
+    const chartContainer = document.createElement("div");
+    chartContainer.className = "maintainer-timeline-chart";
+    chartContainer.style.height = "200px";
+    
+    const canvas = document.createElement("canvas");
+    canvas.id = `user-ownership-timeline-${userSlug}-${index}`;
+    chartContainer.appendChild(canvas);
+    subsystemContainer.appendChild(chartContainer);
+    
+    timelinesContainer.appendChild(subsystemContainer);
+    
+    // Create chart
+    setTimeout(() => {
+      createUserOwnershipChart(canvas.id, subsystemName, timelineData);
+    }, 100);
+  });
+  
+  timelineCard.appendChild(timelinesContainer);
+  container.appendChild(timelineCard);
+}
+
+function createUserOwnershipChart(canvasId, subsystemName, timelineData) {
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) {
+    console.error("Canvas not found:", canvasId);
+    return;
+  }
+  
+  // Calculate dynamic Y-axis range
+  const values = timelineData.ownership;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  
+  // Add 10% padding above and below for better visualization
+  const range = maxValue - minValue;
+  const padding = range * 0.1;
+  const yMin = Math.max(0, minValue - padding);
+  const yMax = Math.min(100, maxValue + padding);
+  
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: timelineData.months,
+      datasets: [{
+        label: "Ownership %",
+        data: timelineData.ownership,
+        backgroundColor: "rgba(75, 192, 192, 0.1)",
+        borderColor: "rgba(75, 192, 192, 1)",
+        borderWidth: 2,
+        fill: true,
+        tension: 0.4,
+        pointRadius: 4,
+        pointBackgroundColor: "rgba(75, 192, 192, 1)",
+        pointBorderColor: "#fff",
+        pointBorderWidth: 2,
+        pointHoverRadius: 6
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: false
+        },
+        title: {
+          display: false
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              return context.parsed.y.toFixed(1) + '% ownership';
+            }
+          }
+        }
+      },
+      scales: {
+        y: {
+          min: yMin,
+          max: yMax,
+          ticks: {
+            callback: function(value) {
+              return value.toFixed(1) + '%';
+            },
+            font: {
+              size: 11
+            }
+          },
+          grid: {
+            color: 'rgba(0, 0, 0, 0.05)'
+          }
+        },
+        x: {
+          ticks: {
+            font: {
+              size: 10
+            },
+            maxRotation: 45,
+            minRotation: 45
+          },
+          grid: {
+            display: false
+          }
+        }
+      }
+    }
+  });
 }
