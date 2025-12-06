@@ -750,10 +750,8 @@ def merge_author_data(target_authors: Dict[AuthorKey, Dict[str, Any]],
             
             # Merge basic stats
             target_data["total_commits"] += source_data.get("total_commits", 0)
-            target_data["total_additions"] += source_data.get("total_additions", 0)
-            target_data["total_deletions"] += source_data.get("total_deletions", 0)
-            target_data["total_net_lines"] = target_data["total_additions"] - target_data["total_deletions"]
-            target_data["total_changed_lines"] += source_data.get("total_changed_lines", 0)
+            target_data["total_lines_added"] += source_data.get("total_lines_added", 0)
+            target_data["total_lines_deleted"] += source_data.get("total_lines_deleted", 0)
             
             # Merge language stats
             for lang, source_lang_data in source_data.get("languages", {}).items():
@@ -807,6 +805,46 @@ def merge_author_data(target_authors: Dict[AuthorKey, Dict[str, Any]],
                     target_date_data["additions"] += source_date_data.get("additions", 0)
                     target_date_data["deletions"] += source_date_data.get("deletions", 0)
                     target_date_data["net_lines"] = target_date_data["additions"] - target_date_data["deletions"]
+            
+            # Merge per_repo stats
+            for repo_name, source_repo_data in source_data.get("per_repo", {}).items():
+                if repo_name not in target_data["per_repo"]:
+                    target_data["per_repo"][repo_name] = source_repo_data.copy()
+                else:
+                    target_repo_data = target_data["per_repo"][repo_name]
+                    target_repo_data["commits"] += source_repo_data.get("commits", 0)
+                    target_repo_data["additions"] += source_repo_data.get("additions", 0)
+                    target_repo_data["deletions"] += source_repo_data.get("deletions", 0)
+                    target_repo_data["net_lines"] = target_repo_data["additions"] - target_repo_data["deletions"]
+                    
+                    # Merge per-repo language stats
+                    for lang, source_lang_data in source_repo_data.get("languages", {}).items():
+                        if lang not in target_repo_data["languages"]:
+                            target_repo_data["languages"][lang] = source_lang_data.copy()
+                        else:
+                            target_lang_data = target_repo_data["languages"][lang]
+                            target_lang_data["additions"] += source_lang_data.get("additions", 0)
+                            target_lang_data["deletions"] += source_lang_data.get("deletions", 0)
+                            target_lang_data["net_lines"] = target_lang_data["additions"] - target_lang_data["deletions"]
+                    
+                    # Merge per-repo code_type stats
+                    for code_type, source_ct_data in source_repo_data.get("code_type", {}).items():
+                        if code_type not in target_repo_data["code_type"]:
+                            target_repo_data["code_type"][code_type] = source_ct_data.copy()
+                        else:
+                            target_ct_data = target_repo_data["code_type"][code_type]
+                            target_ct_data["additions"] += source_ct_data.get("additions", 0)
+                            target_ct_data["deletions"] += source_ct_data.get("deletions", 0)
+                            target_ct_data["net_lines"] = target_ct_data["additions"] - target_ct_data["deletions"]
+                    
+                    # Merge per-repo documentation stats
+                    if "documentation" in source_repo_data:
+                        if "documentation" not in target_repo_data:
+                            target_repo_data["documentation"] = source_repo_data["documentation"].copy()
+                        else:
+                            target_repo_data["documentation"]["additions"] += source_repo_data["documentation"].get("additions", 0)
+                            target_repo_data["documentation"]["deletions"] += source_repo_data["documentation"].get("deletions", 0)
+                            target_repo_data["documentation"]["net_lines"] = target_repo_data["documentation"]["additions"] - target_repo_data["documentation"]["deletions"]
 
 
 def main() -> None:
