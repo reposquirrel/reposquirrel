@@ -3732,3 +3732,31 @@ body {
 .btn-danger:hover {
   background: #b91c1c;
 }
+
+.maintainer-timeline-chart canvas {
+  max-height: 150px;
+}
+
+/* Maintainer Timeline Charts */
+.maintainer-timeline-chart {
+  background: #0a0f1e;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.maintainer-timeline-chart canvas {
+  max-height: 180px;
+}
+
+/* Make sure maintainer list items have proper spacing */
+.link-list-item {
+  display: block;
+  padding: 12px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.link-list-item:last-child {
+  border-bottom: none;
+}

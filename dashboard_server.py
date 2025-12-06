@@ -1155,6 +1155,131 @@ def api_subsystem_top_maintainers(subsystem_name: str):
         abort(500, description=f"Error analyzing top maintainers: {str(e)}")
 
 
+@app.route("/api/subsystems/<subsystem_name>/maintainer-timeline")
+def api_subsystem_maintainer_timeline(subsystem_name: str):
+    """Get historical ownership percentage timeline based on current blame data and monthly changes."""
+    try:
+        from datetime import datetime
+        from collections import defaultdict
+        
+        subsystem_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name)
+        if not os.path.exists(subsystem_path):
+            return jsonify({"timeline": {}})
+        
+        # First, get current ownership from blame data
+        repos_path = os.path.join(STATS_ROOT, "repos")
+        current_ownership = {}  # {dev_slug: lines_owned}
+        total_current_lines = 0
+        
+        # Look for blame data for this subsystem
+        for root, dirs, files in os.walk(repos_path):
+            if "blame.json" in files:
+                blame_file = os.path.join(root, "blame.json")
+                try:
+                    blame_data = load_json(blame_file)
+                    # Check if this is the right subsystem
+                    if subsystem_name.lower() in blame_data.get("repo", "").lower():
+                        developers = blame_data.get("developers", {})
+                        total_current_lines = blame_data.get("total_lines", 0)
+                        for dev_slug, dev_data in developers.items():
+                            current_ownership[dev_slug] = dev_data.get("lines", 0)
+                        break
+                except Exception as e:
+                    continue
+        
+        if not current_ownership or total_current_lines == 0:
+            return jsonify({"timeline": {}})
+        
+        # Now get monthly net line changes (lines_added - lines_deleted)
+        # Structure: {dev_slug: {month: net_lines}}
+        monthly_net_changes = defaultdict(lambda: defaultdict(int))
+        
+        # Look for monthly summary files
+        for period_dir in os.listdir(subsystem_path):
+            period_path = os.path.join(subsystem_path, period_dir)
+            if not os.path.isdir(period_path):
+                continue
+            
+            # Skip yearly summaries
+            if "_2025-12-31" in period_dir or "_2024-12-31" in period_dir:
+                continue
+            
+            # Parse date range from directory name
+            try:
+                date_parts = period_dir.split("_")
+                if len(date_parts) != 2:
+                    continue
+                
+                from_date_str = date_parts[0]
+                period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+                month_label = period_date.strftime("%Y-%m")
+                
+            except (ValueError, IndexError):
+                continue
+            
+            summary_file = os.path.join(period_path, "summary.json")
+            if not os.path.exists(summary_file):
+                continue
+            
+            try:
+                summary_data = load_json(summary_file)
+                
+                repositories = summary_data.get("repositories", {})
+                for repo_data in repositories.values():
+                    developers = repo_data.get("developers", {})
+                    for dev_slug, dev_data in developers.items():
+                        lines_added = dev_data.get("lines_added", 0)
+                        lines_deleted = dev_data.get("lines_deleted", 0)
+                        net_lines = lines_added - lines_deleted
+                        monthly_net_changes[dev_slug][month_label] += net_lines
+            
+            except Exception as e:
+                print(f"Error processing summary file {summary_file}: {e}")
+                continue
+        
+        # Get top 5 maintainers by current ownership
+        top_maintainers = sorted(current_ownership.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_maintainers_slugs = [slug for slug, _ in top_maintainers]
+        
+        # Build backward timeline
+        result = {}
+        all_months = sorted(set(month for dev_data in monthly_net_changes.values() for month in dev_data.keys()))
+        
+        for dev_slug in top_maintainers_slugs:
+            percentages = []
+            
+            # Start with current ownership
+            dev_lines = current_ownership.get(dev_slug, 0)
+            total_lines = total_current_lines
+            
+            # Work backwards through months (reverse chronological order)
+            for month in reversed(all_months):
+                # Calculate ownership at this point in time
+                percentage = (dev_lines / total_lines * 100) if total_lines > 0 else 0
+                percentages.insert(0, round(percentage, 1))  # Insert at beginning since we're going backwards
+                
+                # Subtract this month's changes to get previous month's state
+                dev_lines -= monthly_net_changes[dev_slug].get(month, 0)
+                total_lines -= sum(monthly_net_changes[dev].get(month, 0) for dev in monthly_net_changes.keys())
+                
+                # Don't let values go negative
+                dev_lines = max(0, dev_lines)
+                total_lines = max(1, total_lines)  # Avoid division by zero
+            
+            result[dev_slug] = {
+                "months": all_months,
+                "ownership": percentages
+            }
+        
+        return jsonify({"timeline": result})
+        
+    except Exception as e:
+        print(f"Error in maintainer timeline: {e}")
+        import traceback
+        traceback.print_exc()
+        abort(500, description=f"Error generating maintainer timeline: {str(e)}")
+
+
 @app.route("/api/subsystems/<subsystem_name>/significant-ownership")
 def api_subsystem_significant_ownership(subsystem_name: str):
     """Get developers with >10% ownership of a subsystem."""

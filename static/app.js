@@ -3069,8 +3069,12 @@ async function addTopMaintainersSection(container, subsystemName) {
     );
     
     const maintainersPromise = fetchJSON("/api/subsystems/" + encodeURIComponent(subsystemName) + "/top-maintainers");
+    const timelinePromise = fetchJSON("/api/subsystems/" + encodeURIComponent(subsystemName) + "/maintainer-timeline");
     
-    const maintainers = await Promise.race([maintainersPromise, timeoutPromise]);
+    const [maintainers, timeline] = await Promise.race([
+      Promise.all([maintainersPromise, timelinePromise]),
+      timeoutPromise
+    ]);
     
     if (maintainers.maintainers && maintainers.maintainers.length > 0) {
       console.log("Found", maintainers.maintainers.length, "top maintainers for", subsystemName);
@@ -3082,7 +3086,7 @@ async function addTopMaintainersSection(container, subsystemName) {
       const maintainerList = document.createElement("ul");
       maintainerList.className = "link-list";
 
-      maintainers.maintainers.forEach((maintainer) => {
+      maintainers.maintainers.forEach((maintainer, index) => {
         const li = document.createElement("li");
         li.className = "link-list-item";
         
@@ -3096,6 +3100,22 @@ async function addTopMaintainersSection(container, subsystemName) {
         li.appendChild(nameElement);
         li.appendChild(statsElement);
         maintainerList.appendChild(li);
+        
+        // Add monthly timeline chart for this maintainer if data exists
+        if (timeline.timeline && timeline.timeline[maintainer.slug]) {
+          const chartContainer = document.createElement("div");
+          chartContainer.className = "maintainer-timeline-chart";
+          
+          const canvas = document.createElement("canvas");
+          canvas.id = `maintainer-timeline-${subsystemName}-${index}`;
+          chartContainer.appendChild(canvas);
+          li.appendChild(chartContainer);
+          
+          // Create chart after DOM insertion
+          setTimeout(() => {
+            createMaintainerTimelineChart(canvas.id, maintainer.display_name, timeline.timeline[maintainer.slug]);
+          }, 100);
+        }
       });
 
       maintainerCard.appendChild(maintainerList);
@@ -3107,6 +3127,104 @@ async function addTopMaintainersSection(container, subsystemName) {
     console.error("Failed to load top maintainers for", subsystemName, ":", error);
     // Don't show error to user, just skip this section
   }
+}
+
+function createMaintainerTimelineChart(canvasId, maintainerName, timelineData) {
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) {
+    console.error("Canvas not found:", canvasId);
+    return;
+  }
+  
+  // Calculate dynamic Y-axis range
+  const values = timelineData.ownership;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  
+  // Add 10% padding above and below for better visualization
+  const range = maxValue - minValue;
+  const padding = range * 0.1;
+  const yMin = Math.max(0, minValue - padding); // Don't go below 0
+  const yMax = Math.min(100, maxValue + padding); // Don't go above 100
+  
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: timelineData.months,
+      datasets: [{
+        label: "Ownership %",
+        data: timelineData.ownership,
+        backgroundColor: "rgba(75, 192, 192, 0.1)",
+        borderColor: "rgba(75, 192, 192, 1)",
+        borderWidth: 2,
+        fill: true,
+        tension: 0.4,
+        pointRadius: 4,
+        pointBackgroundColor: "rgba(75, 192, 192, 1)",
+        pointBorderColor: "#fff",
+        pointBorderWidth: 2,
+        pointHoverRadius: 6
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: false
+        },
+        title: {
+          display: true,
+          text: `${maintainerName} - Cumulative Ownership`,
+          align: 'start',
+          font: {
+            size: 13,
+            weight: '600'
+          },
+          padding: {
+            top: 5,
+            bottom: 10
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              return context.parsed.y.toFixed(1) + '% of total contributions';
+            }
+          }
+        }
+      },
+      scales: {
+        y: {
+          min: yMin,
+          max: yMax,
+          ticks: {
+            callback: function(value) {
+              return value.toFixed(1) + '%';
+            },
+            font: {
+              size: 11
+            }
+          },
+          grid: {
+            color: 'rgba(0, 0, 0, 0.05)'
+          }
+        },
+        x: {
+          ticks: {
+            font: {
+              size: 10
+            },
+            maxRotation: 45,
+            minRotation: 45
+          },
+          grid: {
+            display: false
+          }
+        }
+      }
+    }
+  });
 }
 
 async function addSubsystemLanguageSection(container, subsystemName) {
