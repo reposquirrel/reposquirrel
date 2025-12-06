@@ -833,6 +833,80 @@ def api_user_badges(user_slug: str):
         return jsonify({"badges": [], "error": str(e)})
 
 
+@app.route("/api/developers/total-ownership")
+def api_developers_total_ownership():
+    """Get total lines owned by each developer across all subsystems."""
+    try:
+        from collections import defaultdict
+        
+        developer_lines = defaultdict(lambda: {"lines": 0, "subsystems": [], "display_name": ""})
+        
+        # Walk through all blame files
+        repos_path = os.path.join(STATS_ROOT, "repos")
+        
+        for root, dirs, files in os.walk(repos_path):
+            if "blame.json" in files:
+                blame_file = os.path.join(root, "blame.json")
+                try:
+                    blame_data = load_json(blame_file)
+                    repo_name = blame_data.get("repo", "").split("/")[-1]
+                    
+                    # Process main repo developers
+                    developers = blame_data.get("developers", {})
+                    for dev_slug, dev_data in developers.items():
+                        lines = dev_data.get("lines", 0)
+                        if lines > 0:
+                            developer_lines[dev_slug]["lines"] += lines
+                            developer_lines[dev_slug]["subsystems"].append(repo_name)
+                            if not developer_lines[dev_slug]["display_name"]:
+                                developer_lines[dev_slug]["display_name"] = dev_data.get("display_name", dev_slug)
+                    
+                    # Process service-level developers
+                    services = blame_data.get("services", {})
+                    for service_name, service_data in services.items():
+                        service_developers = service_data.get("developers", {})
+                        for dev_slug, dev_data in service_developers.items():
+                            if isinstance(dev_data, dict):
+                                lines = dev_data.get("lines", 0)
+                                display_name = dev_data.get("display_name", dev_slug)
+                            else:
+                                lines = dev_data if isinstance(dev_data, int) else 0
+                                display_name = dev_slug
+                            
+                            if lines > 0:
+                                developer_lines[dev_slug]["lines"] += lines
+                                if service_name not in developer_lines[dev_slug]["subsystems"]:
+                                    developer_lines[dev_slug]["subsystems"].append(service_name)
+                                if not developer_lines[dev_slug]["display_name"]:
+                                    developer_lines[dev_slug]["display_name"] = display_name
+                
+                except Exception as e:
+                    print(f"Error processing blame file {blame_file}: {e}")
+                    continue
+        
+        # Convert to list format
+        result = []
+        for dev_slug, data in developer_lines.items():
+            result.append({
+                "slug": dev_slug,
+                "display_name": data["display_name"],
+                "total_lines": data["lines"],
+                "subsystem_count": len(set(data["subsystems"])),
+                "subsystems": list(set(data["subsystems"]))
+            })
+        
+        # Sort by total lines (descending)
+        result.sort(key=lambda x: x["total_lines"], reverse=True)
+        
+        return jsonify({"developers": result})
+        
+    except Exception as e:
+        print(f"Error calculating total ownership: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"developers": [], "error": str(e)})
+
+
 @app.route("/api/users/<user_slug>/ownership-timeline")
 def api_user_ownership_timeline(user_slug: str):
     """Get ownership timeline for subsystems where this user is a top maintainer."""

@@ -4547,6 +4547,63 @@ async function addOwnershipStatistics(container, abortSignal) {
       contentLayout.appendChild(topOwnersDiv);
       ownershipSection.appendChild(contentLayout);
     }
+    
+    // Add Top 20 Code Owners by Total Lines
+    try {
+      const totalOwnershipResponse = await fetchJSON('/api/developers/total-ownership');
+      
+      if (totalOwnershipResponse.developers && totalOwnershipResponse.developers.length > 0) {
+        const topCodeOwnersCard = document.createElement("div");
+        topCodeOwnersCard.className = "ranking-list-no-scroll";
+        topCodeOwnersCard.style.marginTop = "20px";
+        topCodeOwnersCard.innerHTML = `
+          <div class="ranking-header">
+            <span class="ranking-emoji">💎</span>
+            <div class="title-with-help">
+              <div>
+                <h3 style="margin: 0;">Top 20 Code Owners</h3>
+                <p class="ranking-subtitle">By total lines owned across all subsystems</p>
+              </div>
+            </div>
+          </div>
+        `;
+        
+        const topCodeOwnersList = document.createElement("div");
+        topCodeOwnersList.className = "ranking-items";
+        
+        totalOwnershipResponse.developers.slice(0, 20).forEach((dev, index) => {
+          const isActive = state.users.some(u => u.slug === dev.slug);
+          const item = document.createElement("div");
+          item.className = isActive ? "ranking-item clickable" : "ranking-item inactive";
+          
+          if (isActive) {
+            item.onclick = () => navigateToUser(dev.slug);
+          } else {
+            item.style.cursor = "default";
+            item.title = "Inactive contributor (no recent activity in analysis period)";
+          }
+          
+          const nameStyle = isActive ? "" : ' style="color: #dc2626; font-style: italic;"';
+          const subsystemsText = dev.subsystem_count === 1 ? '1 subsystem' : `${dev.subsystem_count} subsystems`;
+          
+          item.innerHTML = `
+            <span class="ranking-position">#${index + 1}</span>
+            <span class="ranking-name"${nameStyle}>${dev.display_name}</span>
+            <div class="ranking-meta">
+              <span class="ranking-value">${dev.total_lines.toLocaleString()} lines</span>
+              <span class="ranking-subtext">${subsystemsText}</span>
+            </div>
+          `;
+          topCodeOwnersList.appendChild(item);
+        });
+        
+        topCodeOwnersCard.appendChild(topCodeOwnersList);
+        ownershipSection.appendChild(topCodeOwnersCard);
+      }
+    } catch (error) {
+      console.error("Error loading total code ownership:", error);
+      // Don't break the section, just skip this list
+    }
 
   } catch (error) {
     console.error("Error loading ownership statistics:", error);

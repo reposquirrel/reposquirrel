@@ -631,6 +631,10 @@ body {
   flex-direction: column;
   gap: 6px;
   margin: 16px 0;
+  background: rgba(17, 24, 39, 0.6);
+  border: 1px solid #374151;
+  border-radius: 12px;
+  padding: 20px;
 }
 
 .ranking-item {
