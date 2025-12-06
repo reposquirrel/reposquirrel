@@ -3790,7 +3790,9 @@ def api_teams_overview():
                         # Sum up all language code lines
                         for lang_name, lang_info in lang_data.get("languages", {}).items():
                             if isinstance(lang_info, dict):
-                                team_stats["responsible_lines_of_code"] += lang_info.get("lines", 0)
+                                # Try code_lines first (cloc format), then fall back to lines
+                                lines = lang_info.get("code_lines", lang_info.get("lines", 0))
+                                team_stats["responsible_lines_of_code"] += lines
             except (json.JSONDecodeError, IOError, KeyError):
                 # If we can't load language data, skip this subsystem
                 pass

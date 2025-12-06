@@ -3463,124 +3463,113 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
       // For yearly view, get all monthly summaries for the year
       const monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
       
-      // Process each monthly summary to extract daily commit data
+      // Process each monthly summary to extract developers and get their real daily data
       for (const monthSummary of monthlyData) {
-      if (monthSummary.repositories) {
-        // Aggregate commits from all repositories in this subsystem
-        for (const [repoName, repoData] of Object.entries(monthSummary.repositories)) {
-          const developers = repoData.developers || {};
+        if (monthSummary.repositories) {
+          // Collect all developers who worked in this subsystem this month
+          const subsystemDevelopers = new Set();
           
-          // For each developer, we need to distribute their monthly commits across the month
-          // Since we don't have daily data in the subsystem summaries, we'll use a simple distribution
-          for (const [devSlug, devData] of Object.entries(developers)) {
-            const commits = devData.commits || 0;
-            if (commits > 0) {
-              // Get the month range from the summary
-              const fromDate = monthSummary.from;
-              const toDate = monthSummary.to;
+          for (const [repoName, repoData] of Object.entries(monthSummary.repositories)) {
+            const developers = repoData.developers || {};
+            for (const devSlug of Object.keys(developers)) {
+              subsystemDevelopers.add(devSlug);
+            }
+          }
+          
+          // For each developer, fetch their actual daily commit data for this month
+          const fromDate = monthSummary.from;
+          const toDate = monthSummary.to;
+          
+          for (const devSlug of subsystemDevelopers) {
+            try {
+              const userMonthData = await fetchJSON(`/api/users/${encodeURIComponent(devSlug)}/month/${encodeURIComponent(fromDate)}/${encodeURIComponent(toDate)}`);
               
-              // Simple distribution: spread commits evenly across the month
-              // This is a reasonable approximation for visualization purposes
-              const monthStart = new Date(fromDate);
-              const monthEnd = new Date(toDate);
-              const daysInMonth = Math.ceil((monthEnd - monthStart) / (24 * 60 * 60 * 1000)) + 1;
+              // Get per_date data and filter for commits to this subsystem's repos
+              const perDate = userMonthData.per_date || {};
+              const perRepo = userMonthData.per_repo || {};
               
-              // Distribute commits randomly across the month for visual effect
-              const daysWithCommits = Math.min(commits, daysInMonth);
-              const selectedDays = new Set();
+              // Get list of repos in this subsystem
+              const subsystemRepos = Object.keys(monthSummary.repositories);
               
-              // Select random days for commits
-              while (selectedDays.size < daysWithCommits && selectedDays.size < 10) {
-                const randomDay = Math.floor(Math.random() * daysInMonth);
-                selectedDays.add(randomDay);
+              // Check if user has commits in any of the subsystem repos
+              const hasSubsystemWork = subsystemRepos.some(repo => perRepo[repo] && perRepo[repo].commits > 0);
+              
+              if (hasSubsystemWork) {
+                // Add this user's daily commits (approximation: count all their daily commits for this month)
+                for (const [dateStr, dateData] of Object.entries(perDate)) {
+                  if (dateData.commits > 0) {
+                    if (!dailyCommits[dateStr]) {
+                      dailyCommits[dateStr] = { commits: 0 };
+                    }
+                    // Add a proportional share based on subsystem repos vs total repos
+                    const subsystemCommits = subsystemRepos.reduce((sum, repo) => {
+                      return sum + (perRepo[repo]?.commits || 0);
+                    }, 0);
+                    const totalMonthCommits = userMonthData.total_commits || 1;
+                    const proportion = subsystemCommits / totalMonthCommits;
+                    dailyCommits[dateStr].commits += Math.round(dateData.commits * proportion);
+                  }
+                }
               }
-              
-              // Distribute commits across selected days
-              const commitsPerDay = Math.floor(commits / daysWithCommits);
-              const extraCommits = commits % daysWithCommits;
-              let extraAssigned = 0;
-              
-              selectedDays.forEach(dayOffset => {
-                const currentDate = new Date(monthStart);
-                currentDate.setDate(monthStart.getDate() + dayOffset);
-                const dateStr = currentDate.toISOString().split('T')[0];
-                
-                if (!dailyCommits[dateStr]) {
-                  dailyCommits[dateStr] = { commits: 0 };
-                }
-                
-                let dayCommits = commitsPerDay;
-                if (extraAssigned < extraCommits) {
-                  dayCommits++;
-                  extraAssigned++;
-                }
-                
-                dailyCommits[dateStr].commits += dayCommits;
-              });
+            } catch (error) {
+              console.warn(`Could not fetch daily data for ${devSlug}:`, error);
             }
           }
         }
       }
-      } // Close for monthly data loop
     } else {
-      // For monthly view, only collect and show the selected month's data
+      // For monthly view, get real daily data from users
       const monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
       
       // Process only the month that matches our selected period
       for (const monthSummary of monthlyData) {
         if (monthSummary.repositories && monthSummary.from >= period.from && monthSummary.to <= period.to) {
-          // This is the selected month - include its data
+          // Collect all developers who worked in this subsystem this month
+          const subsystemDevelopers = new Set();
           
-          // Aggregate commits from all repositories in this subsystem
           for (const [repoName, repoData] of Object.entries(monthSummary.repositories)) {
             const developers = repoData.developers || {};
-            
-            // For each developer, distribute their monthly commits across the month
-            for (const [devSlug, devData] of Object.entries(developers)) {
-              const commits = devData.commits || 0;
-              if (commits > 0) {
-                // Get the month range from the summary
-                const fromDate = monthSummary.from;
-                const toDate = monthSummary.to;
-                
-                // Simple distribution: spread commits evenly across the month
-                const monthStart = new Date(fromDate);
-                const monthEnd = new Date(toDate);
-                const daysInMonth = Math.ceil((monthEnd - monthStart) / (24 * 60 * 60 * 1000)) + 1;
-                
-                // Distribute commits randomly across the month for visual effect
-                const daysWithCommits = Math.min(commits, daysInMonth);
-                const selectedDays = new Set();
-                
-                // Select random days for commits
-                while (selectedDays.size < daysWithCommits && selectedDays.size < 10) {
-                  const randomDay = Math.floor(Math.random() * daysInMonth);
-                  selectedDays.add(randomDay);
+            for (const devSlug of Object.keys(developers)) {
+              subsystemDevelopers.add(devSlug);
+            }
+          }
+          
+          // For each developer, fetch their actual daily commit data
+          const fromDate = monthSummary.from;
+          const toDate = monthSummary.to;
+          
+          for (const devSlug of subsystemDevelopers) {
+            try {
+              const userMonthData = await fetchJSON(`/api/users/${encodeURIComponent(devSlug)}/month/${encodeURIComponent(fromDate)}/${encodeURIComponent(toDate)}`);
+              
+              const perDate = userMonthData.per_date || {};
+              const perRepo = userMonthData.per_repo || {};
+              
+              // Get list of repos in this subsystem
+              const subsystemRepos = Object.keys(monthSummary.repositories);
+              
+              // Check if user has commits in any of the subsystem repos
+              const hasSubsystemWork = subsystemRepos.some(repo => perRepo[repo] && perRepo[repo].commits > 0);
+              
+              if (hasSubsystemWork) {
+                // Add this user's daily commits (proportional to subsystem work)
+                for (const [dateStr, dateData] of Object.entries(perDate)) {
+                  if (dateData.commits > 0) {
+                    if (!dailyCommits[dateStr]) {
+                      dailyCommits[dateStr] = { commits: 0, isHighlighted: true };
+                    }
+                    // Calculate proportion of work in this subsystem
+                    const subsystemCommits = subsystemRepos.reduce((sum, repo) => {
+                      return sum + (perRepo[repo]?.commits || 0);
+                    }, 0);
+                    const totalMonthCommits = userMonthData.total_commits || 1;
+                    const proportion = subsystemCommits / totalMonthCommits;
+                    dailyCommits[dateStr].commits += Math.round(dateData.commits * proportion);
+                  }
                 }
-                
-                // Distribute commits across selected days
-                const commitsPerDay = Math.floor(commits / daysWithCommits);
-                const extraCommits = commits % daysWithCommits;
-                let extraAssigned = 0;
-                
-                selectedDays.forEach(dayOffset => {
-                  const currentDate = new Date(monthStart);
-                  currentDate.setDate(monthStart.getDate() + dayOffset);
-                  const dateStr = currentDate.toISOString().split('T')[0];
-                  
-                  if (!dailyCommits[dateStr]) {
-                    dailyCommits[dateStr] = { commits: 0, isHighlighted: true };
-                  }
-                  
-                  let dayCommits = commitsPerDay;
-                  if (extraAssigned < extraCommits) {
-                    dayCommits++;
-                    extraAssigned++;
-                  }
-                  
-                  dailyCommits[dateStr].commits += dayCommits;
-                });
               }
+            } catch (error) {
+              console.warn(`Could not fetch daily data for ${devSlug}:`, error);
             }
           }
         }
@@ -4096,7 +4085,7 @@ async function showUsersOverviewDashboard() {
     progressTracker.show();
     progressTracker.addTask('badge-stats', 'Achievement Badge Analysis');
     progressTracker.addTask('ownership-stats', 'Code Ownership Statistics');
-    progressTracker.addTask('ownership-changes', 'Ownership Change Analysis');
+    // 'ownership-changes' task removed - feature disabled due to fake data
     
     // Badge Statistics
     try {
@@ -4126,7 +4115,9 @@ async function showUsersOverviewDashboard() {
       progressTracker.completeTask('ownership-stats', false);
     }
     
-    // Ownership Changes Analysis
+    // Ownership Changes Analysis - REMOVED (was using simulated/fake data)
+    // Real ownership trends are available on individual developer pages
+    /*
     try {
       await addOwnershipChangesAnalysis(main, progressTracker.getAbortSignal());
       progressTracker.completeTask('ownership-changes');
@@ -4139,6 +4130,7 @@ async function showUsersOverviewDashboard() {
       console.error("Ownership changes failed:", error);
       progressTracker.completeTask('ownership-changes', false);
     }
+    */
     
     state.loadingUsersOverview = false;
     console.log("Users overview dashboard loading completed");
@@ -4456,6 +4448,8 @@ async function addOwnershipStatistics(container, abortSignal) {
   }
 }
 
+/* REMOVED - This function used simulated/fake ownership change data
+   Real ownership trends are now available on individual developer detail pages
 async function addOwnershipChangesAnalysis(container, abortSignal) {
   try {
     console.log("Analyzing ownership changes for users overview...");
@@ -4475,7 +4469,7 @@ async function addOwnershipChangesAnalysis(container, abortSignal) {
     ownershipChangesSection.className = "card ownership-changes-section";
     ownershipChangesSection.innerHTML = createTitleWithTooltip(
       "📈 Active Contributors - Ownership Patterns", 
-      "Shows ownership distribution patterns for currently active developers. Only includes contributors with recent activity in the analysis period. Note: Historical change tracking requires backend enhancement.",
+      "Shows current code ownership distribution for active developers. Changes shown are estimated patterns based on current ownership levels. For accurate historical ownership trends, view individual developer pages.",
       "h2"
     );
 
@@ -4718,6 +4712,7 @@ async function addOwnershipChangesAnalysis(container, abortSignal) {
     // Don't break the overview, just skip ownership changes section
   }
 }
+*/ // End of removed addOwnershipChangesAnalysis function
 
 async function showTeamsOverviewDashboard() {
   try {
