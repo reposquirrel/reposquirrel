@@ -956,11 +956,47 @@ def api_user_ownership_timeline(user_slug: str):
         all_badges = analyze_developer_badges()
         user_badges = all_badges.get(user_slug, [])
         
-        # Extract subsystems where user is top maintainer
+        # Extract subsystems where user is top maintainer (from badges)
         maintainer_subsystems = set()
         for badge in user_badges:
             if badge.get("badge_type") == "top_maintainer":
                 maintainer_subsystems.add(badge.get("subsystem"))
+        
+        # Also check subsystems where user appears in top maintainers (by recent commits)
+        subsystems_path = os.path.join(STATS_ROOT, "subsystems")
+        if os.path.exists(subsystems_path):
+            three_months_ago = datetime.now() - timedelta(days=90)
+            for subsystem_name in os.listdir(subsystems_path):
+                subsystem_path = os.path.join(subsystems_path, subsystem_name)
+                if not os.path.isdir(subsystem_path):
+                    continue
+                
+                # Check recent activity
+                has_recent_commits = False
+                for period_dir in os.listdir(subsystem_path):
+                    if not os.path.isdir(os.path.join(subsystem_path, period_dir)):
+                        continue
+                    if "_12-31" in period_dir:  # Skip yearly
+                        continue
+                    
+                    try:
+                        from_date_str = period_dir.split("_")[0]
+                        period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+                        if period_date < three_months_ago:
+                            continue
+                        
+                        summary_file = os.path.join(subsystem_path, period_dir, "summary.json")
+                        if os.path.exists(summary_file):
+                            summary_data = load_json(summary_file)
+                            for repo_data in summary_data.get("repositories", {}).values():
+                                if user_slug in repo_data.get("developers", {}):
+                                    maintainer_subsystems.add(subsystem_name)
+                                    has_recent_commits = True
+                                    break
+                        if has_recent_commits:
+                            break
+                    except:
+                        continue
         
         if not maintainer_subsystems:
             return jsonify({"timelines": {}})
