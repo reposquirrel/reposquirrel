@@ -1304,13 +1304,17 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
                         with open(subsystem_lang_path, "r", encoding="utf-8") as f:
                             lang_data = json.load(f)
                             subsystem_lines = 0
+                            subsystem_languages = {}
                             for lang_name, lang_info in lang_data.get("languages", {}).items():
                                 if isinstance(lang_info, dict):
-                                    subsystem_lines += lang_info.get("code_lines", 0)
+                                    code_lines = lang_info.get("code_lines", 0)
+                                    subsystem_lines += code_lines
+                                    subsystem_languages[lang_name] = code_lines
                             
                             responsible_subsystem_details[subsystem_name] = {
                                 "name": subsystem_name,
-                                "lines": subsystem_lines
+                                "lines": subsystem_lines,
+                                "languages": subsystem_languages
                             }
                             total_responsible_lines += subsystem_lines
                     except (json.JSONDecodeError, IOError):
