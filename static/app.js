@@ -2730,8 +2730,11 @@ async function renderTeamDashboard(team, period, summary) {
   if (summary.member_contributions && Object.keys(summary.member_contributions).length > 0) {
     const membersSection = document.createElement("div");
     membersSection.className = "dashboard-section";
+    
+    // Create title with timespan
+    const timespan = period.is_yearly ? `Year ${period.label}` : `Month ${period.label}`;
     membersSection.innerHTML = createTitleWithTooltip(
-      "Team Members Contributions", 
+      `Team Members Contributions - ${timespan}`, 
       "Individual contribution statistics for each team member during the selected period. Shows commits, lines added, and lines deleted per member.",
       "h3"
     );
@@ -2742,6 +2745,13 @@ async function renderTeamDashboard(team, period, summary) {
     const membersList = Object.entries(summary.member_contributions)
       .sort((a, b) => b[1].commits - a[1].commits)
       .slice(0, 10); // Top 10 contributors
+
+    // Calculate totals
+    const totals = membersList.reduce((acc, [_, contrib]) => ({
+      commits: acc.commits + contrib.commits,
+      additions: acc.additions + contrib.additions,
+      deletions: acc.deletions + contrib.deletions
+    }), { commits: 0, additions: 0, deletions: 0 });
 
     // Create member contributions table
     const table = document.createElement("table");
@@ -2772,6 +2782,14 @@ async function renderTeamDashboard(team, period, summary) {
           `;
         }).join('')}
       </tbody>
+      <tfoot>
+        <tr style="font-weight: bold; border-top: 2px solid #e5e7eb;">
+          <td>Total</td>
+          <td>${totals.commits}</td>
+          <td style="color: #22c55e;">${totals.additions}</td>
+          <td style="color: #ef4444;">${totals.deletions}</td>
+        </tr>
+      </tfoot>
     `;
 
     // Add click handlers to navigate to individual users (only for active users)
@@ -2859,8 +2877,11 @@ async function renderTeamDashboard(team, period, summary) {
   if (summary.subsystems && Object.keys(summary.subsystems).length > 0) {
     const subsystemsSection = document.createElement("div");
     subsystemsSection.className = "dashboard-section";
+    
+    // Create title with timespan
+    const timespan = period.is_yearly ? `Year ${period.label}` : `Month ${period.label}`;
     subsystemsSection.innerHTML = createTitleWithTooltip(
-      "Subsystems Contributions", 
+      `Subsystems Contributions - ${timespan}`, 
       "Team's contributions broken down by subsystem. Shows which subsystems the team is actively working on and their level of contribution to each.",
       "h3"
     );
@@ -2872,6 +2893,13 @@ async function renderTeamDashboard(team, period, summary) {
     const subsystemsList = Object.entries(summary.subsystems)
       .sort((a, b) => b[1].commits - a[1].commits)
       .slice(0, 15); // Top 15 subsystems
+
+    // Calculate totals
+    const subsystemTotals = subsystemsList.reduce((acc, [_, data]) => ({
+      commits: acc.commits + data.commits,
+      additions: acc.additions + (data.additions || 0),
+      deletions: acc.deletions + (data.deletions || 0)
+    }), { commits: 0, additions: 0, deletions: 0 });
 
     const table = document.createElement("table");
     table.className = "data-table";
@@ -2894,6 +2922,14 @@ async function renderTeamDashboard(team, period, summary) {
           </tr>
         `).join('')}
       </tbody>
+      <tfoot>
+        <tr style="font-weight: bold; border-top: 2px solid #e5e7eb;">
+          <td>Total</td>
+          <td>${subsystemTotals.commits}</td>
+          <td style="color: #22c55e;">${subsystemTotals.additions}</td>
+          <td style="color: #ef4444;">${subsystemTotals.deletions}</td>
+        </tr>
+      </tfoot>
     `;
 
     // Add click handlers to navigate to individual subsystems
