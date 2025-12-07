@@ -1272,7 +1272,12 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
                         lines = lang_data.get("additions", 0) + lang_data.get("deletions", 0)
                     else:
                         lines = lang_data
-                    yearly_data["languages"][lang] += lines
+                    
+                    # Ensure yearly_data["languages"][lang] is always an int
+                    current_value = yearly_data["languages"].get(lang, 0)
+                    if isinstance(current_value, dict):
+                        current_value = current_value.get("additions", 0) + current_value.get("deletions", 0)
+                    yearly_data["languages"][lang] = current_value + lines
             
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Warning: Could not read {monthly_file}: {e}")

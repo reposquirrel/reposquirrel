@@ -3858,14 +3858,14 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
                         
                         responsible_subsystem_details[subsystem_name] = {
                             "name": subsystem_name,
-                            "lines_of_code": subsystem_lines
+                            "lines": subsystem_lines
                         }
                         total_responsible_lines += subsystem_lines
             except (json.JSONDecodeError, IOError, KeyError):
                 # If we can't load language data, still include the subsystem with 0 lines
                 responsible_subsystem_details[subsystem_name] = {
                     "name": subsystem_name,
-                    "lines_of_code": 0
+                    "lines": 0
                 }
         
         return jsonify({
@@ -3957,22 +3957,29 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
             if os.path.exists(subsystem_lang_path):
                 with open(subsystem_lang_path, "r", encoding="utf-8") as f:
                     lang_data = json.load(f)
-                    subsystem_lines = 0
-                    # Sum up all language code lines
-                    for lang_name, lang_info in lang_data.get("languages", {}).items():
-                        if isinstance(lang_info, dict):
-                            subsystem_lines += lang_info.get("code_lines", 0)
+                    # Get total code lines from the totals section
+                    subsystem_lines = lang_data.get("totals", {}).get("code_lines", 0)
+                    
+                    print(f"DEBUG: {subsystem_name} has {subsystem_lines} lines from {subsystem_lang_path}")
                     
                     responsible_subsystem_details[subsystem_name] = {
                         "name": subsystem_name,
-                        "lines_of_code": subsystem_lines
+                        "lines": subsystem_lines
                     }
                     total_responsible_lines += subsystem_lines
-        except (json.JSONDecodeError, IOError, KeyError):
+            else:
+                print(f"DEBUG: No languages.json found for {subsystem_name} at {subsystem_lang_path}")
+                # If languages.json doesn't exist, include with 0 lines
+                responsible_subsystem_details[subsystem_name] = {
+                    "name": subsystem_name,
+                    "lines": 0
+                }
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            print(f"DEBUG: Error loading {subsystem_name}: {e}")
             # If we can't load language data, still include the subsystem with 0 lines
             responsible_subsystem_details[subsystem_name] = {
                 "name": subsystem_name,
-                "lines_of_code": 0
+                "lines": 0
             }
     
     aggregated_data["responsible_subsystem_details"] = responsible_subsystem_details
