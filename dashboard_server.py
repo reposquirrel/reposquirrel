@@ -3746,7 +3746,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
                         # Sum up all language code lines
                         for lang_name, lang_info in lang_data.get("languages", {}).items():
                             if isinstance(lang_info, dict):
-                                subsystem_lines += lang_info.get("lines", 0)
+                                subsystem_lines += lang_info.get("code_lines", 0)
                         
                         responsible_subsystem_details[subsystem_name] = {
                             "name": subsystem_name,
@@ -3853,7 +3853,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
                     # Sum up all language code lines
                     for lang_name, lang_info in lang_data.get("languages", {}).items():
                         if isinstance(lang_info, dict):
-                            subsystem_lines += lang_info.get("lines", 0)
+                            subsystem_lines += lang_info.get("code_lines", 0)
                     
                     responsible_subsystem_details[subsystem_name] = {
                         "name": subsystem_name,
