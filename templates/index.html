@@ -135,13 +135,16 @@
           
           <div id="aliases-tab" class="settings-tab-content">
             <h3>User Aliases</h3>
-            <p>Merge multiple user identities into one. Select users that represent the same person to consolidate their statistics.</p>
+            <p>Merge multiple user identities into one. Select users below that represent the same person to consolidate their statistics.</p>
             
             <div class="aliases-ui-v2">
               <!-- Step 1: Create New Group -->
               <div class="alias-creation-section">
-                <h4>🔗 Create User Group</h4>
-                <p class="help-text">Select multiple users that represent the same person. Their statistics will be merged under a single identity.</p>
+                <h4>🔗 Create or Edit User Group</h4>
+                <p class="help-text">
+                  <strong>To create a new group:</strong> Select 2+ users from the list below, choose which identity to keep (primary), then click "Create Group".<br>
+                  <strong>To edit existing group:</strong> Click "✏️ Edit" on any group below.
+                </p>
                 
                 <div class="user-selection-area">
                   <div class="selected-users-box">
@@ -161,7 +164,10 @@
                     </select>
                   </div>
                   
-                  <button id="create-alias-group" class="btn btn-primary" disabled>Create Group</button>
+                  <div style="display: flex; gap: 10px;">
+                    <button id="create-alias-group" class="btn btn-primary" disabled>Create Group</button>
+                    <button id="cancel-edit-group" class="btn btn-secondary" style="display: none;" onclick="cancelEditAliasGroup()">Cancel</button>
+                  </div>
                 </div>
               </div>
               
@@ -232,6 +238,12 @@
                   </div>
                   <div class="form-group">
                     <label for="team-members">Team Members:</label>
+                    <div style="margin-bottom: 10px;">
+                      <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; cursor: pointer;">
+                        <input type="checkbox" id="hide-assigned-users" />
+                        <span>Hide users already assigned to other teams</span>
+                      </label>
+                    </div>
                     <div id="team-member-selector" class="member-selector">
                       <!-- Dynamically populated with available users -->
                     </div>
@@ -378,6 +390,10 @@
                 </div>
                 <div class="form-group">
                   <label for="responsibility-subsystems">Responsible Subsystems:</label>
+                  <div class="checkbox-option">
+                    <input type="checkbox" id="hide-assigned-subsystems">
+                    <label for="hide-assigned-subsystems">Hide subsystems already assigned to other teams</label>
+                  </div>
                   <div id="responsibility-subsystems" class="subsystem-checkboxes">
                     <!-- Dynamically populated -->
                   </div>

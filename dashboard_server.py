@@ -3707,7 +3707,30 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
     members = team.get("members", [])
     responsible_subsystems = get_team_responsible_subsystems(team_id)
     
-    if not members:
+    # Load aliases to resolve canonical user slugs
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    alias_map = {}
+    if os.path.exists(alias_file):
+        try:
+            alias_map = load_json(alias_file)
+        except:
+            pass
+    
+    def get_canonical_slug(slug):
+        """Apply aliases to get canonical developer slug."""
+        for canonical, aliases in alias_map.items():
+            if isinstance(aliases, list) and slug in aliases:
+                return canonical
+            elif isinstance(aliases, str) and slug == aliases:
+                return canonical
+        return slug
+    
+    # Resolve all member slugs to their canonical forms
+    canonical_members = [get_canonical_slug(member) for member in members]
+    # Remove duplicates that might occur after alias resolution
+    canonical_members = list(dict.fromkeys(canonical_members))
+    
+    if not canonical_members:
         # Even for empty teams, calculate responsible subsystem details
         responsible_subsystem_details = {}
         total_responsible_lines = 0
@@ -3742,7 +3765,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
             "team_id": team_id,
             "team_name": team.get("name", team_id),
             "description": team.get("description", ""),
-            "members": [],
+            "members": canonical_members,
             "responsible_subsystems": responsible_subsystems,
             "responsible_subsystem_details": responsible_subsystem_details,
             "total_responsible_lines": total_responsible_lines,
@@ -3761,7 +3784,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
         "team_id": team_id,
         "team_name": team.get("name", team_id),
         "description": team.get("description", ""),
-        "members": members,
+        "members": canonical_members,
         "responsible_subsystems": responsible_subsystems,
         "total_commits": 0,
         "total_additions": 0,
@@ -3772,7 +3795,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
         "member_contributions": {}
     }
     
-    for member in members:
+    for member in canonical_members:
         # Use the same aggregation method as the teams overview for consistency
         member_data = aggregate_user_data_for_period(member, from_date, to_date)
         if member_data:
@@ -3892,6 +3915,24 @@ def api_teams_overview():
         to_date = datetime.now().strftime("%Y-%m-%d")  # End today
         period_label = "Overall"
     
+    # Load aliases to resolve canonical user slugs
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    alias_map = {}
+    if os.path.exists(alias_file):
+        try:
+            alias_map = load_json(alias_file)
+        except:
+            pass
+    
+    def get_canonical_slug(slug):
+        """Apply aliases to get canonical developer slug."""
+        for canonical, aliases in alias_map.items():
+            if isinstance(aliases, list) and slug in aliases:
+                return canonical
+            elif isinstance(aliases, str) and slug == aliases:
+                return canonical
+        return slug
+    
     teams_analytics = []
     
     for team_id, team_info in teams_config.items():
@@ -3899,13 +3940,18 @@ def api_teams_overview():
         members = team_info.get("members", [])
         responsible_subsystems = get_team_responsible_subsystems(team_id)
         
+        # Resolve all member slugs to their canonical forms
+        canonical_members = [get_canonical_slug(member) for member in members]
+        # Remove duplicates that might occur after alias resolution
+        canonical_members = list(dict.fromkeys(canonical_members))
+        
         # Initialize team stats
         team_stats = {
             "id": team_id,
             "name": team_name,
             "description": team_info.get("description", ""),
-            "member_count": len(members),
-            "members": members,
+            "member_count": len(canonical_members),
+            "members": canonical_members,
             "responsible_subsystems": responsible_subsystems,
             "responsible_subsystems_count": len(responsible_subsystems),
             "total_commits": 0,
@@ -3918,7 +3964,7 @@ def api_teams_overview():
         }
         
         # Aggregate data from all team members
-        for member in members:
+        for member in canonical_members:
             # Always use aggregate_user_data_for_period for consistency
             # This ensures we get the most up-to-date data across all periods
             member_stats = aggregate_user_data_for_period(member, from_date, to_date)
@@ -4079,30 +4125,57 @@ def aggregate_user_data_for_period(user_slug, from_date, to_date):
 @app.route("/api/settings/available-users")
 def api_settings_available_users():
     """Get list of available users for team member selection and ignore list management.
-    Includes both active users (with recent commits) and inactive users (with ownership/blame)."""
+    Includes both active users (with recent commits) and inactive users (with ownership/blame).
+    Returns only canonical users (filters out aliased identities)."""
     from collections import defaultdict
+    
+    # Load aliases to filter out non-canonical users
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    alias_map = {}
+    if os.path.exists(alias_file):
+        try:
+            alias_map = load_json(alias_file)
+        except:
+            pass
+    
+    # Build reverse map: aliased_slug -> canonical_slug
+    aliased_to_canonical = {}
+    for canonical, aliases in alias_map.items():
+        if isinstance(aliases, list):
+            for alias in aliases:
+                aliased_to_canonical[alias] = canonical
+        elif isinstance(aliases, str):
+            aliased_to_canonical[aliases] = canonical
     
     users_dict = {}
     
     # Get active users from summaries
     user_months = list_user_months()
     for slug, months in user_months.items():
+        # Get canonical slug
+        canonical_slug = aliased_to_canonical.get(slug, slug)
+        
         # Try to get a display name from any summary.json
-        display_name = slug
+        display_name = canonical_slug
         try:
             any_month = months[0]
-            path = find_user_summary(slug, any_month["from"], any_month["to"])
+            path = find_user_summary(canonical_slug, any_month["from"], any_month["to"])
+            if not path:
+                # Try with original slug if canonical didn't work
+                path = find_user_summary(slug, any_month["from"], any_month["to"])
             data = load_json(path)
             if data and data.get("author_name"):
                 display_name = data["author_name"]
         except Exception as e:
             pass
         
-        users_dict[slug] = {
-            "slug": slug,
-            "display_name": display_name,
-            "active": True
-        }
+        # Only add if not already present (prefer first seen display name)
+        if canonical_slug not in users_dict:
+            users_dict[canonical_slug] = {
+                "slug": canonical_slug,
+                "display_name": display_name,
+                "active": True
+            }
     
     # Also get inactive users from blame files (historical contributors)
     repos_path = os.path.join(STATS_ROOT, "repos")
@@ -4115,10 +4188,12 @@ def api_settings_available_users():
                 # Check repo-level developers
                 developers = blame_data.get("developers", {})
                 for dev_slug, dev_data in developers.items():
-                    if dev_slug not in users_dict:
-                        display_name = dev_data.get("display_name", dev_slug) if isinstance(dev_data, dict) else dev_slug
-                        users_dict[dev_slug] = {
-                            "slug": dev_slug,
+                    canonical_slug = aliased_to_canonical.get(dev_slug, dev_slug)
+                    
+                    if canonical_slug not in users_dict:
+                        display_name = dev_data.get("display_name", canonical_slug) if isinstance(dev_data, dict) else canonical_slug
+                        users_dict[canonical_slug] = {
+                            "slug": canonical_slug,
                             "display_name": display_name,
                             "active": False
                         }
@@ -4128,10 +4203,12 @@ def api_settings_available_users():
                 for service_data in services.values():
                     service_developers = service_data.get("developers", {})
                     for dev_slug, dev_data in service_developers.items():
-                        if dev_slug not in users_dict:
-                            display_name = dev_data.get("display_name", dev_slug) if isinstance(dev_data, dict) else dev_slug
-                            users_dict[dev_slug] = {
-                                "slug": dev_slug,
+                        canonical_slug = aliased_to_canonical.get(dev_slug, dev_slug)
+                        
+                        if canonical_slug not in users_dict:
+                            display_name = dev_data.get("display_name", canonical_slug) if isinstance(dev_data, dict) else canonical_slug
+                            users_dict[canonical_slug] = {
+                                "slug": canonical_slug,
                                 "display_name": display_name,
                                 "active": False
                             }

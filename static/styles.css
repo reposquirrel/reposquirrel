@@ -2831,6 +2831,27 @@ body {
   background: rgba(59, 130, 246, 0.1);
 }
 
+.member-checkbox label.inactive-member {
+  opacity: 0.8;
+}
+
+.member-checkbox label.inactive-member span {
+  font-style: italic;
+  color: #f87171;
+}
+
+.inactive-badge-inline {
+  display: inline;
+  margin-left: 6px;
+  padding: 1px 4px;
+  background: #dc2626;
+  color: white;
+  font-size: 9px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-style: normal;
+}
+
 /* Ignore Users UI */
 .ignore-users-ui {
   display: grid;
@@ -3733,11 +3754,45 @@ body {
   margin-bottom: 6px;
   color: #e5e7eb;
   font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .alias-member small {
   color: #9ca3af;
   font-family: monospace;
+}
+
+.alias-group-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-tiny {
+  padding: 2px 8px;
+  font-size: 16px;
+  line-height: 1;
+  color: #ef4444;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.2s;
+}
+
+.btn-tiny:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #dc2626;
+}
+
+.btn-secondary {
+  background: #4b5563;
+  color: white;
+}
+
+.btn-secondary:hover {
+  background: #374151;
 }
 
 .btn-small {

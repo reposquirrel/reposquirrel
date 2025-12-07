@@ -6326,6 +6326,7 @@ function initializeSettings() {
 
   // Team responsibilities management
   $("responsibility-team").addEventListener("change", loadTeamResponsibilitySubsystems);
+  $("hide-assigned-subsystems").addEventListener("change", loadTeamResponsibilitySubsystems);
   $("update-responsibilities").addEventListener("click", updateTeamResponsibilities);
 
   // Initialize management states
@@ -6798,9 +6799,13 @@ function createAliasGroup() {
   window.aliasUIState.aliasesData[primarySlug] = otherSlugs;
   window.aliasesData = window.aliasUIState.aliasesData;
   
-  // Clear selection
+  // Clear selection and editing state
   window.aliasUIState.selectedUserSlugs = [];
+  window.aliasUIState.editingGroup = null;
   updateSelectedUsersList();
+  
+  // Reset UI
+  resetAliasCreationUI();
   
   // Re-render
   renderAvailableUsers();
@@ -6820,12 +6825,26 @@ function renderAliasesList() {
     return;
   }
   
-  Object.entries(aliases).forEach(([canonical, slugs]) => {
-    const getPrimaryUser = (slug) => {
-      return window.aliasUIState.availableUsers.find(u => u.slug === slug) || { display_name: slug, slug };
-    };
-    
+  const getPrimaryUser = (slug) => {
+    return window.aliasUIState.availableUsers.find(u => u.slug === slug) || { display_name: slug, slug };
+  };
+  
+  // Sort aliases alphabetically by display name
+  const sortedAliases = Object.entries(aliases).sort(([canonicalA], [canonicalB]) => {
+    const userA = getPrimaryUser(canonicalA);
+    const userB = getPrimaryUser(canonicalB);
+    return userA.display_name.localeCompare(userB.display_name);
+  });
+  
+  sortedAliases.forEach(([canonical, slugs]) => {
     const primaryUser = getPrimaryUser(canonical);
+    
+    // Sort the merged identities alphabetically too
+    const sortedSlugs = [...slugs].sort((a, b) => {
+      const userA = getPrimaryUser(a);
+      const userB = getPrimaryUser(b);
+      return userA.display_name.localeCompare(userB.display_name);
+    });
     
     const aliasGroup = document.createElement("div");
     aliasGroup.className = "alias-group-card";
@@ -6837,13 +6856,19 @@ function renderAliasesList() {
           <strong>${primaryUser.display_name}</strong>
           <small>(${canonical})</small>
         </div>
-        <button class="btn-danger btn-small" onclick="removeAliasGroup('${canonical}')">Delete Group</button>
+        <div class="alias-group-actions">
+          <button class="btn-secondary btn-small" onclick="editAliasGroup('${canonical}')">✏️ Edit</button>
+          <button class="btn-danger btn-small" onclick="removeAliasGroup('${canonical}')">Delete Group</button>
+        </div>
       </div>
       <div class="alias-group-members">
-        <div class="members-label">Merged identities:</div>
-        ${slugs.map(slug => {
+        <div class="members-label">Merged identities (${sortedSlugs.length}):</div>
+        ${sortedSlugs.map(slug => {
           const user = getPrimaryUser(slug);
-          return `<div class="alias-member">${user.display_name} <small>(${slug})</small></div>`;
+          return `<div class="alias-member">
+            ${user.display_name} <small>(${slug})</small>
+            <button class="btn-link btn-tiny" onclick="removeMemberFromGroup('${canonical}', '${slug}')" title="Remove this identity">×</button>
+          </div>`;
         }).join('')}
       </div>
     `;
@@ -6862,6 +6887,130 @@ function removeAliasGroup(canonical) {
   
   renderAliasesList();
   renderAvailableUsers();
+}
+
+function editAliasGroup(canonical) {
+  // Load the existing group into the editor
+  const currentAliases = window.aliasUIState.aliasesData[canonical] || [];
+  
+  // Store that we're editing (not creating new) - save the original state
+  window.aliasUIState.editingGroup = {
+    canonical: canonical,
+    aliases: [...currentAliases]
+  };
+  
+  // Select all users in the group (canonical + aliases)
+  window.aliasUIState.selectedUserSlugs = [canonical, ...currentAliases];
+  
+  // Update the selected users display
+  updateSelectedUsersList();
+  
+  // Set the primary user dropdown to the canonical
+  const primarySelect = $("primary-user-select");
+  if (primarySelect) {
+    primarySelect.value = canonical;
+  }
+  
+  // Update help text
+  const helpText = document.querySelector(".alias-creation-section .help-text");
+  if (helpText) {
+    const primaryUser = window.aliasUIState.availableUsers.find(u => u.slug === canonical);
+    const displayName = primaryUser ? primaryUser.display_name : canonical;
+    helpText.innerHTML = `<strong>✏️ Editing group: "${displayName}"</strong><br>Select/deselect users, change primary identity if needed, then click "Update Group".`;
+    helpText.style.background = "rgba(251, 191, 36, 0.1)";
+    helpText.style.padding = "10px";
+    helpText.style.borderRadius = "4px";
+  }
+  
+  // Update buttons
+  const createBtn = $("create-alias-group");
+  if (createBtn) {
+    createBtn.textContent = "Update Group";
+  }
+  
+  const cancelBtn = $("cancel-edit-group");
+  if (cancelBtn) {
+    cancelBtn.style.display = "block";
+  }
+  
+  // Temporarily remove the group from the list (will be re-added on save)
+  delete window.aliasUIState.aliasesData[canonical];
+  window.aliasesData = window.aliasUIState.aliasesData;
+  
+  // Re-render to show the group is being edited
+  renderAliasesList();
+  renderAvailableUsers();
+  
+  // Scroll to top
+  document.querySelector(".alias-creation-section").scrollIntoView({ behavior: "smooth" });
+}
+
+function cancelEditAliasGroup() {
+  // Restore the original group
+  if (window.aliasUIState.editingGroup) {
+    const { canonical, aliases } = window.aliasUIState.editingGroup;
+    window.aliasUIState.aliasesData[canonical] = aliases;
+    window.aliasesData = window.aliasUIState.aliasesData;
+  }
+  
+  // Clear selection and editing state
+  window.aliasUIState.selectedUserSlugs = [];
+  window.aliasUIState.editingGroup = null;
+  updateSelectedUsersList();
+  
+  // Reset UI
+  resetAliasCreationUI();
+  
+  // Re-render
+  renderAvailableUsers();
+  renderAliasesList();
+}
+
+function removeMemberFromGroup(canonical, memberSlug) {
+  if (!confirm(`Remove this identity from the group?`)) {
+    return;
+  }
+  
+  const aliases = window.aliasUIState.aliasesData[canonical] || [];
+  const updated = aliases.filter(slug => slug !== memberSlug);
+  
+  if (updated.length === 0) {
+    // If no aliases left, remove the whole group
+    delete window.aliasUIState.aliasesData[canonical];
+  } else {
+    window.aliasUIState.aliasesData[canonical] = updated;
+  }
+  
+  window.aliasesData = window.aliasUIState.aliasesData;
+  
+  renderAliasesList();
+  renderAvailableUsers();
+}
+
+function resetAliasCreationUI() {
+  const helpText = document.querySelector(".alias-creation-section .help-text");
+  if (helpText) {
+    helpText.innerHTML = '<strong>To create a new group:</strong> Select 2+ users from the list below, choose which identity to keep (primary), then click "Create Group".<br><strong>To edit existing group:</strong> Click "✏️ Edit" on any group below.';
+    helpText.style.background = "";
+    helpText.style.padding = "";
+    helpText.style.borderRadius = "";
+  }
+  
+  const createBtn = $("create-alias-group");
+  if (createBtn) {
+    createBtn.textContent = "Create Group";
+    createBtn.onclick = createAliasGroup;
+  }
+  
+  const cancelBtn = $("cancel-edit-group");
+  if (cancelBtn) {
+    cancelBtn.style.display = "none";
+  }
+  
+  const primarySelection = document.querySelector(".primary-user-selection");
+  if (primarySelection) {
+    primarySelection.style.display = "block";
+  }
 }
 
 function addAliasMapping() {
@@ -7100,22 +7249,17 @@ async function loadTeamsUI() {
     const usersResponse = await fetchJSON("/api/settings/available-users");
     const availableUsers = usersResponse.users || [];
     
-    // Populate member selector
-    const memberSelector = $("team-member-selector");
-    memberSelector.innerHTML = '';
+    // Store for use in rendering team member display names
+    window.availableUsersData = availableUsers;
     
-    availableUsers.forEach(user => {
-      const checkbox = document.createElement("div");
-      checkbox.className = "member-checkbox";
-      checkbox.innerHTML = `
-        <label>
-          <input type="checkbox" value="${user.slug}" name="team-member">
-          <span>${user.display_name}</span>
-        </label>
-      `;
-      memberSelector.appendChild(checkbox);
-    });
+    // Set up filter checkbox handler
+    const hideAssignedCheckbox = $("hide-assigned-users");
+    if (hideAssignedCheckbox) {
+      hideAssignedCheckbox.onchange = renderTeamMemberSelector;
+    }
     
+    // Initial render
+    renderTeamMemberSelector();
     renderTeamsList();
   } catch (error) {
     console.error("Error loading teams:", error);
@@ -7124,6 +7268,51 @@ async function loadTeamsUI() {
       teamsList.innerHTML = '<div class="error">Failed to load teams: ' + error.message + '</div>';
     }
   }
+}
+
+function renderTeamMemberSelector(editingTeamId = null) {
+  const memberSelector = $("team-member-selector");
+  if (!memberSelector) return;
+  
+  const availableUsers = window.availableUsersData || [];
+  const hideAssigned = $("hide-assigned-users")?.checked || false;
+  
+  // Get all users already in teams (excluding the team being edited)
+  const usersInTeams = new Set();
+  if (hideAssigned && window.teamsData) {
+    Object.entries(window.teamsData).forEach(([teamId, team]) => {
+      // Skip the team being edited
+      if (editingTeamId && teamId === editingTeamId) {
+        return;
+      }
+      if (team.members) {
+        team.members.forEach(member => usersInTeams.add(member));
+      }
+    });
+  }
+  
+  memberSelector.innerHTML = '';
+  
+  availableUsers.forEach(user => {
+    // Skip if user is already in a team and filter is enabled
+    if (hideAssigned && usersInTeams.has(user.slug)) {
+      return;
+    }
+    
+    const checkbox = document.createElement("div");
+    checkbox.className = "member-checkbox";
+    const isInactive = user.active === false;
+    const inactiveClass = isInactive ? ' inactive-member' : '';
+    const inactiveBadge = isInactive ? ' <span class="inactive-badge-inline" title="No recent commits, but has code ownership">Inactive</span>' : '';
+    
+    checkbox.innerHTML = `
+      <label class="${inactiveClass}">
+        <input type="checkbox" value="${user.slug}" name="team-member">
+        <span>${user.display_name}${inactiveBadge}</span>
+      </label>
+    `;
+    memberSelector.appendChild(checkbox);
+  });
 }
 
 function renderTeamsList() {
@@ -7135,9 +7324,23 @@ function renderTeamsList() {
     return;
   }
   
+  // Create a map of slug -> display name from available users
+  const userDisplayMap = {};
+  if (window.availableUsersData) {
+    window.availableUsersData.forEach(user => {
+      userDisplayMap[user.slug] = user.display_name;
+    });
+  }
+  
   Object.entries(window.teamsData).forEach(([teamId, teamData]) => {
     const teamItem = document.createElement("div");
     teamItem.className = "team-item";
+    
+    // Convert member slugs to display names
+    const memberDisplayNames = (teamData.members || [])
+      .map(slug => userDisplayMap[slug] || slug)
+      .join(', ') || 'No members';
+    
     teamItem.innerHTML = `
       <div class="team-info">
         <div class="team-header">
@@ -7150,7 +7353,7 @@ function renderTeamsList() {
         <div class="team-description">${teamData.description || 'No description'}</div>
         <div class="team-members">
           <strong>Members (${teamData.members?.length || 0}):</strong> 
-          ${(teamData.members || []).join(', ') || 'No members'}
+          ${memberDisplayNames}
         </div>
       </div>
     `;
@@ -7182,6 +7385,9 @@ function editTeam(teamId) {
   $("team-name").value = teamData.name || '';
   $("team-description").value = teamData.description || '';
   
+  // Re-render member selector with editing context (to show all members of this team)
+  renderTeamMemberSelector(teamId);
+  
   // Check the appropriate members
   const memberCheckboxes = document.querySelectorAll('input[name="team-member"]');
   memberCheckboxes.forEach(checkbox => {
@@ -7197,6 +7403,7 @@ function deleteTeam(teamId) {
   if (confirm(`Are you sure you want to delete the team "${window.teamsData[teamId]?.name || teamId}"?`)) {
     delete window.teamsData[teamId];
     renderTeamsList();
+    renderTeamMemberSelector();
   }
 }
 
@@ -7294,8 +7501,9 @@ function addTeam() {
   $("add-team").textContent = "Create Team";
   $("add-team").removeAttribute('data-editing');
   
-  // Re-render list
+  // Re-render list and member selector (to update filter)
   renderTeamsList();
+  renderTeamMemberSelector();
 }
 
 function openTeamsJsonModal() {
@@ -7315,6 +7523,7 @@ function importTeamsJson() {
     const data = JSON.parse(content);
     window.teamsData = data;
     renderTeamsList();
+    renderTeamMemberSelector();
     closeTeamsJsonModal();
     alert("Teams imported successfully!");
   } catch (error) {
@@ -8267,7 +8476,7 @@ async function loadTeamResponsibilitiesUI() {
   }
 }
 
-function loadTeamResponsibilitySubsystems() {
+function loadTeamResponsibilitySubsystems(editingTeamId = null) {
   const teamId = $("responsibility-team").value;
   const subsystemsContainer = $("responsibility-subsystems");
   
@@ -8277,10 +8486,29 @@ function loadTeamResponsibilitySubsystems() {
   }
   
   const currentResponsibilities = window.teamResponsibilitiesData[teamId] || [];
+  const hideAssigned = $("hide-assigned-subsystems").checked;
+  
+  // Build set of subsystems assigned to other teams (excluding current team)
+  const assignedToOthers = new Set();
+  if (hideAssigned) {
+    for (const [otherTeamId, subsystems] of Object.entries(window.teamResponsibilitiesData)) {
+      // Skip the team we're currently editing
+      if (otherTeamId === (editingTeamId || teamId)) continue;
+      
+      for (const subsystem of subsystems) {
+        assignedToOthers.add(subsystem);
+      }
+    }
+  }
   
   subsystemsContainer.innerHTML = '';
   
   for (const subsystem of window.availableSubsystems || []) {
+    // Skip if assigned to another team and we're hiding those
+    if (hideAssigned && assignedToOthers.has(subsystem) && !currentResponsibilities.includes(subsystem)) {
+      continue;
+    }
+    
     const item = document.createElement("div");
     item.className = "subsystem-checkbox-item";
     
