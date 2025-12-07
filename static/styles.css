@@ -142,7 +142,7 @@ body {
 .sidebar-list.small {
   flex: 1; /* Take available space in parent */
   min-height: 120px;
-  max-height: none; /* Remove height restriction to allow full expansion */
+  max-height: 400px; /* Enable scrolling when list is long */
 }
 
 .sidebar-item {

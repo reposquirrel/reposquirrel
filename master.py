@@ -180,6 +180,9 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
         if result2.returncode != 0:
             print(f"ERROR: service.py failed for {year}-{month:02d} with return code {result2.returncode}", file=sys.stderr)
             return (month, False)
+        
+        # 3) Generate team statistics for this month
+        generate_team_monthly_stats(output_root, year, month)
             
         print(f"✅ Completed month: {year}-{month:02d}")
         return (month, True)
@@ -399,6 +402,9 @@ def main() -> None:
                 service_cmd,
                 desc=f"service.py for {year}-{month:02d} ({date_from}..{date_to})",
             )
+            
+            # 3) Generate team statistics for this month
+            generate_team_monthly_stats(output_root, year, month)
 
     # After all months: create yearly summaries
     print("\n===========================================")
@@ -464,6 +470,107 @@ def main() -> None:
         print("INFO: No stats/repos directory found. Will be created by blame.py if needed.")
 
 
+def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None:
+    """Generate team statistics for a specific month by aggregating member contributions."""
+    import json
+    from collections import defaultdict
+    
+    stats_root = os.path.join(output_root, "stats")
+    teams_file = os.path.join(output_root, "configuration", "teams.json")
+    
+    # Load teams configuration
+    if not os.path.exists(teams_file):
+        print(f"No teams.json found, skipping team statistics for {year}-{month:02d}")
+        return
+        
+    with open(teams_file, "r", encoding="utf-8") as f:
+        teams_config = json.load(f)
+    
+    if not teams_config:
+        print(f"No teams defined, skipping team statistics for {year}-{month:02d}")
+        return
+    
+    date_from, date_to = compute_month_range(year, month)
+    month_str = f"{date_from}_{date_to}"
+    
+    # Process each team (teams_config is a dict with team_id as key)
+    for team_id, team_data in teams_config.items():
+        team_name = team_data.get("name")
+        members = team_data.get("members", [])
+        
+        if not team_name or not members:
+            continue
+        
+        # Aggregate stats from all team members who have data for this month
+        team_stats = {
+            "team": team_name,
+            "month": month_str,
+            "members": members,
+            "commits": 0,
+            "lines_added": 0,
+            "lines_deleted": 0,
+            "lines_changed": 0,
+            "files_changed": 0,
+            "subsystems": defaultdict(lambda: {"commits": 0, "lines_added": 0, "lines_deleted": 0, "lines_changed": 0}),
+            "languages": defaultdict(int)
+        }
+        
+        members_with_data = 0
+        
+        for member in members:
+            # Load member's monthly stats
+            member_file = os.path.join(stats_root, "users", member, month_str, "summary.json")
+            if not os.path.exists(member_file):
+                continue
+                
+            members_with_data += 1
+            
+            with open(member_file, "r", encoding="utf-8") as f:
+                member_data = json.load(f)
+            
+            # Aggregate top-level stats (handle both old and new field names)
+            team_stats["commits"] += member_data.get("total_commits", member_data.get("commits", 0))
+            team_stats["lines_added"] += member_data.get("total_lines_added", member_data.get("lines_added", 0))
+            team_stats["lines_deleted"] += member_data.get("total_lines_deleted", member_data.get("lines_deleted", 0))
+            team_stats["lines_changed"] += abs(member_data.get("total_lines_added", 0)) + abs(member_data.get("total_lines_deleted", 0))
+            team_stats["files_changed"] += member_data.get("files_changed", 0)
+            
+            # Aggregate per-subsystem stats
+            for subsystem, stats in member_data.get("per_service", {}).items():
+                team_stats["subsystems"][subsystem]["commits"] += stats.get("commits", 0)
+                team_stats["subsystems"][subsystem]["lines_added"] += stats.get("lines_added", 0)
+                team_stats["subsystems"][subsystem]["lines_deleted"] += stats.get("lines_deleted", 0)
+                team_stats["subsystems"][subsystem]["lines_changed"] += stats.get("lines_changed", 0)
+            
+            # Aggregate language stats
+            for lang, lang_data in member_data.get("languages", {}).items():
+                # Handle both dict format (with additions/deletions) and simple int format
+                if isinstance(lang_data, dict):
+                    lines = lang_data.get("additions", 0) + lang_data.get("deletions", 0)
+                else:
+                    lines = lang_data
+                
+                team_stats["languages"][lang] += lines
+        
+        # Only create team file if at least one member had data
+        if members_with_data > 0:
+            # Convert defaultdict to regular dict
+            team_stats["subsystems"] = dict(team_stats["subsystems"])
+            team_stats["languages"] = dict(team_stats["languages"])
+            
+            # Save team monthly stats
+            team_dir = os.path.join(stats_root, "teams", team_name)
+            os.makedirs(team_dir, exist_ok=True)
+            
+            # Save with both formats for compatibility
+            # Format 1: YYYY-MM.json (for API)
+            team_file_short = os.path.join(team_dir, f"{year}-{month:02d}.json")
+            with open(team_file_short, "w", encoding="utf-8") as f:
+                json.dump(team_stats, f, indent=2, ensure_ascii=False)
+            
+            print(f"  ✓ Generated team stats for '{team_name}' ({members_with_data}/{len(members)} members active)")
+
+
 def create_yearly_summaries(year: int, output_root: str, first_month: int, last_month: int) -> None:
     """Create yearly summaries by aggregating all monthly data."""
     import json
@@ -476,6 +583,9 @@ def create_yearly_summaries(year: int, output_root: str, first_month: int, last_
     
     # Process service yearly summaries  
     create_service_yearly_summaries(stats_root, year, first_month, last_month)
+    
+    # Process team yearly summaries
+    create_team_yearly_summaries(stats_root, year, first_month, last_month)
 
 
 def create_user_yearly_summaries(stats_root: str, year: int, first_month: int, last_month: int) -> None:
@@ -1064,6 +1174,152 @@ def aggregate_service_monthly_data(service_path: str, year: int, first_month: in
         dev_data["repositories"] = dict(dev_data["repositories"])
     
     return yearly_data
+
+
+def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, last_month: int) -> None:
+    """Create yearly team summaries by aggregating monthly data."""
+    import json
+    from collections import defaultdict
+    
+    teams_root = os.path.join(stats_root, "teams")
+    if not os.path.isdir(teams_root):
+        print("No teams directory found, skipping team yearly summaries")
+        return
+    
+    # Load team responsibilities
+    responsibilities = {}
+    responsibilities_file = os.path.join("configuration", "team_subsystem_responsibilities.json")
+    if os.path.isfile(responsibilities_file):
+        try:
+            with open(responsibilities_file, "r", encoding="utf-8") as f:
+                responsibilities = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    
+    # Load teams config to map team names to IDs
+    teams_config = {}
+    teams_file = os.path.join("configuration", "teams.json")
+    if os.path.isfile(teams_file):
+        try:
+            with open(teams_file, "r", encoding="utf-8") as f:
+                teams_config = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    
+    # Create reverse mapping: team_name -> team_id
+    team_name_to_id = {}
+    for team_id, team_info in teams_config.items():
+        team_name_to_id[team_info.get("name", team_id)] = team_id
+    
+    print("Creating team yearly summaries...")
+    
+    # Find all teams that have monthly data
+    for team_name in os.listdir(teams_root):
+        team_path = os.path.join(teams_root, team_name)
+        if not os.path.isdir(team_path):
+            continue
+        
+        # Aggregate monthly data for this team
+        yearly_data = {
+            "team": team_name,
+            "year": year,
+            "commits": 0,
+            "lines_added": 0,
+            "lines_deleted": 0,
+            "lines_changed": 0,
+            "files_changed": 0,
+            "subsystems": defaultdict(lambda: {"commits": 0, "lines_added": 0, "lines_deleted": 0, "lines_changed": 0}),
+            "members": set(),
+            "languages": defaultdict(int)
+        }
+        
+        monthly_files_found = 0
+        
+        for month in range(first_month, last_month + 1):
+            month_str = f"{year}-{month:02d}"
+            monthly_file = os.path.join(team_path, f"{month_str}.json")
+            
+            if not os.path.isfile(monthly_file):
+                continue
+            
+            try:
+                with open(monthly_file, "r", encoding="utf-8") as f:
+                    monthly_data = json.load(f)
+                
+                monthly_files_found += 1
+                
+                # Aggregate totals
+                yearly_data["commits"] += monthly_data.get("commits", 0)
+                yearly_data["lines_added"] += monthly_data.get("lines_added", 0)
+                yearly_data["lines_deleted"] += monthly_data.get("lines_deleted", 0)
+                yearly_data["lines_changed"] += monthly_data.get("lines_changed", 0)
+                yearly_data["files_changed"] += monthly_data.get("files_changed", 0)
+                
+                # Collect all members
+                yearly_data["members"].update(monthly_data.get("members", []))
+                
+                # Aggregate subsystem data
+                for subsystem, stats in monthly_data.get("subsystems", {}).items():
+                    yearly_data["subsystems"][subsystem]["commits"] += stats.get("commits", 0)
+                    yearly_data["subsystems"][subsystem]["lines_added"] += stats.get("lines_added", 0)
+                    yearly_data["subsystems"][subsystem]["lines_deleted"] += stats.get("lines_deleted", 0)
+                    yearly_data["subsystems"][subsystem]["lines_changed"] += stats.get("lines_changed", 0)
+                
+                # Aggregate language data
+                for lang, lang_data in monthly_data.get("languages", {}).items():
+                    # Handle both dict format (with additions/deletions) and simple int format
+                    if isinstance(lang_data, dict):
+                        lines = lang_data.get("additions", 0) + lang_data.get("deletions", 0)
+                    else:
+                        lines = lang_data
+                    yearly_data["languages"][lang] += lines
+            
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Warning: Could not read {monthly_file}: {e}")
+                continue
+        
+        if monthly_files_found > 0:
+            # Convert sets and defaultdicts to regular types
+            yearly_data["members"] = sorted(list(yearly_data["members"]))
+            yearly_data["subsystems"] = dict(yearly_data["subsystems"])
+            yearly_data["languages"] = dict(yearly_data["languages"])
+            
+            # Add responsible subsystems
+            team_id = team_name_to_id.get(team_name, team_name.lower().replace(" ", "-"))
+            yearly_data["responsible_subsystems"] = responsibilities.get(team_id, [])
+            
+            # Calculate responsible subsystem details
+            responsible_subsystem_details = {}
+            total_responsible_lines = 0
+            
+            for subsystem_name in yearly_data["responsible_subsystems"]:
+                subsystem_lang_path = os.path.join(stats_root, "subsystems", subsystem_name, "languages.json")
+                if os.path.isfile(subsystem_lang_path):
+                    try:
+                        with open(subsystem_lang_path, "r", encoding="utf-8") as f:
+                            lang_data = json.load(f)
+                            subsystem_lines = 0
+                            for lang_name, lang_info in lang_data.get("languages", {}).items():
+                                if isinstance(lang_info, dict):
+                                    subsystem_lines += lang_info.get("code_lines", 0)
+                            
+                            responsible_subsystem_details[subsystem_name] = {
+                                "name": subsystem_name,
+                                "lines": subsystem_lines
+                            }
+                            total_responsible_lines += subsystem_lines
+                    except (json.JSONDecodeError, IOError):
+                        pass
+            
+            yearly_data["responsible_subsystem_details"] = responsible_subsystem_details
+            yearly_data["total_responsible_lines"] = total_responsible_lines
+            
+            # Save yearly summary
+            yearly_file = os.path.join(team_path, f"{year}.json")
+            with open(yearly_file, "w", encoding="utf-8") as f:
+                json.dump(yearly_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"  Created yearly summary for team: {team_name} ({monthly_files_found} months)")
 
 
 def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str) -> None:

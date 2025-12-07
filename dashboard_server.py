@@ -3690,40 +3690,75 @@ def api_teams():
     except (json.JSONDecodeError, IOError):
         teams_config = {}
     
-    # Get available periods from user data (since team data is aggregated from user data)
-    user_months = list_user_months()
-    all_periods = set()
-    
-    for user_periods in user_months.values():
-        for period in user_periods:
-            all_periods.add((period["from"], period["to"], period["label"], period["is_yearly"]))
-    
-    # Sort periods
-    sorted_periods = sorted(list(all_periods), key=lambda x: x[0])
-    periods = [
-        {"from": p[0], "to": p[1], "label": p[2], "is_yearly": p[3]}
-        for p in sorted_periods
-    ]
-    
     teams = []
     responsibilities = load_team_subsystem_responsibilities()
     
     for team_id, team_info in teams_config.items():
         responsible_subsystems = responsibilities.get(team_id, [])
+        
+        # Get available periods from actual team data files
+        team_name = team_info.get("name", team_id)
+        team_dir = os.path.join(STATS_ROOT, "teams", team_name)
+        team_periods = []
+        
+        if os.path.exists(team_dir):
+            for filename in os.listdir(team_dir):
+                if not filename.endswith(".json"):
+                    continue
+                
+                # Parse filename: YYYY-MM.json, YYYY-MM-DD_YYYY-MM-DD.json or YYYY.json
+                basename = filename[:-5]  # Remove .json
+                
+                if "_" in basename:
+                    # Monthly file: YYYY-MM-DD_YYYY-MM-DD
+                    parts = basename.split("_")
+                    if len(parts) == 2:
+                        from_date, to_date = parts
+                        # Extract year-month for label
+                        year_month = from_date[:7]  # YYYY-MM
+                        team_periods.append({
+                            "from": from_date,
+                            "to": to_date,
+                            "label": year_month,
+                            "is_yearly": False
+                        })
+                elif "-" in basename and len(basename) == 7:
+                    # Monthly file: YYYY-MM
+                    year_month = basename
+                    team_periods.append({
+                        "from": year_month,
+                        "to": year_month,
+                        "label": year_month,
+                        "is_yearly": False
+                    })
+                elif len(basename) == 4 and basename.isdigit():
+                    # Yearly file: YYYY
+                    year = basename
+                    team_periods.append({
+                        "from": year,
+                        "to": year,
+                        "label": year,
+                        "is_yearly": True
+                    })
+            
+            # Sort periods by from date
+            team_periods.sort(key=lambda x: x["from"])
+        
         teams.append({
             "id": team_id,
             "name": team_info.get("name", team_id),
             "description": team_info.get("description", ""),
             "members": team_info.get("members", []),
             "responsible_subsystems": responsible_subsystems,
-            "periods": periods
+            "periods": team_periods
         })
     
     return jsonify({"teams": teams})
 
 
 @app.route("/api/teams/<team_id>/month/<from_date>/<to_date>")
-def api_team_month(team_id: str, from_date: str, to_date: str):
+@app.route("/api/teams/<team_id>/month/<from_date>")
+def api_team_month(team_id: str, from_date: str, to_date: str = None):
     """Get aggregated monthly summary for a team."""
     teams_file_path = os.path.join(BASE_DIR, "configuration/teams.json")
     
@@ -3740,8 +3775,45 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
         abort(404, description="Team not found")
     
     team = teams_config[team_id]
+    team_name = team.get("name", team_id)
+    
+    # If to_date is None, from_date is in YYYY-MM format, try to load the file directly
+    if to_date is None or from_date == to_date:
+        # Try loading from YYYY-MM.json format
+        month_str = from_date if to_date is None else from_date
+        team_file = os.path.join(STATS_ROOT, "teams", team_name, f"{month_str}.json")
+        
+        if os.path.exists(team_file):
+            try:
+                with open(team_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # Convert to expected format
+                    return jsonify({
+                        "type": "team",
+                        "team_id": team_id,
+                        "team_name": team_name,
+                        "description": team.get("description", ""),
+                        "members": data.get("members", []),
+                        "responsible_subsystems": data.get("responsible_subsystems", []),
+                        "responsible_subsystem_details": data.get("responsible_subsystem_details", {}),
+                        "total_responsible_lines": data.get("total_responsible_lines", 0),
+                        "total_commits": data.get("commits", 0),
+                        "total_additions": data.get("lines_added", 0),
+                        "total_deletions": data.get("lines_deleted", 0),
+                        "languages": data.get("languages", {}),
+                        "subsystems": data.get("subsystems", {}),
+                        "per_date": data.get("per_date", {}),
+                        "member_contributions": data.get("member_contributions", {})
+                    })
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Error loading team file {team_file}: {e}")
+    
+    # Fall back to old aggregation method if file doesn't exist
     members = team.get("members", [])
     responsible_subsystems = get_team_responsible_subsystems(team_id)
+    
+    if to_date is None:
+        to_date = from_date
     
     # Load aliases to resolve canonical user slugs
     alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
@@ -3912,6 +3984,52 @@ def api_team_month(team_id: str, from_date: str, to_date: str):
 @app.route("/api/teams/<team_id>/year/<int:year>")
 def api_team_year(team_id: str, year: int):
     """Get aggregated yearly summary for a team."""
+    teams_file_path = os.path.join(BASE_DIR, "configuration/teams.json")
+    
+    if not os.path.exists(teams_file_path):
+        abort(404, description="Teams configuration not found")
+    
+    try:
+        with open(teams_file_path, "r", encoding="utf-8") as f:
+            teams_config = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        abort(404, description="Invalid teams configuration")
+    
+    if team_id not in teams_config:
+        abort(404, description="Team not found")
+    
+    team = teams_config[team_id]
+    team_name = team.get("name", team_id)
+    
+    # Try loading from YYYY.json format
+    team_file = os.path.join(STATS_ROOT, "teams", team_name, f"{year}.json")
+    
+    if os.path.exists(team_file):
+        try:
+            with open(team_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Convert to expected format
+                return jsonify({
+                    "type": "team",
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "description": team.get("description", ""),
+                    "members": data.get("members", []),
+                    "responsible_subsystems": data.get("responsible_subsystems", []),
+                    "responsible_subsystem_details": data.get("responsible_subsystem_details", {}),
+                    "total_responsible_lines": data.get("total_responsible_lines", 0),
+                    "total_commits": data.get("commits", 0),
+                    "total_additions": data.get("lines_added", 0),
+                    "total_deletions": data.get("lines_deleted", 0),
+                    "languages": data.get("languages", {}),
+                    "subsystems": data.get("subsystems", {}),
+                    "per_date": data.get("per_date", {}),
+                    "member_contributions": data.get("member_contributions", {})
+                })
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading team file {team_file}: {e}")
+    
+    # Fall back to old aggregation method
     from_date = f"{year:04d}-01-01"
     to_date = f"{year:04d}-12-31"
     return api_team_month(team_id, from_date, to_date)

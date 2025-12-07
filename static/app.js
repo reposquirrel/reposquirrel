@@ -1411,10 +1411,20 @@ function getLanguageStats(summary) {
     const shouldInclude = realLanguages.has(lang) && !excludeLanguages.has(lang);
     
     if (shouldInclude) {
-      const added = stats.additions || 0;
-      const deleted = stats.deletions || 0;
-      labels.push(lang);
-      values.push(added + deleted);
+      // Handle both formats: object with additions/deletions or just a number
+      let lineCount;
+      if (typeof stats === 'object' && stats !== null) {
+        const added = stats.additions || 0;
+        const deleted = stats.deletions || 0;
+        lineCount = added + deleted;
+      } else {
+        lineCount = stats || 0;
+      }
+      
+      if (lineCount > 0) {
+        labels.push(lang);
+        values.push(lineCount);
+      }
     }
   }
   
@@ -2555,9 +2565,9 @@ async function renderTeamDashboard(team, period, summary) {
     
     // Sort subsystems by line count (highest first)
     const sortedSubsystems = summary.responsible_subsystems.map(subsystemName => {
-      const details = summary.responsible_subsystem_details?.[subsystemName] || { name: subsystemName, lines_of_code: 0 };
+      const details = summary.responsible_subsystem_details?.[subsystemName] || { name: subsystemName, lines: 0 };
       return details;
-    }).sort((a, b) => b.lines_of_code - a.lines_of_code);
+    }).sort((a, b) => (b.lines || 0) - (a.lines || 0));
     
     sortedSubsystems.forEach(subsystemDetail => {
       const subsystemRow = document.createElement("div");
@@ -2590,7 +2600,7 @@ async function renderTeamDashboard(team, period, summary) {
       const lineCount = document.createElement("span");
       lineCount.style.color = "var(--text-secondary)";
       lineCount.style.fontFamily = "monospace";
-      lineCount.textContent = `${subsystemDetail.lines_of_code.toLocaleString()} lines`;
+      lineCount.textContent = `${(subsystemDetail.lines || 0).toLocaleString()} lines`;
       
       subsystemRow.appendChild(subsystemName);
       subsystemRow.appendChild(lineCount);
@@ -2638,9 +2648,9 @@ async function renderTeamDashboard(team, period, summary) {
 
   const kpis = [
     { label: "Team Members", value: summary.members?.length || 0 },
-    { label: "Total Commits", value: summary.total_commits || 0 },
-    { label: "Lines Added", value: summary.total_additions || 0 },
-    { label: "Lines Deleted", value: summary.total_deletions || 0 },
+    { label: "Total Commits", value: summary.total_commits || summary.commits || 0 },
+    { label: "Lines Added", value: summary.total_additions || summary.lines_added || 0 },
+    { label: "Lines Deleted", value: summary.total_deletions || summary.lines_deleted || 0 },
     { label: "Primary Language", value: primaryLanguage }
   ];
 
@@ -2748,9 +2758,9 @@ async function renderTeamDashboard(team, period, summary) {
 
     // Calculate totals
     const totals = membersList.reduce((acc, [_, contrib]) => ({
-      commits: acc.commits + contrib.commits,
-      additions: acc.additions + contrib.additions,
-      deletions: acc.deletions + contrib.deletions
+      commits: acc.commits + (contrib.commits || 0),
+      additions: acc.additions + (contrib.additions || 0),
+      deletions: acc.deletions + (contrib.deletions || 0)
     }), { commits: 0, additions: 0, deletions: 0 });
 
     // Create member contributions table
@@ -2775,9 +2785,9 @@ async function renderTeamDashboard(team, period, summary) {
           return `
             <tr class="${rowClass}" data-member="${member}" data-active="${isActive}">
               <td><strong ${nameStyle}>${member}</strong></td>
-              <td>${contrib.commits}</td>
-              <td style="color: #22c55e;">${contrib.additions}</td>
-              <td style="color: #ef4444;">${contrib.deletions}</td>
+              <td>${contrib.commits || 0}</td>
+              <td style="color: #22c55e;">${(contrib.additions || 0).toLocaleString()}</td>
+              <td style="color: #ef4444;">${(contrib.deletions || 0).toLocaleString()}</td>
             </tr>
           `;
         }).join('')}
@@ -2785,9 +2795,9 @@ async function renderTeamDashboard(team, period, summary) {
       <tfoot>
         <tr style="font-weight: bold; border-top: 2px solid #e5e7eb;">
           <td>Total</td>
-          <td>${totals.commits}</td>
-          <td style="color: #22c55e;">${totals.additions}</td>
-          <td style="color: #ef4444;">${totals.deletions}</td>
+          <td>${totals.commits.toLocaleString()}</td>
+          <td style="color: #22c55e;">${totals.additions.toLocaleString()}</td>
+          <td style="color: #ef4444;">${totals.deletions.toLocaleString()}</td>
         </tr>
       </tfoot>
     `;
@@ -2916,18 +2926,18 @@ async function renderTeamDashboard(team, period, summary) {
         ${subsystemsList.map(([subsystem, data]) => `
           <tr class="clickable-row" data-subsystem="${subsystem}">
             <td><strong>${subsystem}</strong></td>
-            <td>${data.commits}</td>
-            <td style="color: #22c55e;">${data.additions || 0}</td>
-            <td style="color: #ef4444;">${data.deletions || 0}</td>
+            <td>${(data.commits || 0).toLocaleString()}</td>
+            <td style="color: #22c55e;">${(data.additions || 0).toLocaleString()}</td>
+            <td style="color: #ef4444;">${(data.deletions || 0).toLocaleString()}</td>
           </tr>
         `).join('')}
       </tbody>
       <tfoot>
         <tr style="font-weight: bold; border-top: 2px solid #e5e7eb;">
           <td>Total</td>
-          <td>${subsystemTotals.commits}</td>
-          <td style="color: #22c55e;">${subsystemTotals.additions}</td>
-          <td style="color: #ef4444;">${subsystemTotals.deletions}</td>
+          <td>${subsystemTotals.commits.toLocaleString()}</td>
+          <td style="color: #22c55e;">${subsystemTotals.additions.toLocaleString()}</td>
+          <td style="color: #ef4444;">${subsystemTotals.deletions.toLocaleString()}</td>
         </tr>
       </tfoot>
     `;
@@ -5165,11 +5175,11 @@ async function showTeamsOverviewDashboard() {
             <div class="team-stats">
               <div class="team-stat">
                 <span class="stat-label">Commits:</span>
-                <span class="stat-value">${teamAnalytics.total_commits.toLocaleString()}</span>
+                <span class="stat-value">${(teamAnalytics.total_commits || 0).toLocaleString()}</span>
               </div>
               <div class="team-stat">
                 <span class="stat-label">Lines Changed:</span>
-                <span class="stat-value">${teamAnalytics.total_lines_changed.toLocaleString()}</span>
+                <span class="stat-value">${(teamAnalytics.total_lines_changed || 0).toLocaleString()}</span>
               </div>
               <div class="team-stat">
                 <span class="stat-label">Subsystems:</span>
@@ -5309,8 +5319,15 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
       subtitle: "By responsible codebase size",
       emoji: "🏗️",
       tooltip: "Teams ranked by the total lines of code they are responsible for maintaining. Based on designated team ownership of subsystems in settings.",
-      data: [...teamsAnalytics].sort((a, b) => (b.responsible_lines_of_code || 0) - (a.responsible_lines_of_code || 0)).slice(0, 10),
-      getValue: (team) => `${(team.responsible_lines_of_code || 0).toLocaleString()} lines`,
+      data: [...teamsAnalytics].sort((a, b) => {
+        const aLines = typeof a.responsible_lines_of_code === 'number' ? a.responsible_lines_of_code : 0;
+        const bLines = typeof b.responsible_lines_of_code === 'number' ? b.responsible_lines_of_code : 0;
+        return bLines - aLines;
+      }).slice(0, 10),
+      getValue: (team) => {
+        const lines = typeof team.responsible_lines_of_code === 'number' ? team.responsible_lines_of_code : 0;
+        return `${lines.toLocaleString()} lines`;
+      },
       getSubtext: (team) => `${team.responsible_subsystems_count || 0} subsystems managed`
     }
   ];
@@ -5971,8 +5988,14 @@ function getCorrectPrimaryLanguage(languages) {
     const shouldInclude = realLanguages.has(lang) && !excludeLanguages.has(lang);
     
     if (shouldInclude) {
-      // Use additions + deletions as a measure of activity, or code_lines if available
-      const langActivity = (stats.additions || 0) + (stats.deletions || 0) || stats.code_lines || 0;
+      // Handle both formats: object with additions/deletions or just a number
+      let langActivity;
+      if (typeof stats === 'object' && stats !== null) {
+        langActivity = (stats.additions || 0) + (stats.deletions || 0) || stats.code_lines || 0;
+      } else {
+        langActivity = stats || 0;
+      }
+      
       if (langActivity > maxLines) {
         maxLines = langActivity;
         primaryLanguage = lang;
