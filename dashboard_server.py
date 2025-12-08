@@ -2618,6 +2618,57 @@ def api_settings_repositories():
             return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/settings/capacity-config", methods=["GET", "POST"])
+def api_settings_capacity_config():
+    """Get or update capacity configuration."""
+    config_file = os.path.join(BASE_DIR, "configuration", "capacity_config.json")
+    
+    if request.method == "GET":
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, "r") as f:
+                    config = json.load(f)
+            else:
+                # Return defaults if file doesn't exist
+                config = {
+                    "default_lines_per_developer": 20000,
+                    "language_lines_per_developer": {},
+                    "warning_threshold_percent": 90,
+                    "critical_threshold_percent": 100
+                }
+            return jsonify(config)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    elif request.method == "POST":
+        try:
+            data = request.get_json()
+            
+            # Validate the configuration
+            if "default_lines_per_developer" in data:
+                if not isinstance(data["default_lines_per_developer"], (int, float)) or data["default_lines_per_developer"] <= 0:
+                    return jsonify({"error": "default_lines_per_developer must be a positive number"}), 400
+            
+            if "warning_threshold_percent" in data:
+                if not isinstance(data["warning_threshold_percent"], (int, float)) or not (0 <= data["warning_threshold_percent"] <= 100):
+                    return jsonify({"error": "warning_threshold_percent must be between 0 and 100"}), 400
+            
+            if "critical_threshold_percent" in data:
+                if not isinstance(data["critical_threshold_percent"], (int, float)) or not (0 <= data["critical_threshold_percent"] <= 100):
+                    return jsonify({"error": "critical_threshold_percent must be between 0 and 100"}), 400
+            
+            # Ensure configuration directory exists
+            os.makedirs(os.path.dirname(config_file), exist_ok=True)
+            
+            # Save the configuration
+            with open(config_file, "w") as f:
+                json.dump(data, f, indent=2)
+            
+            return jsonify({"success": True, "message": "Capacity configuration updated successfully"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/settings/repositories/clone-progress/<progress_id>", methods=["GET"])
 def api_clone_progress(progress_id):
     """Get clone progress for a specific operation."""
@@ -3988,6 +4039,97 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
     return jsonify(aggregated_data)
 
 
+def calculate_team_capacity(languages: Dict[str, int], team_size: int) -> Dict[str, Any]:
+    """Calculate team capacity analysis based on lines of code by language."""
+    config_file = os.path.join(BASE_DIR, "configuration", "capacity_config.json")
+    
+    # Define non-code languages to exclude from capacity analysis
+    excluded_languages = {
+        'HTML', 'CSS', 'SCSS', 'Sass', 'Less',
+        'JSON', 'YAML', 'XML', 'TOML', 'INI',
+        'Markdown', 'reStructuredText', 'AsciiDoc', 'LaTeX', 'TeX',
+        'CSV', 'TSV', 'Properties', 'Dockerfile', 'Makefile',
+        'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
+        'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
+        'Mustache', 'Handlebars', 'Jinja', 'Smarty',
+        'SVG', 'PostScript', 'Rich Text Format',
+        'Unknown'
+    }
+    
+    # Load capacity configuration
+    try:
+        if os.path.exists(config_file):
+            with open(config_file, "r") as f:
+                config = json.load(f)
+        else:
+            config = {
+                "default_lines_per_developer": 20000,
+                "language_lines_per_developer": {},
+                "warning_threshold_percent": 90,
+                "critical_threshold_percent": 100
+            }
+    except:
+        config = {
+            "default_lines_per_developer": 20000,
+            "language_lines_per_developer": {},
+            "warning_threshold_percent": 90,
+            "critical_threshold_percent": 100
+        }
+    
+    default_lines = config.get("default_lines_per_developer", 20000)
+    language_config = config.get("language_lines_per_developer", {})
+    warning_threshold = config.get("warning_threshold_percent", 90)
+    critical_threshold = config.get("critical_threshold_percent", 100)
+    
+    # Calculate required developers per language (excluding non-code languages)
+    total_required_developers = 0.0
+    language_breakdown = {}
+    
+    for language, lines in languages.items():
+        # Skip non-code languages
+        if language in excluded_languages:
+            continue
+        lines_per_dev = language_config.get(language, default_lines)
+        required_devs = lines / lines_per_dev
+        total_required_developers += required_devs
+        language_breakdown[language] = {
+            "lines": lines,
+            "lines_per_developer": lines_per_dev,
+            "theoretical_devs": round(required_devs, 2)
+        }
+    
+    # Calculate capacity status
+    if team_size == 0:
+        capacity_percent = 0
+        status = "unknown"
+        status_color = "gray"
+    else:
+        capacity_percent = (total_required_developers / team_size) * 100
+        
+        if capacity_percent <= warning_threshold:
+            status = "healthy"
+            status_color = "green"
+        elif capacity_percent <= critical_threshold:
+            status = "warning"
+            status_color = "yellow"
+        else:
+            status = "critical"
+            status_color = "red"
+    
+    return {
+        "team_size": team_size,
+        "required_developers": round(total_required_developers, 2),
+        "capacity_percent": round(capacity_percent, 1),
+        "status": status,
+        "status_color": status_color,
+        "language_breakdown": language_breakdown,
+        "thresholds": {
+            "warning": warning_threshold,
+            "critical": critical_threshold
+        }
+    }
+
+
 @app.route("/api/teams/<team_id>/year/<int:year>")
 def api_team_year(team_id: str, year: int):
     """Get aggregated yearly summary for a team."""
@@ -4015,6 +4157,22 @@ def api_team_year(team_id: str, year: int):
         try:
             with open(team_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                
+                # Calculate capacity analysis based on responsible subsystems ownership
+                responsible_subsystem_details = data.get("responsible_subsystem_details", {})
+                languages = {}
+                
+                # Aggregate language lines from responsible subsystems
+                for subsystem_name, details in responsible_subsystem_details.items():
+                    subsystem_languages = details.get("languages", {})
+                    for lang, lines in subsystem_languages.items():
+                        if lang not in languages:
+                            languages[lang] = 0
+                        languages[lang] += lines
+                
+                team_size = len(data.get("members", []))
+                capacity_analysis = calculate_team_capacity(languages, team_size)
+                
                 # Convert to expected format
                 return jsonify({
                     "type": "team",
@@ -4028,10 +4186,11 @@ def api_team_year(team_id: str, year: int):
                     "total_commits": data.get("commits", 0),
                     "total_additions": data.get("lines_added", 0),
                     "total_deletions": data.get("lines_deleted", 0),
-                    "languages": data.get("languages", {}),
+                    "languages": languages,
                     "subsystems": data.get("subsystems", {}),
                     "per_date": data.get("per_date", {}),
-                    "member_contributions": data.get("member_contributions", {})
+                    "member_contributions": data.get("member_contributions", {}),
+                    "capacity_analysis": capacity_analysis
                 })
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error loading team file {team_file}: {e}")

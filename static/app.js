@@ -1400,7 +1400,7 @@ function getLanguageStats(summary) {
     'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
     'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
     'Mustache', 'Handlebars', 'Jinja', 'Smarty',
-    'SVG', 'PostScript', 'Rich Text Format'
+    'SVG', 'PostScript', 'Rich Text Format', 'Unknown'
   ]);
 
   const labels = [];
@@ -2633,6 +2633,96 @@ async function renderTeamDashboard(team, period, summary) {
     responsibilitiesContainer.appendChild(responsibilitiesTitle);
     responsibilitiesContainer.appendChild(subsystemsList);
     main.appendChild(responsibilitiesContainer);
+  }
+
+  // Team capacity analysis (only for yearly view)
+  if (period.is_yearly && summary.capacity_analysis) {
+    const capacityContainer = document.createElement("div");
+    capacityContainer.className = "team-capacity-analysis";
+    capacityContainer.style.marginBottom = "20px";
+    capacityContainer.style.padding = "15px";
+    capacityContainer.style.backgroundColor = "var(--background-secondary)";
+    capacityContainer.style.borderRadius = "8px";
+    
+    const analysis = summary.capacity_analysis;
+    
+    // Set border color based on status
+    const borderColors = {
+      'green': '#10b981',
+      'yellow': '#f59e0b',
+      'red': '#ef4444',
+      'gray': '#6b7280'
+    };
+    capacityContainer.style.borderLeft = `4px solid ${borderColors[analysis.status_color] || borderColors.gray}`;
+    
+    const capacityTitle = document.createElement("h4");
+    capacityTitle.style.margin = "0 0 15px 0";
+    capacityTitle.style.color = "var(--text-primary)";
+    
+    // Status emoji based on status
+    const statusEmoji = {
+      'healthy': '✅',
+      'warning': '⚠️',
+      'critical': '🔴',
+      'unknown': '❓'
+    };
+    
+    capacityTitle.innerHTML = `<strong>${statusEmoji[analysis.status] || '📊'} Team Capacity Analysis</strong>`;
+    
+    // Summary row
+    const summaryRow = document.createElement("div");
+    summaryRow.style.display = "flex";
+    summaryRow.style.justifyContent = "space-between";
+    summaryRow.style.marginBottom = "15px";
+    summaryRow.style.padding = "12px";
+    summaryRow.style.backgroundColor = "var(--background-primary)";
+    summaryRow.style.borderRadius = "6px";
+    
+    const teamSizeText = document.createElement("div");
+    teamSizeText.innerHTML = `<strong>Team Size:</strong> ${analysis.team_size} developers`;
+    
+    const requiredText = document.createElement("div");
+    requiredText.innerHTML = `<strong>Theoretical Need:</strong> ${analysis.required_developers.toFixed(1)} developers`;
+    
+    const capacityText = document.createElement("div");
+    capacityText.innerHTML = `<strong>Capacity:</strong> <span style="color: ${borderColors[analysis.status_color]}; font-weight: bold;">${analysis.capacity_percent}%</span>`;
+    
+    summaryRow.appendChild(teamSizeText);
+    summaryRow.appendChild(requiredText);
+    summaryRow.appendChild(capacityText);
+    
+    // Language breakdown
+    const languageBreakdown = document.createElement("div");
+    languageBreakdown.style.marginTop = "15px";
+    
+    const breakdownTitle = document.createElement("div");
+    breakdownTitle.innerHTML = "<strong>Lines per Language:</strong>";
+    breakdownTitle.style.marginBottom = "8px";
+    languageBreakdown.appendChild(breakdownTitle);
+    
+    for (const [lang, data] of Object.entries(analysis.language_breakdown)) {
+      const langRow = document.createElement("div");
+      langRow.style.display = "flex";
+      langRow.style.justifyContent = "space-between";
+      langRow.style.padding = "4px 8px";
+      langRow.style.fontSize = "0.9em";
+      
+      const langName = document.createElement("span");
+      langName.textContent = lang;
+      
+      const langStats = document.createElement("span");
+      langStats.innerHTML = `${data.lines.toLocaleString()} lines → ${data.theoretical_devs.toFixed(1)} devs`;
+      langStats.style.color = "var(--text-secondary)";
+      
+      langRow.appendChild(langName);
+      langRow.appendChild(langStats);
+      languageBreakdown.appendChild(langRow);
+    }
+    
+    capacityContainer.appendChild(capacityTitle);
+    capacityContainer.appendChild(summaryRow);
+    capacityContainer.appendChild(languageBreakdown);
+    main.appendChild(capacityContainer);
   }
 
   // KPIs
@@ -5793,7 +5883,7 @@ async function addLanguageLinesDistribution(container) {
       'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
       'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
       'Mustache', 'Handlebars', 'Jinja', 'Smarty',
-      'SVG', 'PostScript', 'Rich Text Format'
+      'SVG', 'PostScript', 'Rich Text Format', 'Unknown'
     ]);
     
     // Filter languages
@@ -5926,7 +6016,7 @@ function getPrimaryLanguage(languages) {
     'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
     'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
     'Mustache', 'Handlebars', 'Jinja', 'Smarty',
-    'SVG', 'PostScript', 'Rich Text Format'
+    'SVG', 'PostScript', 'Rich Text Format', 'Unknown'
   ]);
 
   let maxLines = 0;
@@ -5976,7 +6066,7 @@ function getCorrectPrimaryLanguage(languages) {
     'Text', 'Binary', 'Data', 'Image', 'Video', 'Audio',
     'Protocol Buffer', 'Thrift', 'Avro', 'GraphQL',
     'Mustache', 'Handlebars', 'Jinja', 'Smarty',
-    'SVG', 'PostScript', 'Rich Text Format'
+    'SVG', 'PostScript', 'Rich Text Format', 'Unknown'
   ]);
 
   let maxLines = 0;
