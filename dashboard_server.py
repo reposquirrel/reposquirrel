@@ -109,27 +109,67 @@ def list_user_months() -> Dict[str, List[Dict[str, Any]]]:
         if not os.path.isdir(user_path):
             continue
         month_entries: List[Dict[str, Any]] = []
+        
+        # Check for yearly summaries in year/ subfolder
+        year_dir = os.path.join(user_path, "year")
+        if os.path.isdir(year_dir):
+            for year_file in sorted(os.listdir(year_dir)):
+                if year_file.endswith(".json"):
+                    year = year_file[:-5]  # Remove .json
+                    if year.isdigit() and len(year) == 4:
+                        month_entries.append({
+                            "from": f"{year}-01-01",
+                            "to": f"{year}-12-31",
+                            "label": year,
+                            "folder": f"year/{year_file}",
+                            "is_yearly": True,
+                        })
+        
+        # Check for monthly folders
         for entry in sorted(os.listdir(user_path)):
+            if entry == "year":  # Skip year directory, already processed
+                continue
+                
             subdir = os.path.join(user_path, entry)
             if not os.path.isdir(subdir):
                 continue
-            # We expect directories like "YYYY-MM-DD_YYYY-MM-DD"
-            if "_" not in entry:
-                continue
-            date_from, date_to = entry.split("_", 1)
             
-            # Check if this is a yearly summary (e.g., "2025-01-01_2025-12-31")
-            is_yearly = (date_from.endswith("-01-01") and date_to.endswith("-12-31") and 
-                        date_from[:4] == date_to[:4])
-            
-            if is_yearly:
-                label = date_from[:4]  # Just the year
-            else:
-                label = date_from[:7] if len(date_from) >= 7 else entry  # YYYY-MM
-                
             summary_path = os.path.join(subdir, "summary.json")
             if not os.path.isfile(summary_path):
                 continue
+            
+            # Support both formats: "YYYY-MM-DD_YYYY-MM-DD" and "YYYY-MM" and "YYYY"
+            if "_" in entry:
+                # Old format: "YYYY-MM-DD_YYYY-MM-DD"
+                date_from, date_to = entry.split("_", 1)
+                # Check if this is a yearly summary (e.g., "2025-01-01_2025-12-31")
+                is_yearly = (date_from.endswith("-01-01") and date_to.endswith("-12-31") and 
+                            date_from[:4] == date_to[:4])
+                if is_yearly:
+                    label = date_from[:4]  # Just the year
+                else:
+                    label = date_from[:7] if len(date_from) >= 7 else entry  # YYYY-MM
+            elif len(entry) == 4 and entry.isdigit():
+                # New format: "YYYY" (yearly)
+                label = entry
+                date_from = f"{entry}-01-01"
+                date_to = f"{entry}-12-31"
+                is_yearly = True
+            elif len(entry) == 7 and entry[4] == '-':
+                # New format: "YYYY-MM" (monthly)
+                label = entry
+                year, month = entry.split('-')
+                date_from = f"{year}-{month}-01"
+                # Approximate end date (last day of month)
+                if month == '12':
+                    date_to = f"{year}-12-31"
+                else:
+                    next_month = int(month) + 1
+                    date_to = f"{year}-{next_month:02d}-01"
+                is_yearly = False
+            else:
+                continue
+                
             month_entries.append(
                 {
                     "from": date_from,
@@ -1120,9 +1160,7 @@ def api_user_month(user_slug: str, from_date: str, to_date: str):
 @app.route("/api/users/<user_slug>/year/<int:year>")
 def api_user_year(user_slug: str, year: int):
     """Get yearly summary for a user."""
-    from_date = f"{year:04d}-01-01"
-    to_date = f"{year:04d}-12-31"
-    path = find_user_summary(user_slug, from_date, to_date)
+    path = os.path.join(STATS_ROOT, "users", user_slug, "year", f"{year}.json")
     if not os.path.isfile(path):
         abort(404, description="User yearly summary not found")
     data = load_json(path)
@@ -2039,7 +2077,7 @@ def api_users_overview():
                 }
                 
                 # Look for last month's data
-                monthly_folder = f"{last_month_start}_{last_month_end}"
+                monthly_folder = f"{last_year:04d}-{last_month:02d}"
                 monthly_path = os.path.join(user_dir, monthly_folder, "summary.json")
                 
                 if os.path.exists(monthly_path):
@@ -2055,22 +2093,31 @@ def api_users_overview():
                     except (json.JSONDecodeError, IOError):
                         pass
                 
-                # Look for yearly data
-                yearly_folder = f"{current_year:04d}-01-01_{current_year:04d}-12-31"
-                yearly_path = os.path.join(user_dir, yearly_folder, "summary.json")
+                # Aggregate yearly data from monthly folders
+                yearly_commits = 0
+                yearly_lines_added = 0
+                yearly_lines_deleted = 0
                 
-                if os.path.exists(yearly_path):
-                    try:
-                        with open(yearly_path, "r", encoding="utf-8") as f:
-                            yearly_data = json.load(f)
-                        
-                        user_data["display_name"] = yearly_data.get("author_name", user_slug)
-                        user_data["yearly_commits"] = yearly_data.get("total_commits", 0)
-                        user_data["yearly_lines_added"] = yearly_data.get("total_lines_added", 0)
-                        user_data["yearly_lines_deleted"] = yearly_data.get("total_lines_deleted", 0)
-                        
-                    except (json.JSONDecodeError, IOError):
-                        pass
+                for month in range(1, 13):
+                    month_folder = f"{current_year:04d}-{month:02d}"
+                    month_path = os.path.join(user_dir, month_folder, "summary.json")
+                    
+                    if os.path.exists(month_path):
+                        try:
+                            with open(month_path, "r", encoding="utf-8") as f:
+                                month_data = json.load(f)
+                            
+                            user_data["display_name"] = month_data.get("author_name", user_slug)
+                            yearly_commits += month_data.get("total_commits", 0)
+                            yearly_lines_added += month_data.get("total_lines_added", 0)
+                            yearly_lines_deleted += month_data.get("total_lines_deleted", 0)
+                            
+                        except (json.JSONDecodeError, IOError):
+                            pass
+                
+                user_data["yearly_commits"] = yearly_commits
+                user_data["yearly_lines_added"] = yearly_lines_added
+                user_data["yearly_lines_deleted"] = yearly_lines_deleted
                 
                 if user_data["monthly_commits"] > 0 or user_data["yearly_commits"] > 0:
                     users_activity.append(user_data)
@@ -4077,7 +4124,7 @@ def calculate_team_capacity(languages: Dict[str, int], team_size: int) -> Dict[s
         }
     
     default_lines = config.get("default_lines_per_developer", 20000)
-    language_config = config.get("language_lines_per_developer", {})
+    language_config = config.get("languages", {})
     warning_threshold = config.get("warning_threshold_percent", 90)
     critical_threshold = config.get("critical_threshold_percent", 100)
     
@@ -4159,20 +4206,52 @@ def api_team_year(team_id: str, year: int):
                 data = json.load(f)
                 
                 # Calculate capacity analysis based on responsible subsystems ownership
-                responsible_subsystem_details = data.get("responsible_subsystem_details", {})
+                # Recompute responsible_subsystem_details from current responsibilities + languages.json
+                responsibilities_file = os.path.join(BASE_DIR, "configuration", "team_subsystem_responsibilities.json")
+                team_responsibilities = []
+                try:
+                    with open(responsibilities_file, "r", encoding="utf-8") as rf:
+                        resp_map = json.load(rf)
+                        team_responsibilities = resp_map.get(team_id, [])
+                except Exception:
+                    team_responsibilities = []
+                recomputed_details = {}
+                total_responsible_lines = 0
+                for subsystem_name in team_responsibilities:
+                    lang_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "languages.json")
+                    subsystem_languages = {}
+                    subsystem_lines = 0
+                    if os.path.isfile(lang_path):
+                        try:
+                            with open(lang_path, "r", encoding="utf-8") as lf:
+                                lang_data = json.load(lf)
+                                for lang_name, lang_info in (lang_data.get("languages", {}) or {}).items():
+                                    code_lines = lang_info.get("code_lines", 0)
+                                    subsystem_languages[lang_name] = code_lines
+                                    subsystem_lines += code_lines
+                        except Exception:
+                            pass
+                    recomputed_details[subsystem_name] = {
+                        "name": subsystem_name,
+                        "lines": subsystem_lines,
+                        "languages": subsystem_languages
+                    }
+                    total_responsible_lines += subsystem_lines
+                # Aggregate language lines from recomputed details
                 languages = {}
-                
-                # Aggregate language lines from responsible subsystems
-                for subsystem_name, details in responsible_subsystem_details.items():
-                    subsystem_languages = details.get("languages", {})
-                    for lang, lines in subsystem_languages.items():
-                        if lang not in languages:
-                            languages[lang] = 0
-                        languages[lang] += lines
-                
+                for subsystem_name, details in recomputed_details.items():
+                    for lang, lines in details.get("languages", {}).items():
+                        languages[lang] = languages.get(lang, 0) + lines
                 team_size = len(data.get("members", []))
                 capacity_analysis = calculate_team_capacity(languages, team_size)
                 
+                # Normalize subsystem keys for frontend (expects 'additions'/'deletions')
+                subsystems = data.get("subsystems", {})
+                for sub_name, stats in subsystems.items():
+                    if "additions" not in stats and "lines_added" in stats:
+                        stats["additions"] = stats.get("lines_added", 0)
+                    if "deletions" not in stats and "lines_deleted" in stats:
+                        stats["deletions"] = stats.get("lines_deleted", 0)
                 # Convert to expected format
                 return jsonify({
                     "type": "team",
@@ -4180,14 +4259,14 @@ def api_team_year(team_id: str, year: int):
                     "team_name": team_name,
                     "description": team.get("description", ""),
                     "members": data.get("members", []),
-                    "responsible_subsystems": data.get("responsible_subsystems", []),
-                    "responsible_subsystem_details": data.get("responsible_subsystem_details", {}),
-                    "total_responsible_lines": data.get("total_responsible_lines", 0),
+                    "responsible_subsystems": team_responsibilities,
+                    "responsible_subsystem_details": recomputed_details,
+                    "total_responsible_lines": total_responsible_lines,
                     "total_commits": data.get("commits", 0),
                     "total_additions": data.get("lines_added", 0),
                     "total_deletions": data.get("lines_deleted", 0),
                     "languages": languages,
-                    "subsystems": data.get("subsystems", {}),
+                    "subsystems": subsystems,
                     "per_date": data.get("per_date", {}),
                     "member_contributions": data.get("member_contributions", {}),
                     "capacity_analysis": capacity_analysis
@@ -4805,42 +4884,104 @@ def get_user_daily_stats(user_slug: str, year: int, month: int) -> List[Dict[str
     """
     Get daily line addition/deletion statistics for a user for a specific month.
     Returns list of daily data with dates and line counts.
+    Aggregates data from all aliased user names.
+    Also matches folders by normalized name to include accented/variant slugs.
     """
     users_root = os.path.join(STATS_ROOT, "users")
-    user_dir = os.path.join(users_root, user_slug)
     
-    daily_stats = []
+    # Load aliases to get all user names that should be aggregated
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    alias_map = {}
+    if os.path.exists(alias_file):
+        try:
+            alias_map = load_json(alias_file)
+        except:
+            pass
     
-    if not os.path.exists(user_dir):
-        return daily_stats
+    user_names = [user_slug]
     
-    user_periods = list_user_months().get(user_slug, [])
+    # Find all aliases that map to this user
+    for canonical, aliases in alias_map.items():
+        if canonical == user_slug:
+            user_names.extend(aliases)
+        elif isinstance(aliases, list) and user_slug in aliases:
+            user_names.append(canonical)
+            user_names.extend([a for a in aliases if a != user_slug])
+            break
+        elif isinstance(aliases, str) and user_slug == aliases:
+            user_names.append(canonical)
+            break
     
-    # Find the monthly summary that matches our year/month
+    # Also try to match by normalized folder names (handles accents/case differences)
+    try:
+        import unicodedata
+        def normalize(s: str) -> str:
+            s = unicodedata.normalize('NFKD', s)
+            s = ''.join(c for c in s if not unicodedata.combining(c))
+            return s.lower().strip()
+        normalized_target = normalize(user_slug)
+        if os.path.isdir(users_root):
+            for folder in os.listdir(users_root):
+                try:
+                    if normalize(folder) == normalized_target and folder not in user_names:
+                        user_names.append(folder)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    
+    # Aggregate daily stats from all user names
+    aggregated_by_date = {}
     target_month = f"{year:04d}-{month:02d}"
-    for period in user_periods:
-        if period["from"][:7] == target_month:  # Match YYYY-MM
-            monthly_folder = period["folder"]
-            summary_path = os.path.join(user_dir, monthly_folder, "summary.json")
-            
-            if os.path.exists(summary_path):
-                with open(summary_path, "r", encoding="utf-8") as f:
-                    summary_data = json.load(f)
+    user_months_all = list_user_months()
+    
+    for username in user_names:
+        user_dir = os.path.join(users_root, username)
+        if not os.path.exists(user_dir):
+            # Try normalized match again for safety
+            continue
+        
+        user_periods = user_months_all.get(username, [])
+        
+        # Find the monthly summary that matches our year/month
+        for period in user_periods:
+            if period.get("from", "")[:7] == target_month:  # Match YYYY-MM
+                monthly_folder = period.get("folder")
+                if not monthly_folder:
+                    continue
+                summary_path = os.path.join(user_dir, monthly_folder, "summary.json")
                 
-                per_date_data = summary_data.get("per_date", {})
-                
-                # Convert to list format with date strings
-                for date_str, day_data in per_date_data.items():
-                    if date_str[:7] == target_month:  # Only include days from target month
-                        daily_stats.append({
-                            "date": date_str,
-                            "day": int(date_str.split("-")[2]),
-                            "lines_added": day_data.get("additions", 0),
-                            "lines_deleted": day_data.get("deletions", 0),
-                            "commits": day_data.get("commits", 0)
-                        })
-                
-                break
+                if os.path.exists(summary_path):
+                    with open(summary_path, "r", encoding="utf-8") as f:
+                        summary_data = json.load(f)
+                    
+                    per_date_data = summary_data.get("per_date", {})
+                    
+                    # Aggregate by date
+                    for date_str, day_data in per_date_data.items():
+                        if date_str[:7] == target_month:  # Only include days from target month
+                            if date_str not in aggregated_by_date:
+                                aggregated_by_date[date_str] = {
+                                    "lines_added": 0,
+                                    "lines_deleted": 0,
+                                    "commits": 0
+                                }
+                            aggregated_by_date[date_str]["lines_added"] += day_data.get("additions", 0)
+                            aggregated_by_date[date_str]["lines_deleted"] += day_data.get("deletions", 0)
+                            aggregated_by_date[date_str]["commits"] += day_data.get("commits", 0)
+                    
+                    break
+    
+    # Convert to list format
+    daily_stats = []
+    for date_str, day_data in aggregated_by_date.items():
+        daily_stats.append({
+            "date": date_str,
+            "day": int(date_str.split("-")[2]),
+            "lines_added": day_data["lines_added"],
+            "lines_deleted": day_data["lines_deleted"],
+            "commits": day_data["commits"]
+        })
     
     # Sort by date
     daily_stats.sort(key=lambda x: x["date"])
@@ -4905,8 +5046,39 @@ def api_user_daily_stats(user_slug: str, year: int, month: int):
         stats = get_user_daily_stats(user_slug, year, month)
         return jsonify({"daily_stats": stats})
     except Exception as e:
-        app.logger.error(f"Error getting user daily stats: {e}")
-        abort(500, description="Failed to get daily statistics")
+        import traceback
+        app.logger.error(f"Error getting user daily stats for {user_slug} {year}-{month}: {e}")
+        app.logger.error(traceback.format_exc())
+        abort(500, description=f"Failed to get daily statistics: {str(e)}")
+
+@app.route("/api/users/<user_slug>/daily-stats/<int:year>")
+def api_user_daily_stats_year(user_slug: str, year: int):
+    """Get aggregated daily statistics for a user across the entire year."""
+    try:
+        aggregated = {}
+        # Aggregate each month present for the user in the given year
+        monthly_stats = get_user_monthly_stats(user_slug, year)
+        for m in monthly_stats:
+            # month is in YYYY-MM
+            try:
+                month_num = int(m["month"].split("-")[1])
+            except Exception:
+                continue
+            for day in get_user_daily_stats(user_slug, year, month_num):
+                date = day["date"]
+                if date not in aggregated:
+                    aggregated[date] = {"lines_added": 0, "lines_deleted": 0, "commits": 0}
+                aggregated[date]["lines_added"] += day["lines_added"]
+                aggregated[date]["lines_deleted"] += day["lines_deleted"]
+                aggregated[date]["commits"] += day["commits"]
+        # Convert to list
+        result = [{"date": d, "day": int(d.split("-")[2]), **vals} for d, vals in sorted(aggregated.items())]
+        return jsonify({"daily_stats": result})
+    except Exception as e:
+        import traceback
+        app.logger.error(f"Error getting yearly daily stats for {user_slug} {year}: {e}")
+        app.logger.error(traceback.format_exc())
+        abort(500, description=f"Failed to get yearly daily statistics: {str(e)}")
 
 
 @app.route("/api/teams/<team_id>/daily-stats/<int:year>/<int:month>")

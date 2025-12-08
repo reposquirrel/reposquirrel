@@ -274,6 +274,7 @@ def init_service_data(service_name: str, date_from: str, date_to: str) -> Dict[s
         "total_lines_added": 0,
         "total_lines_deleted": 0,
         "total_changed_lines": 0,
+        "per_date": {},      # YYYY-MM-DD -> daily stats
         "generated_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -291,6 +292,7 @@ def ensure_developer_entry(service_data: Dict[str, Any], slug: str, display_name
             "net_lines": 0,
             "changed_lines": 0,
             "repositories": {},  # repo_path -> repo-specific stats for this dev
+            "per_date": {},  # YYYY-MM-DD -> daily stats for this developer
         }
     else:
         # Update emails list if new
@@ -371,7 +373,7 @@ def analyze_repo_for_services(
         f"--since={date_from_dt.date().isoformat()}",
         f"--until={date_to_dt.date().isoformat()}",
         "--no-merges",
-        "--pretty=format:%H%x01%an%x01%ae",
+        "--pretty=format:%H%x01%an%x01%ae%x01%ai",
         "--numstat",
     ]
 
@@ -399,6 +401,7 @@ def analyze_repo_for_services(
     current_author_email: Optional[str] = None
     current_canonical_slug: Optional[str] = None
     current_display_name: Optional[str] = None
+    current_commit_date: Optional[str] = None  # YYYY-MM-DD format
     current_services_touched: Dict[str, Dict[str, int]] = {}  # service_name -> {adds: int, dels: int}
 
     def finalize_current_commit():
@@ -432,6 +435,21 @@ def analyze_repo_for_services(
             dev["lines_deleted"] += line_changes["dels"]
             dev["net_lines"] += line_changes["adds"] - line_changes["dels"]
             dev["changed_lines"] += line_changes["adds"] + line_changes["dels"]
+            
+            # Update developer's per_date stats
+            if current_commit_date:
+                if current_commit_date not in dev["per_date"]:
+                    dev["per_date"][current_commit_date] = {
+                        "commits": 0,
+                        "additions": 0,
+                        "deletions": 0,
+                        "net_lines": 0
+                    }
+                dev_date_stats = dev["per_date"][current_commit_date]
+                dev_date_stats["commits"] += 1
+                dev_date_stats["additions"] += line_changes["adds"]
+                dev_date_stats["deletions"] += line_changes["dels"]
+                dev_date_stats["net_lines"] += line_changes["adds"] - line_changes["dels"]
             
             # Update repo stats for this developer
             if repo_rel_path not in dev["repositories"]:
@@ -474,6 +492,21 @@ def analyze_repo_for_services(
             service_data["total_lines_added"] += line_changes["adds"]
             service_data["total_lines_deleted"] += line_changes["dels"]
             service_data["total_changed_lines"] += line_changes["adds"] + line_changes["dels"]
+            
+            # Update per_date stats if we have a commit date
+            if current_commit_date:
+                if current_commit_date not in service_data["per_date"]:
+                    service_data["per_date"][current_commit_date] = {
+                        "commits": 0,
+                        "additions": 0,
+                        "deletions": 0,
+                        "net_lines": 0
+                    }
+                date_stats = service_data["per_date"][current_commit_date]
+                date_stats["commits"] += 1
+                date_stats["additions"] += line_changes["adds"]
+                date_stats["deletions"] += line_changes["dels"]
+                date_stats["net_lines"] += line_changes["adds"] - line_changes["dels"]
 
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
@@ -486,12 +519,19 @@ def analyze_repo_for_services(
             finalize_current_commit()
 
             parts = line.split("\x01")
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue  # Skip malformed commit headers
             
             sha = parts[0]
             name = parts[1]
             email = parts[2]
+            commit_date_str = parts[3]  # ISO format: "2025-11-26 10:52:19 +0100"
+            
+            # Extract just the date part (YYYY-MM-DD)
+            try:
+                commit_date = commit_date_str.split()[0]  # "2025-11-26"
+            except (IndexError, AttributeError):
+                commit_date = None
 
             canonical_slug = canonical_slug_for_author(name, email, alias_map)
 
@@ -508,6 +548,7 @@ def analyze_repo_for_services(
             current_author_email = email
             current_canonical_slug = canonical_slug
             current_display_name = name
+            current_commit_date = commit_date
             current_services_touched = {}
             continue
 

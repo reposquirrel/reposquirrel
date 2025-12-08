@@ -4,9 +4,25 @@ import calendar
 import os
 import sys
 import subprocess
-from datetime import datetime
+import json
+import re
+import logging
+from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
+from collections import defaultdict
+
+# Setup file logging
+log_file = "master_analysis.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,19 +108,19 @@ def compute_month_range(year: int, month: int) -> tuple[str, str]:
 
 def run_cmd(cmd: list[str], desc: str) -> None:
     """Run a subprocess command with some logging and error handling."""
-    print(f"\n=== Running: {desc} ===")
-    print("Command:", " ".join(cmd))
+    logger.info(f"\n=== Running: {desc} ===")
+    logger.info("Command:", " ".join(cmd))
     try:
         result = subprocess.run(cmd, check=False)
     except FileNotFoundError as e:
-        print(f"ERROR: Failed to run '{desc}': {e}", file=sys.stderr)
+        logger.info(f"ERROR: Failed to run '{desc}': {e}")
         sys.exit(1)
 
     if result.returncode != 0:
-        print(f"ERROR: '{desc}' exited with code {result.returncode}", file=sys.stderr)
+        logger.info(f"ERROR: '{desc}' exited with code {result.returncode}")
         sys.exit(result.returncode)
     else:
-        print(f"=== Done: {desc} ===")
+        logger.info(f"=== Done: {desc} ===")
 
 def process_month_worker(month_data: dict) -> tuple[int, bool]:
     """Worker function to process a single month. Returns (month, success)."""
@@ -123,7 +139,7 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
     use_parallel_repos = month_data.get("use_parallel_repos", True)  # Enable repo-level parallelization
     
     try:
-        print(f"\n--- Processing month: {year}-{month:02d} ({date_from} -> {date_to}) ---")
+        logger.info(f"\n--- Processing month: {year}-{month:02d} ({date_from} -> {date_to}) ---")
         
         # 1) Run summery.py (users) for this month
         summery_cmd = [
@@ -149,7 +165,7 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
         result1 = subprocess.run(summery_cmd, check=False)
         
         if result1.returncode != 0:
-            print(f"ERROR: summery.py failed for {year}-{month:02d} with return code {result1.returncode}", file=sys.stderr)
+            logger.info(f"ERROR: summery.py failed for {year}-{month:02d} with return code {result1.returncode}")
             return (month, False)
 
         # 2) Run service.py (unified subsystem analysis) for this month  
@@ -178,17 +194,17 @@ def process_month_worker(month_data: dict) -> tuple[int, bool]:
         result2 = subprocess.run(service_cmd, check=False)
 
         if result2.returncode != 0:
-            print(f"ERROR: service.py failed for {year}-{month:02d} with return code {result2.returncode}", file=sys.stderr)
+            logger.info(f"ERROR: service.py failed for {year}-{month:02d} with return code {result2.returncode}")
             return (month, False)
         
         # 3) Generate team statistics for this month
         generate_team_monthly_stats(output_root, year, month)
             
-        print(f"✅ Completed month: {year}-{month:02d}")
+        logger.info(f"✅ Completed month: {year}-{month:02d}")
         return (month, True)
         
     except Exception as e:
-        print(f"ERROR: Exception processing month {year}-{month:02d}: {e}", file=sys.stderr)
+        logger.info(f"ERROR: Exception processing month {year}-{month:02d}: {e}")
         return (month, False)
 
 
@@ -206,7 +222,7 @@ def main() -> None:
     max_workers = args.max_workers
 
     if year < 1:
-        print("ERROR: year must be a positive integer", file=sys.stderr)
+        logger.info("ERROR: year must be a positive integer")
         sys.exit(1)
 
     now = datetime.now()
@@ -238,19 +254,19 @@ def main() -> None:
         worker_cap = 6 if available_cores >= 8 else 4
         max_workers = min(available_cores, months_to_process, worker_cap)
 
-    print("Master yearly analysis")
-    print("----------------------")
-    print(f"Year        : {year}")
-    print(f"Months      : {first_month:02d}..{last_month:02d}")
-    print(f"Repos root  : {repos_root}")
-    print(f"Output root : {output_root}")
-    print(f"Services    : {services_file}")
-    print(f"Alias       : {alias_file}")
-    print(f"Ignore      : {ignore_file}")
+    logger.info("Master yearly analysis")
+    logger.info("----------------------")
+    logger.info(f"Year        : {year}")
+    logger.info(f"Months      : {first_month:02d}..{last_month:02d}")
+    logger.info(f"Repos root  : {repos_root}")
+    logger.info(f"Output root : {output_root}")
+    logger.info(f"Services    : {services_file}")
+    logger.info(f"Alias       : {alias_file}")
+    logger.info(f"Ignore      : {ignore_file}")
     if parallel:
-        print(f"Parallel    : Enabled (max workers: {max_workers})")
+        logger.info(f"Parallel    : Enabled (max workers: {max_workers})")
     else:
-        print(f"Parallel    : Disabled (sequential processing)")
+        logger.info(f"Parallel    : Disabled (sequential processing)")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     summery_script = os.path.join(script_dir, "summery.py")
@@ -264,14 +280,14 @@ def main() -> None:
         (blame_script, "blame.py"),
     ]:
         if not os.path.isfile(path):
-            print(f"ERROR: Required script '{name}' not found at {path}", file=sys.stderr)
+            logger.info(f"ERROR: Required script '{name}' not found at {path}")
             sys.exit(1)
 
     python_exe = sys.executable or "python3"
 
     # Process months (either in parallel or sequentially)
     if parallel and (last_month - first_month + 1) > 1:
-        print(f"\n🚀 Processing {last_month - first_month + 1} months in parallel...")
+        logger.info(f"\n🚀 Processing {last_month - first_month + 1} months in parallel...")
         
         # Prepare month data for workers
         month_tasks = []
@@ -279,7 +295,7 @@ def main() -> None:
             try:
                 date_from, date_to = compute_month_range(year, month)
             except ValueError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
+                logger.info(f"ERROR: {e}")
                 sys.exit(1)
 
             # Sanity check
@@ -287,7 +303,7 @@ def main() -> None:
                 datetime.fromisoformat(date_from)
                 datetime.fromisoformat(date_to)
             except ValueError as e:
-                print(f"ERROR: Invalid computed dates for {year}-{month:02d}: {e}", file=sys.stderr)
+                logger.info(f"ERROR: Invalid computed dates for {year}-{month:02d}: {e}")
                 sys.exit(1)
 
             month_tasks.append({
@@ -317,25 +333,25 @@ def main() -> None:
                 month, success = future.result()
                 if success:
                     completed_months.append(month)
-                    print(f"✅ Month {year}-{month:02d} completed successfully")
+                    logger.info(f"✅ Month {year}-{month:02d} completed successfully")
                 else:
                     failed_months.append(month)
-                    print(f"❌ Month {year}-{month:02d} failed")
+                    logger.info(f"❌ Month {year}-{month:02d} failed")
 
         if failed_months:
-            print(f"\nERROR: Monthly processing failed for months: {sorted(failed_months)}", file=sys.stderr)
+            logger.info(f"\nERROR: Monthly processing failed for months: {sorted(failed_months)}")
             sys.exit(1)
             
-        print(f"\n✅ All {len(completed_months)} months processed successfully in parallel!")
+        logger.info(f"\n✅ All {len(completed_months)} months processed successfully in parallel!")
         
     else:
         # Sequential processing (original behavior)
-        print(f"\n📊 Processing {last_month - first_month + 1} months sequentially...")
+        logger.info(f"\n📊 Processing {last_month - first_month + 1} months sequentially...")
         for month in range(first_month, last_month + 1):
             try:
                 date_from, date_to = compute_month_range(year, month)
             except ValueError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
+                logger.info(f"ERROR: {e}")
                 sys.exit(1)
 
             # Sanity check
@@ -343,13 +359,13 @@ def main() -> None:
                 datetime.fromisoformat(date_from)
                 datetime.fromisoformat(date_to)
             except ValueError as e:
-                print(f"ERROR: Invalid computed dates for {year}-{month:02d}: {e}", file=sys.stderr)
+                logger.info(f"ERROR: Invalid computed dates for {year}-{month:02d}: {e}")
                 sys.exit(1)
 
-            print("\n-------------------------------------------")
-            print(f"Processing month: {year}-{month:02d}")
-            print(f"Date range      : {date_from} -> {date_to}")
-            print("-------------------------------------------")
+            logger.info("\n-------------------------------------------")
+            logger.info(f"Processing month: {year}-{month:02d}")
+            logger.info(f"Date range      : {date_from} -> {date_to}")
+            logger.info("-------------------------------------------")
 
             # 1) Run summery.py (users) for this month
             summery_cmd = [
@@ -407,24 +423,24 @@ def main() -> None:
             generate_team_monthly_stats(output_root, year, month)
 
     # After all months: create yearly summaries
-    print("\n===========================================")
-    print("Generating yearly summaries")
-    print("===========================================")
+    logger.info("\n===========================================")
+    logger.info("Generating yearly summaries")
+    logger.info("===========================================")
     
     # Create yearly summaries
     create_yearly_summaries(year, output_root, first_month, last_month)
     
     # Generate language statistics for subsystems
-    print("\n===========================================")
-    print("Generating language statistics for subsystems")
-    print("===========================================")
+    logger.info("\n===========================================")
+    logger.info("Generating language statistics for subsystems")
+    logger.info("===========================================")
     generate_subsystem_language_stats(repos_root, output_root, services_file)
 
     # After all months: run blame.py once (full history) - optional
     if not skip_blame:
-        print("\n===========================================")
-        print("Running blame.py (full-history ownership)")
-        print("===========================================")
+        logger.info("\n===========================================")
+        logger.info("Running blame.py (full-history ownership)")
+        logger.info("===========================================")
 
         blame_cmd = [
             python_exe,
@@ -448,26 +464,26 @@ def main() -> None:
             desc="blame.py (full history)",
         )
     else:
-        print("\n===========================================")
-        print("Skipping blame.py (--skip-blame specified)")
-        print("===========================================")
+        logger.info("\n===========================================")
+        logger.info("Skipping blame.py (--skip-blame specified)")
+        logger.info("===========================================")
 
-    print("\n=== All yearly analyses completed successfully ===")
+    logger.info("\n=== All yearly analyses completed successfully ===")
     if skip_blame:
-        print("Note: Ownership/blame analysis was skipped. Run without --skip-blame for complete analysis.")
+        logger.info("Note: Ownership/blame analysis was skipped. Run without --skip-blame for complete analysis.")
     
     # Note about repos directory: It's kept for blame analysis only (for badges)
     # The actual service/subsystem statistics are now in stats/subsystems/
     repos_stats_dir = os.path.join(output_root, "stats", "repos")
     if os.path.exists(repos_stats_dir):
         if skip_blame:
-            print("INFO: stats/repos directory exists but blame analysis was skipped.")
-            print("INFO: This directory is only used for blame analysis and badges.")
+            logger.info("INFO: stats/repos directory exists but blame analysis was skipped.")
+            logger.info("INFO: This directory is only used for blame analysis and badges.")
         else:
-            print("INFO: stats/repos directory contains blame analysis for badges.")
-            print("INFO: Main subsystem statistics are in stats/subsystems/")
+            logger.info("INFO: stats/repos directory contains blame analysis for badges.")
+            logger.info("INFO: Main subsystem statistics are in stats/subsystems/")
     else:
-        print("INFO: No stats/repos directory found. Will be created by blame.py if needed.")
+        logger.info("INFO: No stats/repos directory found. Will be created by blame.py if needed.")
 
 
 def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None:
@@ -480,18 +496,19 @@ def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None
     
     # Load teams configuration
     if not os.path.exists(teams_file):
-        print(f"No teams.json found, skipping team statistics for {year}-{month:02d}")
+        logger.info(f"No teams.json found, skipping team statistics for {year}-{month:02d}")
         return
         
     with open(teams_file, "r", encoding="utf-8") as f:
         teams_config = json.load(f)
     
     if not teams_config:
-        print(f"No teams defined, skipping team statistics for {year}-{month:02d}")
+        logger.info(f"No teams defined, skipping team statistics for {year}-{month:02d}")
         return
     
     date_from, date_to = compute_month_range(year, month)
-    month_str = f"{date_from}_{date_to}"
+    # Use YYYY-MM folder format to match user monthly summaries
+    month_folder = f"{year}-{month:02d}"
     
     # Process each team (teams_config is a dict with team_id as key)
     for team_id, team_data in teams_config.items():
@@ -504,7 +521,7 @@ def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None
         # Aggregate stats from all team members who have data for this month
         team_stats = {
             "team": team_name,
-            "month": month_str,
+            "month": month_folder,
             "members": members,
             "commits": 0,
             "lines_added": 0,
@@ -518,38 +535,35 @@ def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None
         members_with_data = 0
         
         for member in members:
-            # Load member's monthly stats
-            member_file = os.path.join(stats_root, "users", member, month_str, "summary.json")
+            # Load member's monthly stats (users/<member>/<YYYY-MM>/summary.json)
+            member_file = os.path.join(stats_root, "users", member, month_folder, "summary.json")
             if not os.path.exists(member_file):
                 continue
-                
+            
             members_with_data += 1
             
             with open(member_file, "r", encoding="utf-8") as f:
                 member_data = json.load(f)
             
-            # Aggregate top-level stats (handle both old and new field names)
-            team_stats["commits"] += member_data.get("total_commits", member_data.get("commits", 0))
-            team_stats["lines_added"] += member_data.get("total_lines_added", member_data.get("lines_added", 0))
-            team_stats["lines_deleted"] += member_data.get("total_lines_deleted", member_data.get("lines_deleted", 0))
+            # Aggregate top-level stats
+            team_stats["commits"] += member_data.get("total_commits", 0)
+            team_stats["lines_added"] += member_data.get("total_lines_added", 0)
+            team_stats["lines_deleted"] += member_data.get("total_lines_deleted", 0)
             team_stats["lines_changed"] += abs(member_data.get("total_lines_added", 0)) + abs(member_data.get("total_lines_deleted", 0))
-            team_stats["files_changed"] += member_data.get("files_changed", 0)
             
-            # Aggregate per-subsystem stats
-            for subsystem, stats in member_data.get("per_service", {}).items():
+            # Aggregate per-subsystem stats (use per_repo as subsystem proxy)
+            for subsystem, stats in member_data.get("per_repo", {}).items():
                 team_stats["subsystems"][subsystem]["commits"] += stats.get("commits", 0)
-                team_stats["subsystems"][subsystem]["lines_added"] += stats.get("lines_added", 0)
-                team_stats["subsystems"][subsystem]["lines_deleted"] += stats.get("lines_deleted", 0)
-                team_stats["subsystems"][subsystem]["lines_changed"] += stats.get("lines_changed", 0)
+                team_stats["subsystems"][subsystem]["lines_added"] += stats.get("additions", 0)
+                team_stats["subsystems"][subsystem]["lines_deleted"] += stats.get("deletions", 0)
+                team_stats["subsystems"][subsystem]["lines_changed"] += stats.get("additions", 0) + stats.get("deletions", 0)
             
             # Aggregate language stats
             for lang, lang_data in member_data.get("languages", {}).items():
-                # Handle both dict format (with additions/deletions) and simple int format
                 if isinstance(lang_data, dict):
                     lines = lang_data.get("additions", 0) + lang_data.get("deletions", 0)
                 else:
                     lines = lang_data
-                
                 team_stats["languages"][lang] += lines
         
         # Only create team file if at least one member had data
@@ -562,13 +576,12 @@ def generate_team_monthly_stats(output_root: str, year: int, month: int) -> None
             team_dir = os.path.join(stats_root, "teams", team_name)
             os.makedirs(team_dir, exist_ok=True)
             
-            # Save with both formats for compatibility
-            # Format 1: YYYY-MM.json (for API)
-            team_file_short = os.path.join(team_dir, f"{year}-{month:02d}.json")
+            # Save YYYY-MM.json (for API)
+            team_file_short = os.path.join(team_dir, f"{month_folder}.json")
             with open(team_file_short, "w", encoding="utf-8") as f:
                 json.dump(team_stats, f, indent=2, ensure_ascii=False)
             
-            print(f"  ✓ Generated team stats for '{team_name}' ({members_with_data}/{len(members)} members active)")
+            logger.info(f"  ✓ Generated team stats for '{team_name}' ({members_with_data}/{len(members)} members active)")
 
 
 def create_yearly_summaries(year: int, output_root: str, first_month: int, last_month: int) -> None:
@@ -597,7 +610,7 @@ def create_user_yearly_summaries(stats_root: str, year: int, first_month: int, l
     if not os.path.isdir(users_root):
         return
     
-    print("Creating user yearly summaries...")
+    logger.info("Creating user yearly summaries...")
     
     for user_slug in os.listdir(users_root):
         user_path = os.path.join(users_root, user_slug)
@@ -608,17 +621,80 @@ def create_user_yearly_summaries(stats_root: str, year: int, first_month: int, l
         yearly_data = aggregate_user_monthly_data(user_path, year, first_month, last_month)
         
         if yearly_data:
-            # Create yearly folder
-            yearly_folder = f"{year:04d}-01-01_{year:04d}-12-31"
-            yearly_dir = os.path.join(user_path, yearly_folder)
-            os.makedirs(yearly_dir, exist_ok=True)
+            # Create year folder
+            year_dir = os.path.join(user_path, "year")
+            os.makedirs(year_dir, exist_ok=True)
             
             # Write yearly summary
-            output_path = os.path.join(yearly_dir, "summary.json")
+            output_path = os.path.join(year_dir, f"{year}.json")
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(yearly_data, f, indent=2)
             
-            print(f"  Created yearly summary for user: {user_slug}")
+            logger.info(f"  Created yearly summary for user: {user_slug} ({year})")
+            
+            # Generate daily stats files for this year
+            generate_user_daily_stats(user_path, year, first_month, last_month)
+
+
+def generate_user_daily_stats(user_path: str, year: int, first_month: int, last_month: int) -> None:
+    """Generate daily stats files for a user by extracting per_date data from monthly files."""
+    import json
+    from collections import defaultdict
+    
+    # Create daily directory
+    daily_dir = os.path.join(user_path, "daily")
+    os.makedirs(daily_dir, exist_ok=True)
+    
+    # Process each month
+    for month in range(first_month, last_month + 1):
+        month_str = f"{year:04d}-{month:02d}"
+        
+        # Initialize daily data for this month
+        daily_data = {}
+        
+        # Look for monthly data
+        for entry in os.listdir(user_path):
+            if not os.path.isdir(os.path.join(user_path, entry)):
+                continue
+            if "_" not in entry:
+                continue
+                
+            date_from, date_to = entry.split("_", 1)
+            if not date_from.startswith(month_str):
+                continue
+                
+            monthly_file = os.path.join(user_path, entry, "summary.json")
+            if not os.path.isfile(monthly_file):
+                continue
+                
+            try:
+                with open(monthly_file, "r", encoding="utf-8") as f:
+                    monthly_data = json.load(f)
+                    
+                # Extract per_date data
+                if "per_date" in monthly_data:
+                    for date_str, date_data in monthly_data["per_date"].items():
+                        if date_str not in daily_data:
+                            daily_data[date_str] = {
+                                "total_commits": 0,
+                                "additions": 0,
+                                "deletions": 0,
+                                "net_lines": 0
+                            }
+                        
+                        daily_data[date_str]["total_commits"] += date_data.get("commits", 0)
+                        daily_data[date_str]["additions"] += date_data.get("additions", 0)
+                        daily_data[date_str]["deletions"] += date_data.get("deletions", 0)
+                        daily_data[date_str]["net_lines"] += date_data.get("net_lines", 0)
+                        
+            except (json.JSONDecodeError, IOError) as e:
+                continue
+        
+        # Write daily stats file for this month
+        if daily_data:
+            output_file = os.path.join(daily_dir, f"{month_str}.json")
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(daily_data, f, indent=2)
 
 
 def create_repo_yearly_summaries(stats_root: str, year: int, first_month: int, last_month: int) -> None:
@@ -630,7 +706,7 @@ def create_repo_yearly_summaries(stats_root: str, year: int, first_month: int, l
     if not os.path.isdir(repos_root):
         return
     
-    print("Creating repo yearly summaries...")
+    logger.info("Creating repo yearly summaries...")
     
     # Find all repos that have monthly data
     for root, dirs, files in os.walk(repos_root):
@@ -669,7 +745,7 @@ def create_repo_yearly_summaries(stats_root: str, year: int, first_month: int, l
                     with open(output_path, "w", encoding="utf-8") as f:
                         json.dump(yearly_data, f, indent=2)
                     
-                    print(f"  Created yearly summary for repo: {repo_rel}")
+                    logger.info(f"  Created yearly summary for repo: {repo_rel}")
 
 
 def aggregate_user_monthly_data(user_path: str, year: int, first_month: int, last_month: int) -> dict:
@@ -709,24 +785,16 @@ def aggregate_user_monthly_data(user_path: str, year: int, first_month: int, las
     monthly_files_found = 0
     
     for month in range(first_month, last_month + 1):
-        # Look for monthly data
-        for entry in os.listdir(user_path):
-            if not os.path.isdir(os.path.join(user_path, entry)):
-                continue
-            if "_" not in entry:
-                continue
-                
-            date_from, date_to = entry.split("_", 1)
-            if not date_from.startswith(f"{year:04d}-{month:02d}"):
-                continue
-                
-            monthly_file = os.path.join(user_path, entry, "summary.json")
-            if not os.path.isfile(monthly_file):
-                continue
-                
-            try:
-                with open(monthly_file, "r", encoding="utf-8") as f:
-                    monthly_data = json.load(f)
+        # Look for monthly data folder named YYYY-MM
+        month_folder = f"{year:04d}-{month:02d}"
+        monthly_file = os.path.join(user_path, month_folder, "summary.json")
+        
+        if not os.path.isfile(monthly_file):
+            continue
+        
+        try:
+            with open(monthly_file, "r", encoding="utf-8") as f:
+                monthly_data = json.load(f)
                 
                 monthly_files_found += 1
                 
@@ -814,10 +882,10 @@ def aggregate_user_monthly_data(user_path: str, year: int, first_month: int, las
                     date_yearly["additions"] += date_data.get("additions", 0)
                     date_yearly["deletions"] += date_data.get("deletions", 0)
                     date_yearly["net_lines"] += date_data.get("net_lines", 0)
-                
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"  Warning: Failed to read {monthly_file}: {e}")
-                continue
+            
+        except (json.JSONDecodeError, IOError) as e:
+            logger.info(f"  Warning: Failed to read {monthly_file}: {e}")
+            continue
     
     if monthly_files_found == 0:
         return None
@@ -935,7 +1003,7 @@ def aggregate_repo_monthly_data(repo_path: str, year: int, first_month: int, las
                     dev_yearly["changed_lines"] += dev_data.get("changed_lines", 0)
                 
             except (json.JSONDecodeError, IOError) as e:
-                print(f"  Warning: Failed to read {monthly_file}: {e}")
+                logger.info(f"  Warning: Failed to read {monthly_file}: {e}")
                 continue
     
     if monthly_files_found == 0:
@@ -983,7 +1051,7 @@ def create_service_yearly_summaries(stats_root: str, year: int, first_month: int
     if not os.path.isdir(subsystems_root):
         return
     
-    print("Creating service yearly summaries...")
+    logger.info("Creating service yearly summaries...")
     
     # Find all services that have monthly data
     for service_name in os.listdir(subsystems_root):
@@ -1005,7 +1073,7 @@ def create_service_yearly_summaries(stats_root: str, year: int, first_month: int
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(yearly_data, f, indent=2)
             
-            print(f"  Created yearly summary for service: {service_name}")
+            logger.info(f"  Created yearly summary for service: {service_name}")
 
 
 def aggregate_service_monthly_data(service_path: str, year: int, first_month: int, last_month: int) -> dict:
@@ -1147,7 +1215,7 @@ def aggregate_service_monthly_data(service_path: str, year: int, first_month: in
                         dev_repo_yearly["changed_lines"] += repo_data.get("changed_lines", 0)
                 
             except (json.JSONDecodeError, IOError) as e:
-                print(f"  Warning: Failed to read {monthly_file}: {e}")
+                logger.info(f"  Warning: Failed to read {monthly_file}: {e}")
                 continue
     
     if monthly_files_found == 0:
@@ -1183,7 +1251,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
     
     teams_root = os.path.join(stats_root, "teams")
     if not os.path.isdir(teams_root):
-        print("No teams directory found, skipping team yearly summaries")
+        logger.info("No teams directory found, skipping team yearly summaries")
         return
     
     # Load team responsibilities
@@ -1211,7 +1279,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
     for team_id, team_info in teams_config.items():
         team_name_to_id[team_info.get("name", team_id)] = team_id
     
-    print("Creating team yearly summaries...")
+    logger.info("Creating team yearly summaries...")
     
     # Find all teams that have monthly data
     for team_name in os.listdir(teams_root):
@@ -1280,7 +1348,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
                     yearly_data["languages"][lang] = current_value + lines
             
             except (json.JSONDecodeError, IOError) as e:
-                print(f"Warning: Could not read {monthly_file}: {e}")
+                logger.info(f"Warning: Could not read {monthly_file}: {e}")
                 continue
         
         if monthly_files_found > 0:
@@ -1328,7 +1396,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
             with open(yearly_file, "w", encoding="utf-8") as f:
                 json.dump(yearly_data, f, indent=2, ensure_ascii=False)
             
-            print(f"  Created yearly summary for team: {team_name} ({monthly_files_found} months)")
+            logger.info(f"  Created yearly summary for team: {team_name} ({monthly_files_found} months)")
 
 
 def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str) -> None:
@@ -1344,9 +1412,9 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
             with open(services_file, "r", encoding="utf-8") as f:
                 services_config = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Error loading services file {services_file}: {e}")
+            logger.info(f"Warning: Error loading services file {services_file}: {e}")
     else:
-        print(f"Services file {services_file} not found, will only process standalone repositories")
+        logger.info(f"Services file {services_file} not found, will only process standalone repositories")
     
     stats_root = os.path.join(output_root, "stats")
     subsystems_stats_root = os.path.join(stats_root, "subsystems")
@@ -1355,12 +1423,12 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
     try:
         subprocess.run(["cloc", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("cloc not found. Please install cloc to generate language statistics.")
-        print("On Ubuntu/Debian: sudo apt-get install cloc")
-        print("On macOS: brew install cloc")
+        logger.info("cloc not found. Please install cloc to generate language statistics.")
+        logger.info("On Ubuntu/Debian: sudo apt-get install cloc")
+        logger.info("On macOS: brew install cloc")
         return
     
-    print("Generating language statistics for subsystems...")
+    logger.info("Generating language statistics for subsystems...")
     
     # Create a mapping of subsystem -> list of (repo, paths)
     subsystem_repos = {}
@@ -1375,7 +1443,7 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
     # Next, discover standalone repositories (those that exist on disk but not in configuration/services.json)
     repos_root_abs = os.path.abspath(repos_root)
     if os.path.exists(repos_root_abs):
-        print("  Looking for standalone repositories...")
+        logger.info("  Looking for standalone repositories...")
         for org_dir in os.listdir(repos_root_abs):
             org_path = os.path.join(repos_root_abs, org_dir)
             if not os.path.isdir(org_path):
@@ -1390,7 +1458,7 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                     
                     # Check if this repository is NOT already handled by configuration/services.json
                     if repo_name not in services_config:
-                        print(f"  Found standalone repository: {repo_name}")
+                        logger.info(f"  Found standalone repository: {repo_name}")
                         # Use the repo directory name as the subsystem name
                         subsystem_name = repo_dir
                         if subsystem_name not in subsystem_repos:
@@ -1398,12 +1466,12 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                         subsystem_repos[subsystem_name].append((repo_name, [""]))  # Empty path = entire repo
     
     for subsystem_name, repo_paths in subsystem_repos.items():
-        print(f"  Processing subsystem: {subsystem_name}")
+        logger.info(f"  Processing subsystem: {subsystem_name}")
         
         # Create subsystem stats directory if it doesn't exist
         subsystem_dir = os.path.join(subsystems_stats_root, subsystem_name)
         if not os.path.exists(subsystem_dir):
-            print(f"    Subsystem stats directory not found: {subsystem_dir}, skipping...")
+            logger.info(f"    Subsystem stats directory not found: {subsystem_dir}, skipping...")
             continue
         
         # Collect all paths for this subsystem
@@ -1411,7 +1479,7 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
         for repo_name, service_paths in repo_paths:
             repo_path = os.path.join(repos_root, repo_name)
             if not os.path.exists(repo_path):
-                print(f"    Repository not found: {repo_path}, skipping...")
+                logger.info(f"    Repository not found: {repo_path}, skipping...")
                 continue
             
             for service_path in service_paths:
@@ -1425,7 +1493,7 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                         all_paths.append(full_path)
         
         if not all_paths:
-            print(f"    No valid paths found for subsystem {subsystem_name}, skipping...")
+            logger.info(f"    No valid paths found for subsystem {subsystem_name}, skipping...")
             continue
         
         # Run cloc on all paths for this subsystem
@@ -1436,11 +1504,11 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                 languages_file = os.path.join(subsystem_dir, "languages.json")
                 with open(languages_file, "w", encoding="utf-8") as f:
                     json.dump(cloc_result, f, indent=2)
-                print(f"    Generated language stats: {languages_file}")
+                logger.info(f"    Generated language stats: {languages_file}")
             else:
-                print(f"    No language statistics generated for {subsystem_name}")
+                logger.info(f"    No language statistics generated for {subsystem_name}")
         except Exception as e:
-            print(f"    Error generating language stats for {subsystem_name}: {e}")
+            logger.info(f"    Error generating language stats for {subsystem_name}: {e}")
             continue
 
 
@@ -1469,20 +1537,20 @@ def run_cloc_for_paths(paths: list) -> dict:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
         
         if result.returncode != 0:
-            print(f"    cloc command failed with return code {result.returncode}")
+            logger.info(f"    cloc command failed with return code {result.returncode}")
             if result.stderr:
-                print(f"    stderr: {result.stderr}")
+                logger.info(f"    stderr: {result.stderr}")
             return {}
         
         if not result.stdout.strip():
-            print("    cloc produced no output")
+            logger.info("    cloc produced no output")
             return {}
         
         # Parse JSON output
         try:
             cloc_data = json.loads(result.stdout)
         except json.JSONDecodeError as e:
-            print(f"    Failed to parse cloc JSON output: {e}")
+            logger.info(f"    Failed to parse cloc JSON output: {e}")
             return {}
         
         # Convert cloc output to our format

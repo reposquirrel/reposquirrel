@@ -2017,66 +2017,77 @@ async function renderUserDashboard(user, month, summary) {
     main.appendChild(repoBox);
   }
 
-  // Add contribution heatmap if we have daily data
-  if (summary.per_date && Object.keys(summary.per_date).length > 0) {
-    try {
-      const heatmapCard = document.createElement("div");
-      heatmapCard.className = "card";
-      heatmapCard.innerHTML = createTitleWithTooltip(
-        "Contribution activity", 
-        "GitHub-style contribution heatmap showing daily commit activity for the selected time period. For monthly views, shows only the selected month's commits across the full year layout. For yearly views, shows the full year. Darker green indicates more commits on that day.",
-        "h2"
-      );
-      
-      const heatmapContainer = document.createElement("div");
-      heatmapContainer.className = "contribution-heatmap";
-      
-      // Show contribution activity for the selected time period
-      let heatmapData = {};
-      let heatmapFromDate, heatmapToDate;
-      
-      if (month.is_yearly) {
-        // Show all yearly data
+  // Add contribution heatmap (build data even if summary.per_date is missing)
+  try {
+    const heatmapCard = document.createElement("div");
+    heatmapCard.className = "card";
+    heatmapCard.innerHTML = createTitleWithTooltip(
+      "Contribution activity", 
+      "GitHub-style contribution heatmap showing daily commit activity for the selected time period. For monthly views, shows only the selected month's commits across the full year layout. For yearly views, shows the full year. Darker green indicates more commits on that day.",
+      "h2"
+    );
+    
+    const heatmapContainer = document.createElement("div");
+    heatmapContainer.className = "contribution-heatmap";
+    
+    // Show contribution activity for the selected time period
+    let heatmapData = {};
+    let heatmapFromDate, heatmapToDate;
+    
+    if (month.is_yearly) {
+      // Fetch aggregated daily stats for the year to ensure complete data
+      const year = month.label;
+      try {
+        const resp = await fetchJSON(`/api/users/${encodeURIComponent(user.slug)}/daily-stats/${year}`);
+        const dailyStats = resp.daily_stats || [];
+        dailyStats.forEach(ds => {
+          heatmapData[ds.date] = {
+            additions: ds.lines_added || 0,
+            deletions: ds.lines_deleted || 0,
+            commits: ds.commits || 0
+          };
+        });
+        heatmapFromDate = `${year}-01-01`;
+        heatmapToDate = `${year}-12-31`;
+        console.log("Using aggregated yearly daily stats for heatmap:", dailyStats.length, "days");
+      } catch (e) {
+        console.warn("Yearly daily-stats fetch failed, falling back to summary per_date:", e);
         heatmapData = summary.per_date || {};
         heatmapFromDate = summary.from || month.from;
         heatmapToDate = summary.to || month.to;
-        console.log("Using full yearly data for heatmap:", Object.keys(heatmapData).length, "days");
-      } else {
-        // For monthly view, show only selected month's data but display full year layout
-        const monthStart = summary.from;
-        const monthEnd = summary.to;
-        const year = monthStart.split('-')[0];
-        
-        // Only include commits from the selected month, but prepare for full year display
-        heatmapData = {};
-        if (summary.per_date) {
-          for (const [date, data] of Object.entries(summary.per_date)) {
-            // Only include dates that fall within the selected month
-            if (date >= monthStart && date <= monthEnd) {
-              heatmapData[date] = {
-                ...data,
-                isHighlighted: true // This month's data is always highlighted
-              };
-            }
+      }
+    } else {
+      // For monthly view, show only selected month's data but display full year layout
+      const monthStart = summary.from;
+      const monthEnd = summary.to;
+      const year = monthStart.split('-')[0];
+      
+      // Only include commits from the selected month, but prepare for full year display
+      heatmapData = {};
+      if (summary.per_date) {
+        for (const [date, data] of Object.entries(summary.per_date)) {
+          if (date >= monthStart && date <= monthEnd) {
+            heatmapData[date] = {
+              ...data,
+              isHighlighted: true
+            };
           }
         }
-        
-        // Display full year range so all months are visible, but only selected month has data
-        heatmapFromDate = `${year}-01-01`;
-        heatmapToDate = `${year}-12-31`;
-        console.log(`Using selected month data only (${monthStart} to ${monthEnd}):`, Object.keys(heatmapData).length, "days");
       }
-      
-      console.log("Creating heatmap for period:", heatmapFromDate, "to", heatmapToDate, "with", Object.keys(heatmapData).length, "data points");
-      const heatmapElement = createContributionHeatmap(heatmapData, heatmapFromDate, heatmapToDate);
-      heatmapContainer.appendChild(heatmapElement);
-      
-      heatmapCard.appendChild(heatmapContainer);
-      main.appendChild(heatmapCard);
-    } catch (error) {
-      console.error("Error creating contribution heatmap:", error);
-      // Don't add the heatmap if there's an error
+      heatmapFromDate = `${year}-01-01`;
+      heatmapToDate = `${year}-12-31`;
+      console.log(`Using selected month data only (${monthStart} to ${monthEnd}):`, Object.keys(heatmapData).length, "days");
     }
+    
+    console.log("Creating heatmap for period:", heatmapFromDate, "to", heatmapToDate, "with", Object.keys(heatmapData).length, "data points");
+    const heatmapElement = createContributionHeatmap(heatmapData, heatmapFromDate, heatmapToDate);
+    heatmapContainer.appendChild(heatmapElement);
+    
+    heatmapCard.appendChild(heatmapContainer);
+    main.appendChild(heatmapCard);
+  } catch (error) {
+    console.error("Error creating contribution heatmap:", error);
+    // Don't add the heatmap if there's an error
   }
 
   // Monthly Lines Chart (only for yearly view)
@@ -6478,12 +6489,17 @@ function initializeSettings() {
   $("hide-assigned-subsystems").addEventListener("change", loadTeamResponsibilitySubsystems);
   $("update-responsibilities").addEventListener("click", updateTeamResponsibilities);
 
+  // Team capacity configuration
+  $("add-language-capacity").addEventListener("click", addLanguageCapacity);
+  $("save-capacity-config").addEventListener("click", saveCapacityConfig);
+
   // Initialize management states
   window.aliasesData = {};
   window.teamsData = {};
   window.repositoriesData = [];
   window.subsystemsData = {};
   window.teamResponsibilitiesData = {};
+  window.capacityConfig = { default_lines_per_dev: 20000, languages: {}, yellow_threshold: 90, red_threshold: 110 };
 }
 
 function openSettings(defaultTab = "ignore-users") {
@@ -6614,6 +6630,11 @@ function switchSettingsTab(tabName) {
   document.querySelectorAll(".settings-tab-content").forEach(content => {
     content.classList.toggle("active", content.id === `${tabName}-tab`);
   });
+  
+  // Load data for specific tabs
+  if (tabName === "capacity") {
+    loadCapacityConfig();
+  }
 }
 
 async function loadIgnoreUsers() {
@@ -8742,6 +8763,147 @@ function updateResponsibilitiesOverview() {
     `;
     
     container.appendChild(teamItem);
+  }
+}
+
+// --------------------------
+// Team Capacity Configuration
+// --------------------------
+
+async function loadCapacityConfig() {
+  try {
+    const response = await fetch("/api/settings/capacity-config");
+    const data = await response.json();
+    
+    if (data.error) {
+      console.error("Error loading capacity config:", data.error);
+      return;
+    }
+    
+    window.capacityConfig = data;
+    
+    // Update UI
+    $("default-lines-per-dev").value = data.default_lines_per_dev || 20000;
+    $("yellow-threshold").value = data.yellow_threshold || 95;
+    $("red-threshold").value = data.red_threshold || 110;
+    
+    // Render language list
+    renderLanguageCapacityList();
+    
+  } catch (error) {
+    console.error("Failed to load capacity config:", error);
+  }
+}
+
+function renderLanguageCapacityList() {
+  const list = $("language-capacity-list");
+  list.innerHTML = "";
+  
+  const languages = window.capacityConfig.languages || {};
+  
+  Object.keys(languages).sort().forEach(lang => {
+    const item = document.createElement("div");
+    item.className = "capacity-language-item";
+    item.style.display = "flex";
+    item.style.alignItems = "center";
+    item.style.gap = "10px";
+    item.style.marginBottom = "10px";
+    item.style.padding = "10px";
+    item.style.backgroundColor = "var(--background-tertiary)";
+    item.style.borderRadius = "4px";
+    
+    item.innerHTML = `
+      <span style="flex: 1; color: var(--text-primary);">${lang}</span>
+      <span style="color: var(--text-secondary);">${languages[lang].toLocaleString()} lines/dev</span>
+      <button class="btn btn-danger btn-sm" onclick="removeLanguageCapacity('${lang}')">Remove</button>
+    `;
+    
+    list.appendChild(item);
+  });
+  
+  if (Object.keys(languages).length === 0) {
+    list.innerHTML = '<p style="color: var(--text-secondary); font-style: italic;">No language-specific configurations yet.</p>';
+  }
+}
+
+function addLanguageCapacity() {
+  const language = prompt("Enter language name (e.g., Python, Java, JavaScript):");
+  if (!language) return;
+  
+  const linesPerDev = prompt(`Enter lines per developer for ${language}:`, "20000");
+  if (!linesPerDev) return;
+  
+  const lines = parseInt(linesPerDev);
+  if (isNaN(lines) || lines <= 0) {
+    alert("Please enter a valid positive number.");
+    return;
+  }
+  
+  if (!window.capacityConfig.languages) {
+    window.capacityConfig.languages = {};
+  }
+  
+  window.capacityConfig.languages[language] = lines;
+  renderLanguageCapacityList();
+  
+  // Auto-save after adding
+  saveCapacityConfig();
+}
+
+function removeLanguageCapacity(language) {
+  if (confirm(`Remove capacity configuration for ${language}?`)) {
+    delete window.capacityConfig.languages[language];
+    renderLanguageCapacityList();
+    
+    // Auto-save after removing
+    saveCapacityConfig();
+  }
+}
+
+async function saveCapacityConfig() {
+  // Get values from inputs
+  const defaultLines = parseInt($("default-lines-per-dev").value);
+  const yellowThreshold = parseInt($("yellow-threshold").value);
+  const redThreshold = parseInt($("red-threshold").value);
+  
+  if (isNaN(defaultLines) || defaultLines <= 0) {
+    alert("Please enter a valid default lines per developer.");
+    return;
+  }
+  
+  if (isNaN(yellowThreshold) || yellowThreshold <= 0) {
+    alert("Please enter a valid yellow threshold.");
+    return;
+  }
+  
+  if (isNaN(redThreshold) || redThreshold <= 0) {
+    alert("Please enter a valid red threshold.");
+    return;
+  }
+  
+  window.capacityConfig.default_lines_per_dev = defaultLines;
+  window.capacityConfig.yellow_threshold = yellowThreshold;
+  window.capacityConfig.red_threshold = redThreshold;
+  
+  try {
+    const response = await fetch("/api/settings/capacity-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(window.capacityConfig)
+    });
+    
+    const result = await response.json();
+    
+    if (result.error) {
+      alert(`Error: ${result.error}`);
+      return;
+    }
+    
+    alert("Capacity configuration saved successfully!");
+    
+  } catch (error) {
+    console.error("Failed to save capacity config:", error);
+    alert("Failed to save capacity configuration. Please check the console for details.");
   }
 }
 

@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Tuple, Optional, Set
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
-AuthorKey = Tuple[str, str]  # (name, email)
+AuthorKey = str  # email only (canonical identifier)
 
 
 def load_aliases(alias_path: str = "configuration/alias.json") -> Dict[str, str]:
@@ -156,12 +156,13 @@ def ensure_output_folder(
 ) -> str:
     """
     Create folder structure:
-      <output_root>/stats/users/<author_slug>/<date_from>_<date_to>
+      <output_root>/stats/users/<author_slug>/<YYYY-MM>
     """
-    base = os.path.join(output_root, "stats", "users", author_slug)
-    sub = os.path.join(base, f"{date_from}_{date_to}")
-    os.makedirs(sub, exist_ok=True)
-    return sub
+    # Extract year-month from date_from (YYYY-MM-DD -> YYYY-MM)
+    year_month = date_from[:7]  # Gets "YYYY-MM"
+    base = os.path.join(output_root, "stats", "users", author_slug, year_month)
+    os.makedirs(base, exist_ok=True)
+    return base
 
 
 def discover_local_repos(root: str) -> List[str]:
@@ -518,9 +519,10 @@ def analyze_repo(
         "-C",
         repo_path,
         "log",
+        "--all",  # Include all branches and tags
         f"--since={date_from}",
         f"--until={date_to}",
-        "--no-merges",  # exclude merge commits as requested
+        "--no-merges",  # exclude merge commits
         "--date=format:%Y-%m-%d %H",
         "--pretty=format:%H%x01%an%x01%ae%x01%ad",
         "--numstat",
@@ -578,9 +580,13 @@ def analyze_repo(
             weekday = weekday_name_from_date_str(date_part) if date_part else None
             hour = hour_from_hour_str(hour_part) if hour_part else None
 
-            key: AuthorKey = (name, email)
+            key: AuthorKey = email
             if key not in authors:
                 authors[key] = init_author_record(name, email)
+            else:
+                # Update author name if we see a longer/more complete version
+                if len(name) > len(authors[key]["name"]):
+                    authors[key]["name"] = name
 
             author_data = authors[key]
             author_data["total_commits"] += 1
@@ -763,48 +769,44 @@ def merge_author_data(target_authors: Dict[AuthorKey, Dict[str, Any]],
                     target_lang_data["deletions"] += source_lang_data.get("deletions", 0)
                     target_lang_data["net_lines"] = target_lang_data["additions"] - target_lang_data["deletions"]
             
-            # Merge prod/test/doc stats
-            for category in ["production", "test", "documentation"]:
-                if category in source_data:
-                    if category not in target_data:
-                        target_data[category] = source_data[category].copy()
-                    else:
-                        target_data[category]["additions"] += source_data[category].get("additions", 0)
-                        target_data[category]["deletions"] += source_data[category].get("deletions", 0)
-                        target_data[category]["net_lines"] = target_data[category]["additions"] - target_data[category]["deletions"]
+            # Merge code_type and documentation stats
+            for code_type, source_ct in source_data.get("code_type", {}).items():
+                if code_type not in target_data.get("code_type", {}):
+                    ensure_code_type_record(target_data, code_type)
+                target_ct = ensure_code_type_record(target_data, code_type)
+                target_ct["additions"] += source_ct.get("additions", 0)
+                target_ct["deletions"] += source_ct.get("deletions", 0)
+                target_ct["net_lines"] = target_ct["additions"] - target_ct["deletions"]
+            
+            if "documentation" in source_data:
+                target_doc = ensure_docs_record(target_data)
+                target_doc["additions"] += source_data["documentation"].get("additions", 0)
+                target_doc["deletions"] += source_data["documentation"].get("deletions", 0)
+                target_doc["net_lines"] = target_doc["additions"] - target_doc["deletions"]
             
             # Merge weekday stats
-            for weekday, source_wd_data in source_data.get("weekdays", {}).items():
-                if weekday not in target_data["weekdays"]:
-                    target_data["weekdays"][weekday] = source_wd_data.copy()
-                else:
-                    target_wd_data = target_data["weekdays"][weekday]
-                    target_wd_data["commits"] += source_wd_data.get("commits", 0)
-                    target_wd_data["additions"] += source_wd_data.get("additions", 0)
-                    target_wd_data["deletions"] += source_wd_data.get("deletions", 0)
-                    target_wd_data["net_lines"] = target_wd_data["additions"] - target_wd_data["deletions"]
+            for weekday, source_wd_data in source_data.get("per_weekday", {}).items():
+                target_wd = ensure_weekday_record(target_data, weekday)
+                target_wd["commits"] += source_wd_data.get("commits", 0)
+                target_wd["additions"] += source_wd_data.get("additions", 0)
+                target_wd["deletions"] += source_wd_data.get("deletions", 0)
+                target_wd["net_lines"] = target_wd["additions"] - target_wd["deletions"]
             
             # Merge hour stats
-            for hour, source_hr_data in source_data.get("hours", {}).items():
-                if hour not in target_data["hours"]:
-                    target_data["hours"][hour] = source_hr_data.copy()
-                else:
-                    target_hr_data = target_data["hours"][hour]
-                    target_hr_data["commits"] += source_hr_data.get("commits", 0)
-                    target_hr_data["additions"] += source_hr_data.get("additions", 0)
-                    target_hr_data["deletions"] += source_hr_data.get("deletions", 0)
-                    target_hr_data["net_lines"] = target_hr_data["additions"] - target_hr_data["deletions"]
+            for hour, source_hr_data in source_data.get("per_hour", {}).items():
+                target_hr = ensure_hour_record(target_data, hour)
+                target_hr["commits"] += source_hr_data.get("commits", 0)
+                target_hr["additions"] += source_hr_data.get("additions", 0)
+                target_hr["deletions"] += source_hr_data.get("deletions", 0)
+                target_hr["net_lines"] = target_hr["additions"] - target_hr["deletions"]
             
             # Merge daily stats
-            for date, source_date_data in source_data.get("dates", {}).items():
-                if date not in target_data["dates"]:
-                    target_data["dates"][date] = source_date_data.copy()
-                else:
-                    target_date_data = target_data["dates"][date]
-                    target_date_data["commits"] += source_date_data.get("commits", 0)
-                    target_date_data["additions"] += source_date_data.get("additions", 0)
-                    target_date_data["deletions"] += source_date_data.get("deletions", 0)
-                    target_date_data["net_lines"] = target_date_data["additions"] - target_date_data["deletions"]
+            for date, source_date_data in source_data.get("per_date", {}).items():
+                target_date = ensure_date_record(target_data, date)
+                target_date["commits"] += source_date_data.get("commits", 0)
+                target_date["additions"] += source_date_data.get("additions", 0)
+                target_date["deletions"] += source_date_data.get("deletions", 0)
+                target_date["net_lines"] = target_date["additions"] - target_date["deletions"]
             
             # Merge per_repo stats
             for repo_name, source_repo_data in source_data.get("per_repo", {}).items():
@@ -941,10 +943,11 @@ def main() -> None:
 
     # Build list of author entries with slugs
     author_entries = []
-    for (name, email), data in authors.items():
+    for email, data in authors.items():
         if data["total_commits"] == 0:
             continue
 
+        name = data["name"]
         if email:
             base = email.split("@")[0]
         else:
@@ -1120,6 +1123,22 @@ def main() -> None:
         output_path = os.path.join(output_folder, "summary.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
+        
+        # Also generate daily.json for heatmap visualization
+        daily_stats = []
+        for date_str, day_data in merged["per_date"].items():
+            daily_stats.append({
+                "date": date_str,
+                "day": int(date_str.split("-")[2]) if "-" in date_str else 0,
+                "commits": day_data.get("commits", 0),
+                "lines_added": day_data.get("lines_added", 0),
+                "lines_deleted": day_data.get("lines_deleted", 0)
+            })
+        daily_stats.sort(key=lambda x: x["date"])
+        
+        daily_path = os.path.join(output_folder, "daily.json")
+        with open(daily_path, "w", encoding="utf-8") as f:
+            json.dump({"daily_stats": daily_stats}, f, indent=2)
 
         display_label = merged["name"] or merged["email"] or canonical_slug
         print(f"  - {display_label} -> {output_path}")
