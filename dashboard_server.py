@@ -4177,6 +4177,28 @@ def calculate_team_capacity(languages: Dict[str, int], team_size: int) -> Dict[s
     }
 
 
+def build_team_per_date(members: list, year: int):
+    aggregated = {}
+    try:
+        for member in members or []:
+            user_dir = os.path.join(STATS_ROOT, "users", member)
+            for month in range(1, 13):
+                month_folder = f"{year:04d}-{month:02d}"
+                summary_path = os.path.join(user_dir, month_folder, "summary.json")
+                if not os.path.isfile(summary_path):
+                    continue
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    monthly = json.load(f)
+                for date_str, day in (monthly.get("per_date", {}) or {}).items():
+                    entry = aggregated.setdefault(date_str, {"commits": 0, "additions": 0, "deletions": 0, "net_lines": 0})
+                    entry["commits"] += day.get("commits", 0)
+                    entry["additions"] += day.get("additions", 0)
+                    entry["deletions"] += day.get("deletions", 0)
+                    entry["net_lines"] += day.get("net_lines", 0)
+    except Exception:
+        pass
+    return aggregated
+
 @app.route("/api/teams/<team_id>/year/<int:year>")
 def api_team_year(team_id: str, year: int):
     """Get aggregated yearly summary for a team."""
@@ -4267,7 +4289,7 @@ def api_team_year(team_id: str, year: int):
                     "total_deletions": data.get("lines_deleted", 0),
                     "languages": languages,
                     "subsystems": subsystems,
-                    "per_date": data.get("per_date", {}),
+                    "per_date": build_team_per_date(team.get("members", []), year),
                     "member_contributions": data.get("member_contributions", {}),
                     "capacity_analysis": capacity_analysis
                 })
