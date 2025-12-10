@@ -3754,6 +3754,57 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
       // Don't add the heatmap if there's an error
     }
     
+    // LOC evolution chart for yearly view
+    if (period.is_yearly) {
+      try {
+        const year = period.label;
+        const loc = await fetchJSON(`/api/subsystems/${encodeURIComponent(subsystemName)}/loc-evolution/${year}`);
+        const series = loc.series || [];
+        const locCard = document.createElement("div");
+        locCard.className = "card";
+        if (series.length > 0) {
+          locCard.innerHTML = createTitleWithTooltip(
+            "📈 Lines of Code Evolution", 
+            "Monthly total code lines for this subsystem across the selected year.",
+            "h2"
+          ) + '<div style="height: 260px;"><canvas id="chart-loc-evolution"></canvas></div>';
+          container.appendChild(locCard);
+          const ctx = document.getElementById("chart-loc-evolution").getContext("2d");
+          const labels = series.map(s => s.month);
+          const values = series.map(s => s.code_lines);
+          new Chart(ctx, {
+            type: "line",
+            data: {
+              labels,
+              datasets: [{
+                label: "Code lines",
+                data: values,
+                borderColor: "#3b82f6",
+                backgroundColor: "rgba(59,130,246,0.15)",
+                tension: 0.2,
+                fill: true,
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: { x: { display: true }, y: { display: true } }
+            }
+          });
+        } else {
+          locCard.innerHTML = createTitleWithTooltip(
+            "📈 Lines of Code Evolution", 
+            "Monthly total code lines for this subsystem across the selected year.",
+            "h2"
+          ) + '<div class="no-data">No LOC data available for this year.</div>';
+          container.appendChild(locCard);
+        }
+      } catch (e) {
+        console.warn("LOC evolution fetch failed:", e);
+      }
+    }
+    
   } catch (error) {
     console.error("Failed to load contribution activity for", subsystemName, ":", error);
     // Don't show error to user, just skip this section

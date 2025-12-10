@@ -436,6 +436,13 @@ def main() -> None:
     logger.info("===========================================")
     generate_subsystem_language_stats(repos_root, output_root, services_file)
 
+    # Precompute LOC evolution for all subsystems (monthly code lines per year)
+    try:
+        precompute_loc_evolution(year, repos_root, services_file, output_root)
+        logger.info("Precomputed LOC evolution for subsystems")
+    except Exception as e:
+        logger.info(f"Warning: LOC evolution precompute failed: {e}")
+
     # After all months: run blame.py once (full history) - optional
     if not skip_blame:
         logger.info("\n===========================================")
@@ -1470,9 +1477,7 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
         
         # Create subsystem stats directory if it doesn't exist
         subsystem_dir = os.path.join(subsystems_stats_root, subsystem_name)
-        if not os.path.exists(subsystem_dir):
-            logger.info(f"    Subsystem stats directory not found: {subsystem_dir}, skipping...")
-            continue
+        os.makedirs(subsystem_dir, exist_ok=True)
         
         # Collect all paths for this subsystem
         all_paths = []
@@ -1517,78 +1522,79 @@ def run_cloc_for_paths(paths: list) -> dict:
     import subprocess
     import json
     import tempfile
-    
-    # Create a temporary file to hold the list of paths
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as tmp_file:
+    import os
+    from datetime import datetime
+
+    # Create a temporary file listing all paths
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp_file:
         for path in paths:
-            tmp_file.write(path + '\n')
+            tmp_file.write(path + "\n")
         tmp_file_path = tmp_file.name
-    
+
     try:
-        # Run cloc with JSON output on all paths
         cmd = [
             "cloc",
             "--json",
             "--list-file=" + tmp_file_path,
             "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
-            "--skip-uniqueness"
+            "--skip-uniqueness",
         ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
-        
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
         if result.returncode != 0:
-            logger.info(f"    cloc command failed with return code {result.returncode}")
+            print(f"    cloc command failed with return code {result.returncode}")
             if result.stderr:
-                logger.info(f"    stderr: {result.stderr}")
+                print(f"    stderr: {result.stderr}")
             return {}
-        
+
         if not result.stdout.strip():
-            logger.info("    cloc produced no output")
+            print("    cloc produced no output")
             return {}
-        
-        # Parse JSON output
+
         try:
             cloc_data = json.loads(result.stdout)
         except json.JSONDecodeError as e:
-            logger.info(f"    Failed to parse cloc JSON output: {e}")
+            print(f"    Failed to parse cloc JSON output: {e}")
             return {}
-        
-        # Convert cloc output to our format
+
         languages = {}
         header = cloc_data.get("header", {})
-        
+
         for lang_name, lang_data in cloc_data.items():
-            if lang_name in ["header", "SUM"]:
+            if lang_name in ("header", "SUM"):
                 continue
-            
             if isinstance(lang_data, dict) and "nFiles" in lang_data:
                 languages[lang_name] = {
                     "files": lang_data.get("nFiles", 0),
                     "blank_lines": lang_data.get("blank", 0),
                     "comment_lines": lang_data.get("comment", 0),
-                    "code_lines": lang_data.get("code", 0)
+                    "code_lines": lang_data.get("code", 0),
                 }
-        
-        # Add summary information
+
         result_data = {
             "generated_at": datetime.utcnow().isoformat() + "Z",
             "cloc_version": header.get("cloc_version", "unknown"),
             "elapsed_seconds": header.get("elapsed_seconds", 0),
-            "languages": languages
+            "languages": languages,
         }
-        
-        # Add totals
+
         sum_data = cloc_data.get("SUM", {})
         if sum_data:
             result_data["totals"] = {
                 "files": sum_data.get("nFiles", 0),
                 "blank_lines": sum_data.get("blank", 0),
                 "comment_lines": sum_data.get("comment", 0),
-                "code_lines": sum_data.get("code", 0)
+                "code_lines": sum_data.get("code", 0),
             }
-        
+
         return result_data
-        
+
     finally:
         # Clean up temporary file
         try:
@@ -1596,6 +1602,283 @@ def run_cloc_for_paths(paths: list) -> dict:
         except OSError:
             pass
 
+def precompute_loc_evolution(year: int, repos_root: str, services_file: str, output_root: str) -> None:
+    """
+    Precompute monthly LOC evolution for all subsystems and persist to
+    stats/subsystems/<name>/monthly/<year>.json.
+
+    It mirrors the logic used in dashboard_server's /loc-evolution endpoint,
+    but runs offline for *all* subsystems and never touches the repos on disk
+    (it uses git archive snapshots + cloc).
+    """
+    import subprocess
+    import json
+    import tempfile
+    import tarfile
+    import shutil
+
+    logger.info("")
+    logger.info("========================================")
+    logger.info("Precomputing LOC evolution for subsystems")
+    logger.info("Target year: %s", year)
+    logger.info("========================================")
+
+    # Load services configuration (mapping repo_key -> {service_name: [paths...]})
+    services_config: dict = {}
+    if os.path.isfile(services_file):
+        try:
+            with open(services_file, "r", encoding="utf-8") as sf:
+                services_config = json.load(sf)
+        except Exception as e:
+            logger.warning("Could not read services config %s: %s", services_file, e)
+    else:
+        logger.warning("Services config file not found: %s", services_file)
+
+    stats_root = os.path.join(output_root, "stats")
+    subsystems_root = os.path.join(stats_root, "subsystems")
+    repos_root_abs = os.path.abspath(repos_root)
+
+    # Build subsystem -> {repo, paths} mapping
+    subsystem_repos: dict[str, dict] = {}
+
+    # First, services defined in services.json
+    for repo_key, services in services_config.items():
+        for service_name, paths in services.items():
+            cleaned_paths = [p.rstrip("/") for p in paths if p]
+            subsystem_repos.setdefault(service_name, {"repo": repo_key, "paths": cleaned_paths or [""]})
+
+    # Then, standalone repos: each repo basename is its own subsystem
+    if os.path.isdir(repos_root_abs):
+        for org_dir in os.listdir(repos_root_abs):
+            org_path = os.path.join(repos_root_abs, org_dir)
+            if not os.path.isdir(org_path):
+                continue
+
+            for repo_dir in os.listdir(org_path):
+                repo_path = os.path.join(org_path, repo_dir)
+                git_dir = os.path.join(repo_path, ".git")
+                if not os.path.isdir(git_dir):
+                    continue
+
+                repo_key = f"{org_dir}/{repo_dir}"
+                subsystem_name = repo_dir
+
+                # Do not overwrite explicit mapping from services.json
+                subsystem_repos.setdefault(subsystem_name, {"repo": repo_key, "paths": [""]})
+
+    # Compute monthly series for each subsystem
+    for subsystem_name, info in subsystem_repos.items():
+        repo_key = info.get("repo")
+        paths = info.get("paths") or [""]
+
+        repo_path = os.path.join(repos_root_abs, repo_key) if repo_key else None
+        if not repo_path or not os.path.isdir(repo_path):
+            logger.info("[loc-precompute] Skipping %s: repo %s not found (path=%s)",
+                        subsystem_name, repo_key, repo_path)
+            continue
+
+        logger.info("[loc-precompute] %s (%s)", subsystem_name, repo_key)
+        series: list[dict] = []
+
+        filtered_paths = [p for p in paths if p]
+
+        for month in range(1, 13):
+            since = f"{year:04d}-{month:02d}-01"
+            if month == 12:
+                until = f"{year + 1:04d}-01-01"
+            else:
+                until = f"{year:04d}-{month + 1:02d}-01"
+
+            month_label = f"{year:04d}-{month:02d}"
+
+            try:
+                # 1) Find first commit in the month affecting these paths
+                rev_list_cmd = [
+                    "git", "-C", repo_path, "rev-list",
+                    f"--since={since}", f"--until={until}", "--reverse", "HEAD",
+                ]
+                if filtered_paths:
+                    rev_list_cmd.append("--")
+                    rev_list_cmd.extend(filtered_paths)
+
+                rl = subprocess.run(
+                    rev_list_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                if rl.returncode != 0:
+                    logger.warning(
+                        "[loc-precompute] rev-list failed for %s (%s) %s..%s: rc=%s stderr=%s",
+                        subsystem_name,
+                        repo_key,
+                        since,
+                        until,
+                        rl.returncode,
+                        (rl.stderr or "").strip(),
+                    )
+                    series.append({"month": month_label, "code_lines": 0, "files": 0})
+                    continue
+
+                revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
+                if not revs:
+                    logger.info(
+                        "[loc-precompute] No commits for %s in %s..%s",
+                        subsystem_name,
+                        since,
+                        until,
+                    )
+                    series.append({"month": month_label, "code_lines": 0, "files": 0})
+                    continue
+
+                rev = revs[0]
+
+                # 2) For path-scoped subsystems, ensure there are files at that commit
+                if filtered_paths:
+                    ls_cmd = ["git", "-C", repo_path, "ls-tree", "--name-only", rev, "--"]
+                    ls_cmd.extend(filtered_paths)
+
+                    ls = subprocess.run(
+                        ls_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    if ls.returncode != 0:
+                        logger.warning(
+                            "[loc-precompute] ls-tree failed for %s at %s: rc=%s stderr=%s",
+                            repo_key,
+                            rev,
+                            ls.returncode,
+                            (ls.stderr or "").strip(),
+                        )
+                        series.append({"month": month_label, "code_lines": 0, "files": 0})
+                        continue
+
+                    present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
+                    if not present_files:
+                        logger.info(
+                            "[loc-precompute] No files for %s at %s in paths %s",
+                            subsystem_name,
+                            rev,
+                            filtered_paths,
+                        )
+                        series.append({"month": month_label, "code_lines": 0, "files": 0})
+                        continue
+
+                # 3) Create archive of repo@rev into a temp dir, then run cloc
+                tmpdir = tempfile.mkdtemp(prefix="loc-precompute-")
+                try:
+                    tar_path = os.path.join(tmpdir, "snapshot.tar")
+
+                    archive_cmd = ["git", "-C", repo_path, "archive", "--format=tar", rev]
+                    if filtered_paths:
+                        archive_cmd.extend(filtered_paths)
+
+                    ar = subprocess.run(
+                        archive_cmd,
+                        capture_output=True,
+                        text=False,
+                        check=False,
+                    )
+
+                    if ar.returncode != 0 or not ar.stdout:
+                        logger.warning(
+                            "[loc-precompute] archive failed for %s %s: rc=%s",
+                            repo_key,
+                            rev,
+                            ar.returncode,
+                        )
+                        series.append({"month": month_label, "code_lines": 0, "files": 0})
+                        continue
+
+                    with open(tar_path, "wb") as tf:
+                        tf.write(ar.stdout)
+
+                    with tarfile.open(tar_path, "r") as tar:
+                        tar.extractall(path=tmpdir)
+
+                    cloc_cmd = [
+                        "cloc",
+                        "--json",
+                        tmpdir,
+                        "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
+                    ]
+                    cl = subprocess.run(
+                        cloc_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    if cl.returncode != 0 or not cl.stdout.strip():
+                        logger.warning(
+                            "[loc-precompute] cloc failed for %s %s: rc=%s",
+                            subsystem_name,
+                            rev,
+                            cl.returncode,
+                        )
+                        series.append({"month": month_label, "code_lines": 0, "files": 0})
+                        continue
+
+                    try:
+                        cloc_data = json.loads(cl.stdout)
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "[loc-precompute] Failed to parse cloc JSON for %s %s: %s",
+                            subsystem_name,
+                            rev,
+                            e,
+                        )
+                        series.append({"month": month_label, "code_lines": 0, "files": 0})
+                        continue
+
+                    total_code = 0
+                    total_files = 0
+                    for lang_name, lang_info in cloc_data.items():
+                        if lang_name in ("header", "SUM"):
+                            continue
+                        if isinstance(lang_info, dict):
+                            total_code += lang_info.get("code", 0)
+                            total_files += lang_info.get("nFiles", 0)
+
+                    logger.info(
+                        "[loc-precompute] %s %s: code_lines=%s files=%s",
+                        subsystem_name,
+                        month_label,
+                        total_code,
+                        total_files,
+                    )
+                    series.append(
+                        {"month": month_label, "code_lines": total_code, "files": total_files}
+                    )
+
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+
+            except Exception as e:
+                # Never let a single month blow up the whole precompute
+                logger.warning(
+                    "[loc-precompute] Error computing LOC for %s %s: %s",
+                    subsystem_name,
+                    month_label,
+                    e,
+                )
+                series.append({"month": month_label, "code_lines": 0, "files": 0})
+
+        # Persist series for this subsystem
+        out_dir = os.path.join(subsystems_root, subsystem_name, "monthly")
+        os.makedirs(out_dir, exist_ok=True)
+        out_file = os.path.join(out_dir, f"{year:04d}.json")
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"generated_at": datetime.utcnow().isoformat() + "Z", "series": series},
+                f,
+                indent=2,
+            )
+        logger.info("[loc-precompute] Wrote %s", out_file)
 
 if __name__ == "__main__":
     main()

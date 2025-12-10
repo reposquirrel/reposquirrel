@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import sys
+import argparse
 import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Tuple, Optional
@@ -750,11 +751,21 @@ def analyze_ownership_percentage_badges() -> Dict[str, List[Dict[str, Any]]]:
 
 def find_user_summary(user_slug: str, from_date: str, to_date: str) -> str:
     """
-    Locate stats/users/<slug>/<from>_<to>/summary.json
+    Locate monthly user summary, supporting both legacy and new layouts:
+    - Legacy: stats/users/<slug>/<from>_<to>/summary.json
+    - New:    stats/users/<slug>/<YYYY-MM>/summary.json
     """
+    # New layout (YYYY-MM)
+    try:
+        month_folder = from_date[:7]
+        new_path = os.path.join(STATS_ROOT, "users", user_slug, month_folder, "summary.json")
+        if os.path.isfile(new_path):
+            return new_path
+    except Exception:
+        pass
+    # Legacy layout (from_to)
     folder = f"{from_date}_{to_date}"
-    path = os.path.join(STATS_ROOT, "users", user_slug, folder, "summary.json")
-    return path
+    return os.path.join(STATS_ROOT, "users", user_slug, folder, "summary.json")
 
 
 def find_repo_blame(repo_rel: str) -> str:
@@ -1754,6 +1765,46 @@ def api_subsystem_languages(subsystem_name: str):
         languages_file = os.path.join(subsystem_dir, "languages.json")
         
         if not os.path.exists(languages_file):
+            # Fallback: if subsystem_name is a repo basename, run cloc to compute languages
+            services_file = os.path.join(BASE_DIR, "configuration", "services.json")
+            try:
+                with open(services_file, "r", encoding="utf-8") as sf:
+                    services_config = json.load(sf)
+            except Exception:
+                services_config = {}
+            matching_repo_key = None
+            for repo_key in services_config.keys():
+                if repo_key.split('/')[-1] == subsystem_name:
+                    matching_repo_key = repo_key
+                    break
+            if matching_repo_key:
+                repo_path = os.path.join(BASE_DIR, "repos", matching_repo_key)
+                try:
+                    result = subprocess.run(["cloc", "--json", repo_path, "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"], capture_output=True, text=True, check=False)
+                    if result.returncode != 0:
+                        return jsonify({"languages": {}, "totals": {}, "error": f"cloc failed: rc={result.returncode} stderr={result.stderr}"})
+                    cloc_data = json.loads(result.stdout) if result.stdout else {}
+                    languages = {}
+                    totals = {"files": 0, "code_lines": 0, "blank_lines": 0, "comment_lines": 0}
+                    for lang_name, lang_info in cloc_data.items():
+                        # Skip cloc aggregate row
+                        if lang_name == "SUM":
+                            continue
+                        if isinstance(lang_info, dict) and "nFiles" in lang_info:
+                            languages[lang_name] = {
+                                "files": lang_info.get("nFiles", 0),
+                                "blank_lines": lang_info.get("blank", 0),
+                                "comment_lines": lang_info.get("comment", 0),
+                                "code_lines": lang_info.get("code", 0)
+                            }
+                            totals["files"] += lang_info.get("nFiles", 0)
+                            totals["code_lines"] += lang_info.get("code", 0)
+                            totals["blank_lines"] += lang_info.get("blank", 0)
+                            totals["comment_lines"] += lang_info.get("comment", 0)
+                    return jsonify({"generated_at": datetime.utcnow().isoformat() + "Z", "languages": languages, "totals": totals})
+                except Exception as e:
+                    return jsonify({"languages": {}, "totals": {}, "error": f"cloc error: {e}"})
+            # No data available
             return jsonify({"languages": {}, "totals": {}, "error": "Language statistics not available"})
         
         try:
@@ -1767,6 +1818,149 @@ def api_subsystem_languages(subsystem_name: str):
     except Exception as e:
         print(f"Error in api_subsystem_languages: {str(e)}")
         return jsonify({"languages": {}, "totals": {}, "error": str(e)})
+
+@app.route("/api/subsystems/<subsystem_name>/loc-evolution/<int:year>")
+def api_subsystem_loc_evolution(subsystem_name: str, year: int):
+    """Compute monthly lines-of-code evolution for a subsystem without modifying repos.
+    Returns cached stats if available.
+    """
+    try:
+        # Serve cached file if present
+        cached_file = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "monthly", f"{year:04d}.json")
+        if os.path.isfile(cached_file):
+            with open(cached_file, "r", encoding="utf-8") as f:
+                return jsonify(json.load(f))
+
+        # Map subsystem to repo and paths from services.json
+        services_file = os.path.join(BASE_DIR, "configuration", "services.json")
+        with open(services_file, "r", encoding="utf-8") as sf:
+            services_config = json.load(sf)
+        # Find repo key and paths for subsystem
+        repo_key = None
+        paths = None
+        for rk, services in services_config.items():
+            if subsystem_name in services:
+                repo_key = rk
+                paths = services.get(subsystem_name, [])
+                break
+        if not repo_key:
+            # If subsystem is a repo basename, run for whole repo
+            for rk in services_config.keys():
+                if rk.split('/')[-1] == subsystem_name:
+                    repo_key = rk
+                    paths = [""]
+                    break
+        if not repo_key:
+            # Gracefully return empty series if subsystem mapping is missing
+            return jsonify({"series": []})
+        repo_path = os.path.join(BASE_DIR, "repos", repo_key)
+        if not os.path.isdir(repo_path):
+            # Gracefully return empty series if repo is missing
+            return jsonify({"series": []})
+        series = []
+        for month in range(1, 13):
+            since = f"{year:04d}-{month:02d}-01"
+            # Compute until as next month start
+            if month == 12:
+                until = f"{year+1:04d}-01-01"
+            else:
+                until = f"{year:04d}-{month+1:02d}-01"
+            # Find first commit of month affecting paths
+            rev_list_cmd = [
+                "git", "-C", repo_path, "rev-list",
+                f"--since={since}", f"--until={until}", "--reverse", "HEAD"
+            ]
+            # Limit to specific paths if provided
+            if paths and any(p for p in paths if p):
+                rev_list_cmd.append("--")
+                rev_list_cmd.extend([p.rstrip("/") for p in paths if p])
+            rev = None
+            try:
+                rl = subprocess.run(rev_list_cmd, capture_output=True, text=True, check=False)
+                revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
+                if revs:
+                    rev = revs[0]
+                else:
+                    app.logger.info(f"[loc-evolution] No commits for {subsystem_name} {since}..{until} in repo {repo_key}")
+            except Exception as e:
+                app.logger.warning(f"[loc-evolution] rev-list failed for {repo_key}: {e}")
+                rev = None
+            if not rev:
+                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+                continue
+            # Verify subsystem paths exist at the commit (for path-scoped subsystems)
+            if paths and any(p for p in paths if p):
+                ls_cmd = ["git", "-C", repo_path, "ls-tree", "-r", "--name-only", rev, "--"] + [p.rstrip("/") for p in paths if p]
+                try:
+                    ls = subprocess.run(ls_cmd, capture_output=True, text=True, check=False)
+                    present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
+                    if not present_files:
+                        app.logger.info(f"[loc-evolution] No files for {subsystem_name} at {rev} in paths {paths}")
+                        series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+                        continue
+                except Exception as e:
+                    app.logger.warning(f"[loc-evolution] ls-tree failed for {repo_key} at {rev}: {e}")
+                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+                    continue
+            # Create archive of paths at this commit to temp dir
+            import tempfile, tarfile
+            tmpdir = tempfile.mkdtemp(prefix="loc-archive-")
+            tar_path = os.path.join(tmpdir, "snapshot.tar")
+            try:
+                archive_cmd = ["git", "-C", repo_path, "archive", "--format=tar", rev]
+                if paths and any(p for p in paths if p):
+                    archive_cmd.extend([p.rstrip("/") for p in paths if p])
+                ar = subprocess.run(archive_cmd, capture_output=True, text=True, check=False)
+                if ar.returncode != 0 or not ar.stdout:
+                    app.logger.warning(f"[loc-evolution] archive failed for {repo_key} {rev}: rc={ar.returncode}")
+                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+                    continue
+                with open(tar_path, "wb") as tf:
+                    tf.write(ar.stdout.encode() if isinstance(ar.stdout, str) else ar.stdout)
+                # Extract
+                with tarfile.open(tar_path, "r") as tar:
+                    tar.extractall(path=tmpdir)
+                # Run cloc on extracted content
+                cloc_cmd = [
+                    "cloc", "--json", tmpdir,
+                    "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"
+                ]
+                cl = subprocess.run(cloc_cmd, capture_output=True, text=True, check=False)
+                if cl.returncode != 0:
+                    app.logger.warning(f"[loc-evolution] cloc failed for {subsystem_name} {rev}: rc={cl.returncode}")
+                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+                    continue
+                cloc_data = json.loads(cl.stdout) if cl.stdout else {}
+                total_code = 0
+                total_files = 0
+                for lang_name, lang_info in cloc_data.items():
+                    if lang_name == "SUM":
+                        continue
+                    if isinstance(lang_info, dict) and "code" in lang_info:
+                        total_code += lang_info.get("code", 0)
+                        total_files += lang_info.get("nFiles", 0)
+                app.logger.info(f"[loc-evolution] {subsystem_name} {year}-{month:02d}: code_lines={total_code} files={total_files}")
+                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": total_code, "files": total_files})
+            except Exception as e:
+                app.logger.warning(f"[loc-evolution] Exception building snapshot for {subsystem_name} {rev}: {e}")
+                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
+            finally:
+                try:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception:
+                    pass
+        # Persist series
+        out_dir = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "monthly")
+        os.makedirs(out_dir, exist_ok=True)
+        out_file = os.path.join(out_dir, f"{year:04d}.json")
+        payload = {"generated_at": datetime.utcnow().isoformat() + "Z", "series": series}
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return jsonify(payload)
+    except Exception as e:
+        app.logger.warning(f"[loc-evolution] Error computing LOC for {subsystem_name} {year}: {e}")
+        return jsonify({"series": []})
 
 
 @app.route("/api/subsystems/size-rankings")
@@ -1809,22 +2003,19 @@ def api_subsystem_size_rankings():
                 continue
                 
             languages_file = os.path.join(subsystem_dir, "languages.json")
-            if not os.path.exists(languages_file):
-                continue
-                
-            try:
-                with open(languages_file, "r", encoding="utf-8") as f:
-                    language_data = json.load(f)
-                
-                total_lines = language_data.get("totals", {}).get("code_lines", 0)
-                if total_lines > 0:
-                    subsystem_sizes.append({
-                        "name": subsystem_name,
-                        "total_lines": total_lines
-                    })
-                    
-            except (json.JSONDecodeError, IOError):
-                continue
+            total_lines = 0
+            if os.path.exists(languages_file):
+                try:
+                    with open(languages_file, "r", encoding="utf-8") as f:
+                        language_data = json.load(f)
+                    total_lines = language_data.get("totals", {}).get("code_lines", 0)
+                except (json.JSONDecodeError, IOError):
+                    total_lines = 0
+            if total_lines > 0:
+                subsystem_sizes.append({
+                    "name": subsystem_name,
+                    "total_lines": total_lines
+                })
         
         # Sort by total lines (descending)
         subsystem_sizes.sort(key=lambda x: x["total_lines"], reverse=True)
@@ -4239,7 +4430,17 @@ def api_team_year(team_id: str, year: int):
                     team_responsibilities = []
                 recomputed_details = {}
                 total_responsible_lines = 0
+                # Load services configuration to identify nested subsystems in repos
+                services_config = {}
+                services_file = os.path.join(BASE_DIR, "configuration", "services.json")
+                try:
+                    with open(services_file, "r", encoding="utf-8") as sf:
+                        services_config = json.load(sf)
+                except Exception:
+                    services_config = {}
+                
                 for subsystem_name in team_responsibilities:
+                    # Base: language stats for subsystem (may be a repo or a specific service)
                     lang_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "languages.json")
                     subsystem_languages = {}
                     subsystem_lines = 0
@@ -4253,6 +4454,55 @@ def api_team_year(team_id: str, year: int):
                                     subsystem_lines += code_lines
                         except Exception:
                             pass
+                    
+                    # If subsystem_name is a repository (top-level), subtract lines of its child services
+                    # services_config is { org/repo: { service_name: [paths...] } }
+                    # Match by repo basename
+                    matching_repo_key = None
+                    for repo_key in services_config.keys():
+                        if repo_key.split('/')[-1] == subsystem_name:
+                            matching_repo_key = repo_key
+                            break
+                    if matching_repo_key:
+                        app.logger.info(f"[teams-year] Repo match for subsystem '{subsystem_name}': {matching_repo_key}")
+                        # Sum lines of all child services under this repo
+                        child_services_total = 0
+                        for service_name in services_config.get(matching_repo_key, {}).keys():
+                            child_lang_path = os.path.join(STATS_ROOT, "subsystems", service_name, "languages.json")
+                            if os.path.isfile(child_lang_path):
+                                try:
+                                    with open(child_lang_path, "r", encoding="utf-8") as clf:
+                                        child_lang_data = json.load(clf)
+                                        for _, child_lang_info in (child_lang_data.get("languages", {}) or {}).items():
+                                            child_services_total += child_lang_info.get("code_lines", 0)
+                                except Exception as e:
+                                    app.logger.warning(f"[teams-year] Failed reading child service '{service_name}' languages: {e}")
+                        app.logger.info(f"[teams-year] Child services total for '{matching_repo_key}': {child_services_total}")
+                        # If repo languages.json is missing, run cloc on repo to get totals
+                        if subsystem_lines == 0:
+                            try:
+                                repo_rel = matching_repo_key
+                                repo_path = os.path.join(BASE_DIR, "repos", repo_rel)
+                                app.logger.info(f"[teams-year] Running cloc for repo '{repo_rel}' at '{repo_path}'")
+                                # Run cloc
+                                result = subprocess.run(["cloc", "--json", repo_path, "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"], capture_output=True, text=True, check=False)
+                                if result.returncode != 0:
+                                    app.logger.warning(f"[teams-year] cloc failed for '{repo_rel}': rc={result.returncode} stderr={result.stderr}")
+                                cloc_data = json.loads(result.stdout) if result.stdout else {}
+                                total_code = 0
+                                for lang_name, lang_info in cloc_data.items():
+                                    if isinstance(lang_info, dict) and "code" in lang_info:
+                                        total_code += lang_info.get("code", 0)
+                                subsystem_lines = total_code
+                                app.logger.info(f"[teams-year] cloc total code for '{repo_rel}': {subsystem_lines}")
+                            except Exception as e:
+                                app.logger.warning(f"[teams-year] Exception running cloc for '{repo_rel}': {e}")
+                        # Subtract child services lines from repo total (cannot be negative)
+                        before_subtract = subsystem_lines
+                        subsystem_lines = max(0, subsystem_lines - child_services_total)
+                        app.logger.info(f"[teams-year] Repo remainder for '{matching_repo_key}': {before_subtract} - {child_services_total} = {subsystem_lines}")
+                        subsystem_languages = {"Remaining": subsystem_lines}
+                    
                     recomputed_details[subsystem_name] = {
                         "name": subsystem_name,
                         "lines": subsystem_lines,
@@ -5122,6 +5372,11 @@ def static_files(filename: str):
 if __name__ == "__main__":
     # You can set host="0.0.0.0" if you want to reach it from other machines
     # Exclude repos directory from file watcher to prevent restarts during cloning
-    app.run(host="127.0.0.1", port=5001, debug=True, 
+    parser = argparse.ArgumentParser(description="Dashboard server")
+    parser.add_argument("--host", "--listen-address", dest="host", default="127.0.0.1", help="Host/IP to bind the dashboard server")
+    parser.add_argument("--port", type=int, default=5001, help="Port to bind the dashboard server")
+    args = parser.parse_args()
+
+    app.run(host=args.host, port=args.port, debug=True,
             exclude_patterns=["repos/*", "repos/**/*", "stats/*", "stats/**/*"])
 
