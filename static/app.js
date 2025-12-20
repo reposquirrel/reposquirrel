@@ -1969,6 +1969,79 @@ async function renderUserDashboard(user, month, summary) {
     });
   }
 
+  if (month.is_yearly && summary.developer_capacity_profile && summary.developer_capacity_profile.developer_equivalent >= 0.9) {
+    const capacityProfile = summary.developer_capacity_profile;
+    const capacityCard = document.createElement("div");
+    capacityCard.className = "card";
+    capacityCard.innerHTML = createTitleWithTooltip(
+      "🧠 Ownership Capacity (Blame)",
+      "Git blame ownership converted into theoretical developer equivalents using the same language thresholds as team capacity. Uses the developer's share of each subsystem's languages.",
+      "h2"
+    );
+
+    const capacityHeader = document.createElement("div");
+    capacityHeader.style.display = "flex";
+    capacityHeader.style.justifyContent = "space-between";
+    capacityHeader.style.alignItems = "center";
+    capacityHeader.style.marginBottom = "12px";
+
+    const headcount = document.createElement("div");
+    headcount.style.fontSize = "2rem";
+    headcount.style.fontWeight = "700";
+    headcount.style.color = "var(--accent-blue)";
+    headcount.textContent = `${capacityProfile.developer_equivalent.toFixed(1)} devs`;
+
+    const linesOwned = document.createElement("div");
+    linesOwned.style.fontFamily = "monospace";
+    linesOwned.style.color = "var(--text-secondary)";
+    linesOwned.textContent = `${(capacityProfile.total_lines || 0).toLocaleString()} lines owned`;
+
+    capacityHeader.appendChild(headcount);
+    capacityHeader.appendChild(linesOwned);
+    capacityCard.appendChild(capacityHeader);
+
+    const languageList = document.createElement("div");
+    languageList.style.display = "flex";
+    languageList.style.flexWrap = "wrap";
+    languageList.style.gap = "10px";
+
+    const languageEntries = Object.entries(capacityProfile.language_breakdown || {})
+      .sort((a, b) => (b[1].lines || 0) - (a[1].lines || 0));
+
+    const maxLanguagePills = 8;
+    languageEntries.slice(0, maxLanguagePills).forEach(([lang, data]) => {
+      const pill = document.createElement("div");
+      pill.style.border = "1px solid var(--border)";
+      pill.style.borderRadius = "999px";
+      pill.style.padding = "6px 12px";
+      pill.style.backgroundColor = "var(--background-secondary)";
+      pill.style.fontSize = "0.9em";
+      pill.innerHTML = `<strong>${lang}</strong>: ${data.lines.toLocaleString()} lines → ${data.theoretical_devs.toFixed(1)} devs`;
+      languageList.appendChild(pill);
+    });
+
+    if (languageEntries.length > maxLanguagePills) {
+      const remaining = languageEntries.length - maxLanguagePills;
+      const morePill = document.createElement("div");
+      morePill.style.border = "1px dashed var(--border)";
+      morePill.style.borderRadius = "999px";
+      morePill.style.padding = "6px 12px";
+      morePill.style.fontSize = "0.9em";
+      morePill.textContent = `+${remaining} more languages`;
+      languageList.appendChild(morePill);
+    }
+
+    const thresholdNote = document.createElement("div");
+    thresholdNote.className = "note-text";
+    thresholdNote.style.marginTop = "10px";
+    thresholdNote.style.color = "var(--text-secondary)";
+    thresholdNote.textContent = "Shown only when the theoretical ownership exceeds 0.9 developers.";
+
+    capacityCard.appendChild(languageList);
+    capacityCard.appendChild(thresholdNote);
+    main.appendChild(capacityCard);
+  }
+
   // Per-repo breakdown
   const repos = summary.per_repo || {};
   if (Object.keys(repos).length > 0) {
@@ -2734,6 +2807,99 @@ async function renderTeamDashboard(team, period, summary) {
     capacityContainer.appendChild(summaryRow);
     capacityContainer.appendChild(languageBreakdown);
     main.appendChild(capacityContainer);
+  }
+
+  if (period.is_yearly && Array.isArray(summary.developer_capacity_profiles) && summary.developer_capacity_profiles.length > 0) {
+    const developerWorthCard = document.createElement("div");
+    developerWorthCard.className = "card";
+    developerWorthCard.innerHTML = createTitleWithTooltip(
+      "🧠 Individual Capacity (Blame)",
+      "Git blame ownership for this team's responsible subsystems, converted into theoretical developer equivalents using the same language rules as the team capacity view. Only developers with ≥0.9 headcount are shown.",
+      "h2"
+    );
+
+    const developerWorthList = document.createElement("div");
+    developerWorthList.style.display = "flex";
+    developerWorthList.style.flexDirection = "column";
+    developerWorthList.style.gap = "12px";
+
+    summary.developer_capacity_profiles.forEach(profile => {
+      const devEntry = document.createElement("div");
+      devEntry.style.border = "1px solid var(--border)";
+      devEntry.style.borderRadius = "10px";
+      devEntry.style.padding = "12px";
+      devEntry.style.backgroundColor = "var(--background-secondary)";
+      devEntry.style.display = "flex";
+      devEntry.style.flexDirection = "column";
+      devEntry.style.gap = "8px";
+
+      const header = document.createElement("div");
+      header.style.display = "flex";
+      header.style.justifyContent = "space-between";
+      header.style.alignItems = "center";
+
+      const nameWrapper = document.createElement("div");
+      nameWrapper.appendChild(createClickableDeveloperName(profile.slug, profile.display_name, "inline"));
+
+      const worthBadge = document.createElement("div");
+      worthBadge.style.fontWeight = "600";
+      worthBadge.style.color = "var(--accent-blue)";
+      worthBadge.textContent = `${profile.developer_equivalent.toFixed(1)} devs`;
+
+      header.appendChild(nameWrapper);
+      header.appendChild(worthBadge);
+      devEntry.appendChild(header);
+
+      const ownedLines = document.createElement("div");
+      ownedLines.className = "developer-stats";
+      ownedLines.style.color = "var(--text-secondary)";
+      ownedLines.textContent = `${(profile.total_lines || 0).toLocaleString()} lines owned`;
+      devEntry.appendChild(ownedLines);
+
+      const languagesContainer = document.createElement("div");
+      languagesContainer.style.display = "flex";
+      languagesContainer.style.flexWrap = "wrap";
+      languagesContainer.style.gap = "8px";
+
+      const languages = Object.entries(profile.language_breakdown || {})
+        .sort((a, b) => (b[1].lines || 0) - (a[1].lines || 0));
+      const maxLanguages = 6;
+
+      languages.slice(0, maxLanguages).forEach(([lang, data]) => {
+        const pill = document.createElement("div");
+        pill.style.backgroundColor = "var(--background-primary)";
+        pill.style.borderRadius = "999px";
+        pill.style.padding = "6px 10px";
+        pill.style.fontSize = "0.85em";
+        pill.style.border = "1px solid var(--border)";
+        pill.innerHTML = `<strong>${lang}</strong>: ${data.lines.toLocaleString()} lines → ${data.theoretical_devs.toFixed(1)} devs`;
+        languagesContainer.appendChild(pill);
+      });
+
+      if (languages.length > maxLanguages) {
+        const morePill = document.createElement("div");
+        morePill.style.backgroundColor = "var(--background-primary)";
+        morePill.style.borderRadius = "999px";
+        morePill.style.padding = "6px 10px";
+        morePill.style.fontSize = "0.85em";
+        morePill.style.border = "1px dashed var(--border)";
+        morePill.textContent = `+${languages.length - maxLanguages} more`;
+        languagesContainer.appendChild(morePill);
+      }
+
+      devEntry.appendChild(languagesContainer);
+      developerWorthList.appendChild(devEntry);
+    });
+
+    const thresholdNote = document.createElement("div");
+    thresholdNote.className = "note-text";
+    thresholdNote.style.marginTop = "12px";
+    thresholdNote.style.color = "var(--text-secondary)";
+    thresholdNote.textContent = "Only developers with ≥0.9 theoretical headcount are shown.";
+
+    developerWorthCard.appendChild(developerWorthList);
+    developerWorthCard.appendChild(thresholdNote);
+    main.appendChild(developerWorthCard);
   }
 
   // KPIs
@@ -4115,6 +4281,13 @@ async function showUsersOverviewDashboard() {
     );
     
     const overviewData = await fetchJSON('/api/users/overview');
+    let capacityLeaders = [];
+    try {
+      const capacityResponse = await fetchJSON('/api/developers/capacity-profiles?limit=10');
+      capacityLeaders = capacityResponse.developers || [];
+    } catch (error) {
+      console.warn("Could not load developer capacity profiles:", error);
+    }
     
     clearMain();
     setViewHeader("Developers Overview", "Development team statistics and activity", "Developers");
@@ -4156,6 +4329,64 @@ async function showUsersOverviewDashboard() {
     
     summarySection.appendChild(summaryGrid);
     main.appendChild(summarySection);
+    
+    if (capacityLeaders.length > 0) {
+      const capacityCard = document.createElement("div");
+      capacityCard.className = "card";
+      capacityCard.innerHTML = createTitleWithTooltip(
+        "🧠 Blame Capacity Leaders",
+        "Top developers ranked by their theoretical headcount based on git blame ownership. Calculated using the same language-weighted capacity rules as team analysis. Only includes developers with ≥0.9 headcount.",
+        "h2"
+      );
+
+      const capacityList = document.createElement("div");
+      capacityList.className = "activity-list";
+
+      capacityLeaders.slice(0, 10).forEach((dev, index) => {
+        const isActive = state.users.some(u => u.slug === dev.slug);
+        const item = document.createElement("div");
+        item.className = isActive ? "activity-item clickable" : "activity-item inactive";
+        if (isActive) {
+          item.onclick = () => navigateToUser(dev.slug);
+        } else {
+          item.style.cursor = "default";
+          item.title = "Inactive contributor (no recent activity in analysis period)";
+        }
+
+        const nameStyle = isActive ? "" : ' style="color: #dc2626; font-style: italic;"';
+        item.innerHTML = `
+          <span class="activity-rank">${index + 1}.</span>
+          <span class="activity-name"${nameStyle}>${dev.display_name || dev.slug}</span>
+          <span class="activity-value">${dev.developer_equivalent.toFixed(1)} devs · ${(dev.total_lines || 0).toLocaleString()} lines</span>
+        `;
+
+        const topLanguages = Object.entries(dev.language_breakdown || {})
+          .sort((a, b) => (b[1].lines || 0) - (a[1].lines || 0))
+          .slice(0, 2)
+          .map(([lang, data]) => `${lang} (${data.theoretical_devs.toFixed(1)} devs)`);
+
+        if (topLanguages.length > 0) {
+          const langLine = document.createElement("div");
+          langLine.style.flexBasis = "100%";
+          langLine.style.fontSize = "0.85em";
+          langLine.style.color = "var(--text-secondary)";
+          langLine.style.marginLeft = "2.5rem";
+          langLine.textContent = `Top: ${topLanguages.join(', ')}`;
+          item.appendChild(langLine);
+        }
+
+        capacityList.appendChild(item);
+      });
+
+      const capacityNote = document.createElement("div");
+      capacityNote.className = "note-text";
+      capacityNote.style.marginTop = "8px";
+      capacityNote.textContent = "Measured using git blame ownership share × subsystem language lines; displayed only for developers worth ≥0.9 headcount.";
+
+      capacityCard.appendChild(capacityList);
+      capacityCard.appendChild(capacityNote);
+      main.appendChild(capacityCard);
+    }
     
     // Monthly activity
     if (overviewData.activity) {

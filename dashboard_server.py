@@ -7,14 +7,24 @@ import time
 import sys
 import argparse
 import subprocess
+import re
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Set
+from collections import defaultdict
 
 from flask import Flask, jsonify, send_from_directory, render_template, abort, request, Response
 
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATS_ROOT = os.path.join(BASE_DIR, "stats")
+REPO_ROOT = os.path.join(BASE_DIR, "repos")
+CLOC_CACHE_FILE = os.path.join(STATS_ROOT, "cloc_cache.json")
+
+# Caches for expensive operations
+_SERVICES_CONFIG_CACHE: Optional[Dict[str, Dict[str, List[str]]]] = None
+_REPO_LANGUAGE_CACHE: Dict[str, Dict[str, Any]] = {}
+_SERVICE_LANGUAGE_CACHE: Dict[Tuple[str, str], Dict[str, int]] = {}
+_CLOC_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -888,112 +898,35 @@ def api_user_badges(user_slug: str):
 def api_developers_total_ownership():
     """Get total lines owned by each developer across all subsystems."""
     try:
-        from collections import defaultdict
-        
-        # Load aliases to merge developers
-        alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
-        alias_map = {}
-        if os.path.exists(alias_file):
-            try:
-                alias_map = load_json(alias_file)
-            except:
-                pass
-        
-        # Helper function to get canonical slug
-        def get_canonical_slug(slug):
-            """Apply aliases to get canonical developer slug."""
-            for canonical, aliases in alias_map.items():
-                if isinstance(aliases, list) and slug in aliases:
-                    return canonical
-                elif isinstance(aliases, str) and slug == aliases:
-                    return canonical
-            return slug
-        
-        developer_lines = defaultdict(lambda: {"lines": 0, "subsystems": [], "display_name": ""})
-        
-        # Walk through all blame files
-        # Track repos we've already processed to avoid double-counting (standalone vs monorepo)
-        repos_path = os.path.join(STATS_ROOT, "repos")
-        processed_repos = set()
-        
-        for root, dirs, files in os.walk(repos_path):
-            if "blame.json" in files:
-                blame_file = os.path.join(root, "blame.json")
-                try:
-                    blame_data = load_json(blame_file)
-                    repo_full_name = blame_data.get("repo", "")
-                    repo_name = repo_full_name.split("/")[-1]
-                    
-                    # Skip if we've already processed this repo name (avoid standalone + monorepo duplicates)
-                    if repo_name in processed_repos:
-                        continue
-                    
-                    processed_repos.add(repo_name)
-                    
-                    # Check if this repo has services - if so, use service-level data to avoid double counting
-                    services = blame_data.get("services", {})
-                    
-                    if services:
-                        # Process service-level developers (more granular)
-                        for service_name, service_data in services.items():
-                            service_developers = service_data.get("developers", {})
-                            for dev_slug, dev_data in service_developers.items():
-                                # Apply alias mapping
-                                canonical_slug = get_canonical_slug(dev_slug)
-                                
-                                if isinstance(dev_data, dict):
-                                    lines = dev_data.get("lines", 0)
-                                    display_name = dev_data.get("display_name", dev_slug)
-                                else:
-                                    lines = dev_data if isinstance(dev_data, int) else 0
-                                    display_name = dev_slug
-                                
-                                if lines > 0:
-                                    developer_lines[canonical_slug]["lines"] += lines
-                                    if service_name not in developer_lines[canonical_slug]["subsystems"]:
-                                        developer_lines[canonical_slug]["subsystems"].append(service_name)
-                                    if not developer_lines[canonical_slug]["display_name"]:
-                                        developer_lines[canonical_slug]["display_name"] = display_name
-                    else:
-                        # No services, process main repo developers
-                        developers = blame_data.get("developers", {})
-                        for dev_slug, dev_data in developers.items():
-                            # Apply alias mapping
-                            canonical_slug = get_canonical_slug(dev_slug)
-                            
-                            lines = dev_data.get("lines", 0)
-                            if lines > 0:
-                                developer_lines[canonical_slug]["lines"] += lines
-                                if repo_name not in developer_lines[canonical_slug]["subsystems"]:
-                                    developer_lines[canonical_slug]["subsystems"].append(repo_name)
-                                if not developer_lines[canonical_slug]["display_name"]:
-                                    developer_lines[canonical_slug]["display_name"] = dev_data.get("display_name", dev_slug)
-                
-                except Exception as e:
-                    print(f"Error processing blame file {blame_file}: {e}")
-                    continue
-        
-        # Convert to list format
-        result = []
-        for dev_slug, data in developer_lines.items():
-            result.append({
-                "slug": dev_slug,
-                "display_name": data["display_name"],
-                "total_lines": data["lines"],
-                "subsystem_count": len(set(data["subsystems"])),
-                "subsystems": list(set(data["subsystems"]))
-            })
-        
-        # Sort by total lines (descending)
-        result.sort(key=lambda x: x["total_lines"], reverse=True)
-        
-        return jsonify({"developers": result})
-        
+        developers = build_global_developer_totals()
+        return jsonify({"developers": developers})
     except Exception as e:
         print(f"Error calculating total ownership: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"developers": [], "error": str(e)})
+
+
+@app.route("/api/developers/capacity-profiles")
+def api_developers_capacity_profiles():
+    try:
+        limit = request.args.get("limit", default=50, type=int)
+        min_equivalent = request.args.get("min_equivalent", default=0.9, type=float)
+        limit = max(1, limit or 50)
+        min_equivalent = max(0.0, min_equivalent or 0.0)
+
+        profiles = build_developer_capacity_profiles(min_equivalent=min_equivalent)
+        sorted_profiles = sorted(
+            profiles.values(),
+            key=lambda p: p.get("developer_equivalent", 0),
+            reverse=True,
+        )
+        return jsonify({"developers": sorted_profiles[:limit]})
+    except Exception as exc:
+        print(f"Error generating developer capacity profiles: {exc}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"developers": [], "error": str(exc)})
 
 
 @app.route("/api/users/<user_slug>/ownership-timeline")
@@ -1175,6 +1108,9 @@ def api_user_year(user_slug: str, year: int):
     if not os.path.isfile(path):
         abort(404, description="User yearly summary not found")
     data = load_json(path)
+    capacity_profile = get_developer_capacity_profile(user_slug, min_equivalent=0.9)
+    if capacity_profile:
+        data["developer_capacity_profile"] = capacity_profile
     return jsonify(data)
 
 
@@ -1199,6 +1135,19 @@ def api_subsystems():
     return jsonify({"subsystems": subsystems})
 
 
+def load_cloc_cache_data() -> Dict[str, Dict[str, Any]]:
+    global _CLOC_CACHE_DATA
+    if _CLOC_CACHE_DATA is None:
+        if os.path.exists(CLOC_CACHE_FILE):
+            try:
+                _CLOC_CACHE_DATA = load_json(CLOC_CACHE_FILE)
+            except Exception:
+                _CLOC_CACHE_DATA = {}
+        else:
+            _CLOC_CACHE_DATA = {}
+    return _CLOC_CACHE_DATA
+
+
 def load_services_config() -> Dict[str, Dict[str, list]]:
     """Load services configuration from JSON."""
     services_path = "configuration/services.json"
@@ -1215,6 +1164,66 @@ def load_services_config() -> Dict[str, Dict[str, list]]:
         return data
     except (json.JSONDecodeError, IOError):
         return {}
+
+
+def get_services_config_cached() -> Dict[str, Dict[str, list]]:
+    global _SERVICES_CONFIG_CACHE
+    if _SERVICES_CONFIG_CACHE is None:
+        _SERVICES_CONFIG_CACHE = load_services_config()
+    return _SERVICES_CONFIG_CACHE
+
+
+def _ensure_repo_language_data(repo_full_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not repo_full_name:
+        return None
+    repo_full_name = repo_full_name.strip()
+    if not repo_full_name:
+        return None
+    cached = _REPO_LANGUAGE_CACHE.get(repo_full_name)
+    if cached is not None:
+        return cached
+
+    cache_data = load_cloc_cache_data()
+    cached_entry = cache_data.get(repo_full_name)
+    if not cached_entry:
+        return None
+
+    _REPO_LANGUAGE_CACHE[repo_full_name] = cached_entry
+    for service_name, langs in (cached_entry.get("services") or {}).items():
+        _SERVICE_LANGUAGE_CACHE[(repo_full_name, service_name)] = langs
+    return cached_entry
+
+
+def _get_repo_language_breakdown(repo_full_name: Optional[str]) -> Optional[Dict[str, int]]:
+    data = _ensure_repo_language_data(repo_full_name)
+    if not data:
+        return None
+    return data.get("remainder") or data.get("repo")
+
+
+def _get_service_language_breakdown(repo_full_name: Optional[str], service_name: Optional[str]) -> Optional[Dict[str, int]]:
+    if not repo_full_name or not service_name:
+        return None
+    repo_full_name = repo_full_name.strip()
+    service_name = service_name.strip()
+    if not repo_full_name or not service_name:
+        return None
+    cache_key = (repo_full_name, service_name)
+    if cache_key in _SERVICE_LANGUAGE_CACHE:
+        return _SERVICE_LANGUAGE_CACHE[cache_key]
+
+    data = _ensure_repo_language_data(repo_full_name)
+    if not data:
+        return None
+    languages = data.get("services", {}).get(service_name)
+    if not languages:
+        repo_name = repo_full_name.split("/")[-1]
+        if service_name == repo_name:
+            languages = data.get("remainder")
+    if not languages:
+        return None
+    _SERVICE_LANGUAGE_CACHE[cache_key] = languages
+    return languages
 
 
 def load_team_subsystem_responsibilities() -> Dict[str, List[str]]:
@@ -1765,47 +1774,11 @@ def api_subsystem_languages(subsystem_name: str):
         languages_file = os.path.join(subsystem_dir, "languages.json")
         
         if not os.path.exists(languages_file):
-            # Fallback: if subsystem_name is a repo basename, run cloc to compute languages
-            services_file = os.path.join(BASE_DIR, "configuration", "services.json")
-            try:
-                with open(services_file, "r", encoding="utf-8") as sf:
-                    services_config = json.load(sf)
-            except Exception:
-                services_config = {}
-            matching_repo_key = None
-            for repo_key in services_config.keys():
-                if repo_key.split('/')[-1] == subsystem_name:
-                    matching_repo_key = repo_key
-                    break
-            if matching_repo_key:
-                repo_path = os.path.join(BASE_DIR, "repos", matching_repo_key)
-                try:
-                    result = subprocess.run(["cloc", "--json", repo_path, "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"], capture_output=True, text=True, check=False)
-                    if result.returncode != 0:
-                        return jsonify({"languages": {}, "totals": {}, "error": f"cloc failed: rc={result.returncode} stderr={result.stderr}"})
-                    cloc_data = json.loads(result.stdout) if result.stdout else {}
-                    languages = {}
-                    totals = {"files": 0, "code_lines": 0, "blank_lines": 0, "comment_lines": 0}
-                    for lang_name, lang_info in cloc_data.items():
-                        # Skip cloc aggregate row
-                        if lang_name == "SUM":
-                            continue
-                        if isinstance(lang_info, dict) and "nFiles" in lang_info:
-                            languages[lang_name] = {
-                                "files": lang_info.get("nFiles", 0),
-                                "blank_lines": lang_info.get("blank", 0),
-                                "comment_lines": lang_info.get("comment", 0),
-                                "code_lines": lang_info.get("code", 0)
-                            }
-                            totals["files"] += lang_info.get("nFiles", 0)
-                            totals["code_lines"] += lang_info.get("code", 0)
-                            totals["blank_lines"] += lang_info.get("blank", 0)
-                            totals["comment_lines"] += lang_info.get("comment", 0)
-                    return jsonify({"generated_at": datetime.utcnow().isoformat() + "Z", "languages": languages, "totals": totals})
-                except Exception as e:
-                    return jsonify({"languages": {}, "totals": {}, "error": f"cloc error: {e}"})
-            # No data available
-            return jsonify({"languages": {}, "totals": {}, "error": "Language statistics not available"})
+            return jsonify({
+                "languages": {},
+                "totals": {},
+                "error": "Language statistics not available. Please re-run the data update pipeline."
+            })
         
         try:
             with open(languages_file, "r", encoding="utf-8") as f:
@@ -1821,146 +1794,19 @@ def api_subsystem_languages(subsystem_name: str):
 
 @app.route("/api/subsystems/<subsystem_name>/loc-evolution/<int:year>")
 def api_subsystem_loc_evolution(subsystem_name: str, year: int):
-    """Compute monthly lines-of-code evolution for a subsystem without modifying repos.
-    Returns cached stats if available.
-    """
+    """Return precomputed monthly LOC evolution for a subsystem."""
     try:
-        # Serve cached file if present
         cached_file = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "monthly", f"{year:04d}.json")
         if os.path.isfile(cached_file):
             with open(cached_file, "r", encoding="utf-8") as f:
                 return jsonify(json.load(f))
-
-        # Map subsystem to repo and paths from services.json
-        services_file = os.path.join(BASE_DIR, "configuration", "services.json")
-        with open(services_file, "r", encoding="utf-8") as sf:
-            services_config = json.load(sf)
-        # Find repo key and paths for subsystem
-        repo_key = None
-        paths = None
-        for rk, services in services_config.items():
-            if subsystem_name in services:
-                repo_key = rk
-                paths = services.get(subsystem_name, [])
-                break
-        if not repo_key:
-            # If subsystem is a repo basename, run for whole repo
-            for rk in services_config.keys():
-                if rk.split('/')[-1] == subsystem_name:
-                    repo_key = rk
-                    paths = [""]
-                    break
-        if not repo_key:
-            # Gracefully return empty series if subsystem mapping is missing
-            return jsonify({"series": []})
-        repo_path = os.path.join(BASE_DIR, "repos", repo_key)
-        if not os.path.isdir(repo_path):
-            # Gracefully return empty series if repo is missing
-            return jsonify({"series": []})
-        series = []
-        for month in range(1, 13):
-            since = f"{year:04d}-{month:02d}-01"
-            # Compute until as next month start
-            if month == 12:
-                until = f"{year+1:04d}-01-01"
-            else:
-                until = f"{year:04d}-{month+1:02d}-01"
-            # Find first commit of month affecting paths
-            rev_list_cmd = [
-                "git", "-C", repo_path, "rev-list",
-                f"--since={since}", f"--until={until}", "--reverse", "HEAD"
-            ]
-            # Limit to specific paths if provided
-            if paths and any(p for p in paths if p):
-                rev_list_cmd.append("--")
-                rev_list_cmd.extend([p.rstrip("/") for p in paths if p])
-            rev = None
-            try:
-                rl = subprocess.run(rev_list_cmd, capture_output=True, text=True, check=False)
-                revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
-                if revs:
-                    rev = revs[0]
-                else:
-                    app.logger.info(f"[loc-evolution] No commits for {subsystem_name} {since}..{until} in repo {repo_key}")
-            except Exception as e:
-                app.logger.warning(f"[loc-evolution] rev-list failed for {repo_key}: {e}")
-                rev = None
-            if not rev:
-                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-                continue
-            # Verify subsystem paths exist at the commit (for path-scoped subsystems)
-            if paths and any(p for p in paths if p):
-                ls_cmd = ["git", "-C", repo_path, "ls-tree", "-r", "--name-only", rev, "--"] + [p.rstrip("/") for p in paths if p]
-                try:
-                    ls = subprocess.run(ls_cmd, capture_output=True, text=True, check=False)
-                    present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
-                    if not present_files:
-                        app.logger.info(f"[loc-evolution] No files for {subsystem_name} at {rev} in paths {paths}")
-                        series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-                        continue
-                except Exception as e:
-                    app.logger.warning(f"[loc-evolution] ls-tree failed for {repo_key} at {rev}: {e}")
-                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-                    continue
-            # Create archive of paths at this commit to temp dir
-            import tempfile, tarfile
-            tmpdir = tempfile.mkdtemp(prefix="loc-archive-")
-            tar_path = os.path.join(tmpdir, "snapshot.tar")
-            try:
-                archive_cmd = ["git", "-C", repo_path, "archive", "--format=tar", rev]
-                if paths and any(p for p in paths if p):
-                    archive_cmd.extend([p.rstrip("/") for p in paths if p])
-                ar = subprocess.run(archive_cmd, capture_output=True, text=True, check=False)
-                if ar.returncode != 0 or not ar.stdout:
-                    app.logger.warning(f"[loc-evolution] archive failed for {repo_key} {rev}: rc={ar.returncode}")
-                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-                    continue
-                with open(tar_path, "wb") as tf:
-                    tf.write(ar.stdout.encode() if isinstance(ar.stdout, str) else ar.stdout)
-                # Extract
-                with tarfile.open(tar_path, "r") as tar:
-                    tar.extractall(path=tmpdir)
-                # Run cloc on extracted content
-                cloc_cmd = [
-                    "cloc", "--json", tmpdir,
-                    "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"
-                ]
-                cl = subprocess.run(cloc_cmd, capture_output=True, text=True, check=False)
-                if cl.returncode != 0:
-                    app.logger.warning(f"[loc-evolution] cloc failed for {subsystem_name} {rev}: rc={cl.returncode}")
-                    series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-                    continue
-                cloc_data = json.loads(cl.stdout) if cl.stdout else {}
-                total_code = 0
-                total_files = 0
-                for lang_name, lang_info in cloc_data.items():
-                    if lang_name == "SUM":
-                        continue
-                    if isinstance(lang_info, dict) and "code" in lang_info:
-                        total_code += lang_info.get("code", 0)
-                        total_files += lang_info.get("nFiles", 0)
-                app.logger.info(f"[loc-evolution] {subsystem_name} {year}-{month:02d}: code_lines={total_code} files={total_files}")
-                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": total_code, "files": total_files})
-            except Exception as e:
-                app.logger.warning(f"[loc-evolution] Exception building snapshot for {subsystem_name} {rev}: {e}")
-                series.append({"month": f"{year:04d}-{month:02d}", "code_lines": 0, "files": 0})
-            finally:
-                try:
-                    import shutil
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-                except Exception:
-                    pass
-        # Persist series
-        out_dir = os.path.join(STATS_ROOT, "subsystems", subsystem_name, "monthly")
-        os.makedirs(out_dir, exist_ok=True)
-        out_file = os.path.join(out_dir, f"{year:04d}.json")
-        payload = {"generated_at": datetime.utcnow().isoformat() + "Z", "series": series}
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return jsonify(payload)
+        return jsonify({
+            "series": [],
+            "error": "LOC evolution not available. Please re-run the data update pipeline to generate this dataset."
+        })
     except Exception as e:
-        app.logger.warning(f"[loc-evolution] Error computing LOC for {subsystem_name} {year}: {e}")
-        return jsonify({"series": []})
+        app.logger.warning(f"[loc-evolution] Error serving LOC for {subsystem_name} {year}: {e}")
+        return jsonify({"series": [], "error": str(e)})
 
 
 @app.route("/api/subsystems/size-rankings")
@@ -4368,6 +4214,493 @@ def calculate_team_capacity(languages: Dict[str, int], team_size: int) -> Dict[s
     }
 
 
+def slugify_identifier(text: str) -> str:
+    text = (text or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text or "unknown"
+
+
+def load_alias_lookup() -> Dict[str, str]:
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    lookup: Dict[str, str] = {}
+    if not os.path.isfile(alias_file):
+        return lookup
+    try:
+        data = load_json(alias_file)
+    except Exception:
+        return lookup
+
+    if isinstance(data, dict):
+        for canonical, aliases in data.items():
+            if not isinstance(canonical, str):
+                continue
+            lookup[canonical] = canonical
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    if isinstance(alias, str):
+                        lookup[alias] = canonical
+            elif isinstance(aliases, str):
+                lookup[aliases] = canonical
+    return lookup
+
+
+def canonicalize_slug(slug: Optional[str], alias_lookup: Optional[Dict[str, str]] = None) -> Optional[str]:
+    if not slug:
+        return None
+    if alias_lookup is None:
+        alias_lookup = load_alias_lookup()
+    return alias_lookup.get(slug, slug)
+
+
+def load_ignored_user_slugs() -> Set[str]:
+    ignore_file = os.path.join(BASE_DIR, "configuration", "ignore_user.txt")
+    ignored: Set[str] = set()
+    if not os.path.isfile(ignore_file):
+        return ignored
+    try:
+        with open(ignore_file, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                ignored.add(line)
+                ignored.add(slugify_identifier(line))
+                if "@" in line:
+                    local = line.split("@", 1)[0]
+                    ignored.add(local)
+                    ignored.add(slugify_identifier(local))
+    except Exception:
+        return ignored
+    return ignored
+
+
+def load_subsystem_languages_map() -> Dict[str, Dict[str, int]]:
+    languages_cache: Dict[str, Dict[str, int]] = {}
+    subsystems_root = os.path.join(STATS_ROOT, "subsystems")
+    if not os.path.isdir(subsystems_root):
+        return languages_cache
+    for subsystem_name in os.listdir(subsystems_root):
+        lang_file = os.path.join(subsystems_root, subsystem_name, "languages.json")
+        if not os.path.isfile(lang_file):
+            continue
+        try:
+            lang_data = load_json(lang_file)
+            langs = {}
+            for lang, info in (lang_data.get("languages", {}) or {}).items():
+                if isinstance(info, dict):
+                    langs[lang] = int(info.get("code_lines", 0) or 0)
+            if not langs:
+                continue
+            languages_cache[subsystem_name] = langs
+            languages_cache[subsystem_name.lower()] = langs
+        except Exception:
+            continue
+    return languages_cache
+
+
+def _resolve_language_map(candidates: List[str], languages_cache: Dict[str, Dict[str, int]]):
+    for candidate in candidates:
+        if not candidate:
+            continue
+        langs = languages_cache.get(candidate)
+        if langs:
+            return langs
+        langs = languages_cache.get(candidate.lower())
+        if langs:
+            return langs
+    return None
+
+
+def build_developer_language_portfolio(target_slugs: Optional[Set[str]] = None) -> Dict[str, Dict[str, Any]]:
+    alias_lookup = load_alias_lookup()
+    ignored_slugs = load_ignored_user_slugs()
+    ignored_slugified = {slugify_identifier(s) for s in ignored_slugs}
+    languages_cache = load_subsystem_languages_map()
+
+    if target_slugs:
+        canonical_targets = {canonicalize_slug(slug, alias_lookup) for slug in target_slugs}
+        canonical_targets.discard(None)
+    else:
+        canonical_targets = None
+
+    developer_data: Dict[str, Dict[str, Any]] = {}
+
+    repos_path = os.path.join(STATS_ROOT, "repos")
+    if not os.path.isdir(repos_path):
+        return developer_data
+
+    def should_track(slug: Optional[str]) -> bool:
+        if not slug:
+            return False
+        if slug in ignored_slugs or slugify_identifier(slug) in ignored_slugified:
+            return False
+        if canonical_targets is not None and slug not in canonical_targets:
+            return False
+        return True
+
+    def add_context(
+        candidates: List[str],
+        total_lines: int,
+        developers: Dict[str, Dict[str, Any]],
+        context_hint: Optional[Dict[str, Any]] = None,
+    ):
+        if not developers:
+            return
+        context_total = total_lines or sum(dev.get("lines", 0) or 0 for dev in developers.values())
+        if context_total <= 0:
+            return
+        primary_label = candidates[0] if candidates else None
+        languages = _resolve_language_map(candidates, languages_cache)
+        if not languages and context_hint:
+            if context_hint.get("type") == "service":
+                languages = _get_service_language_breakdown(
+                    context_hint.get("repo_full_name"),
+                    context_hint.get("service_name"),
+                )
+            elif context_hint.get("type") == "repo":
+                languages = _get_repo_language_breakdown(context_hint.get("repo_full_name"))
+            if languages and primary_label:
+                languages_cache[primary_label] = languages
+                languages_cache[primary_label.lower()] = languages
+        if languages:
+            language_total = sum(max(0, lines) for lines in languages.values())
+            if language_total <= 0:
+                languages = None
+        if not languages:
+            fallback_label = primary_label or "Unclassified"
+            languages = {f"Code:{fallback_label}": max(context_total, 0)}
+        context_key = None
+        if context_hint and context_hint.get("context_key"):
+            context_key = context_hint.get("context_key")
+        elif primary_label:
+            context_key = primary_label
+        for slug, info in developers.items():
+            canonical_slug = canonicalize_slug(slug, alias_lookup)
+            if not should_track(canonical_slug):
+                continue
+            dev_lines = info.get("lines", 0) or 0
+            if dev_lines <= 0:
+                continue
+            share = dev_lines / context_total
+            if share <= 0:
+                continue
+            profile = developer_data.setdefault(
+                canonical_slug,
+                {
+                    "slug": canonical_slug,
+                    "display_name": info.get("display_name") or canonical_slug,
+                    "languages": defaultdict(float),
+                    "contexts": set(),
+                },
+            )
+            if "contexts" not in profile:
+                profile["contexts"] = set()
+            if not profile.get("display_name") and info.get("display_name"):
+                profile["display_name"] = info.get("display_name")
+            if context_key:
+                profile["contexts"].add(context_key)
+            for lang, code_lines in languages.items():
+                if code_lines <= 0:
+                    continue
+                profile["languages"][lang] += code_lines * share
+
+    for root, _dirs, files in os.walk(repos_path):
+        if "blame.json" not in files:
+            continue
+        blame_file = os.path.join(root, "blame.json")
+        try:
+            blame_data = load_json(blame_file)
+        except Exception:
+            continue
+
+        repo_dir = os.path.dirname(root)
+        repo_rel = os.path.relpath(repo_dir, repos_path)
+        repo_rel = repo_rel.replace(os.sep, "/")
+        repo_name = repo_rel.split("/")[-1]
+        repo_full_name = blame_data.get("repo", repo_rel)
+
+        developers = _normalize_blame_developers(blame_data.get("developers", {}))
+        total_lines = blame_data.get("total_lines", 0)
+        services = blame_data.get("services", {}) or {}
+
+        if developers and not services:
+            add_context(
+                [repo_name, repo_full_name],
+                total_lines,
+                developers,
+                {"type": "repo", "repo_full_name": repo_full_name, "context_key": repo_full_name},
+            )
+
+        for service_name, service_data in services.items():
+            service_devs = _normalize_blame_developers(service_data.get("developers", {}))
+            if not service_devs:
+                continue
+            service_total = service_data.get("total_lines", 0)
+            add_context(
+                [service_name],
+                service_total,
+                service_devs,
+                {
+                    "type": "service",
+                    "repo_full_name": repo_full_name,
+                    "service_name": service_name,
+                    "context_key": f"{repo_full_name}/{service_name}",
+                },
+            )
+
+    return developer_data
+
+
+def build_developer_capacity_profiles(
+    target_slugs: Optional[Set[str]] = None,
+    min_equivalent: float = 0.9,
+) -> Dict[str, Dict[str, Any]]:
+    portfolios = build_developer_language_portfolio(target_slugs)
+    if not portfolios:
+        return {}
+
+    profiles: Dict[str, Dict[str, Any]] = {}
+    for slug, info in portfolios.items():
+        raw_languages = info.get("languages", {})
+        normalized_languages = {
+            lang: int(round(lines))
+            for lang, lines in raw_languages.items()
+            if lines > 0
+        }
+        if not normalized_languages:
+            continue
+        capacity = calculate_team_capacity(normalized_languages, team_size=1)
+        language_breakdown = capacity.get("language_breakdown", {})
+        if not language_breakdown:
+            continue
+        developer_equivalent = capacity.get("required_developers", 0)
+        if developer_equivalent < min_equivalent:
+            continue
+        total_lines = sum(lang_data.get("lines", 0) for lang_data in language_breakdown.values())
+        profiles[slug] = {
+            "slug": slug,
+            "display_name": info.get("display_name", slug),
+            "language_breakdown": language_breakdown,
+            "developer_equivalent": round(developer_equivalent, 2),
+            "total_lines": int(round(total_lines)),
+        }
+    return profiles
+
+
+def get_developer_capacity_profile(user_slug: str, min_equivalent: float = 0.9) -> Optional[Dict[str, Any]]:
+    alias_lookup = load_alias_lookup()
+    canonical_slug = canonicalize_slug(user_slug, alias_lookup)
+    if not canonical_slug:
+        return None
+    profiles = build_developer_capacity_profiles({canonical_slug}, min_equivalent=min_equivalent)
+    return profiles.get(canonical_slug)
+
+
+def _normalize_blame_developers(dev_obj):
+    """Normalize blame developer structures into slug -> {lines, display_name}."""
+    normalized = {}
+    if not isinstance(dev_obj, dict):
+        return normalized
+
+    for slug, info in dev_obj.items():
+        if isinstance(info, dict):
+            lines = info.get("lines", 0) or 0
+            display_name = info.get("display_name") or slug
+        else:
+            try:
+                lines = int(info)
+            except (TypeError, ValueError):
+                lines = 0
+            display_name = slug
+
+        if lines <= 0:
+            continue
+
+        normalized[slug] = {
+            "lines": int(lines),
+            "display_name": display_name or slug,
+        }
+
+    return normalized
+
+
+def _collect_blame_data_for_subsystems(target_subsystems):
+    """Return blame developer data for the requested subsystem names."""
+    if not target_subsystems:
+        return {}
+
+    repos_path = os.path.join(STATS_ROOT, "repos")
+    if not os.path.exists(repos_path):
+        return {}
+
+    collected = {}
+    target_set = set(target_subsystems)
+
+    for root, _dirs, files in os.walk(repos_path):
+        if "blame.json" not in files:
+            continue
+
+        blame_file = os.path.join(root, "blame.json")
+        try:
+            blame_data = load_json(blame_file)
+        except Exception as exc:
+            print(f"Error loading blame file {blame_file}: {exc}")
+            continue
+
+        repo_path = os.path.dirname(root)
+        repo_base = os.path.basename(repo_path)
+        repo_full_name = blame_data.get("repo", "")
+        repo_key_candidates = {repo_base}
+        if repo_full_name:
+            repo_key_candidates.add(repo_full_name)
+            repo_key_candidates.add(repo_full_name.split("/")[-1])
+
+        # Repo-level ownership
+        developers = _normalize_blame_developers(blame_data.get("developers", {}))
+        services = blame_data.get("services", {}) or {}
+
+        # Repo-level ownership only when no per-service breakdown exists
+        if developers and not services:
+            repo_total = blame_data.get("total_lines", 0)
+            if repo_total <= 0:
+                repo_total = sum(dev["lines"] for dev in developers.values())
+            for candidate in repo_key_candidates:
+                if candidate in target_set:
+                    collected[candidate] = {
+                        "total_lines": repo_total,
+                        "developers": developers,
+                    }
+
+        # Service-level ownership
+        for service_name, service_data in services.items():
+            if service_name not in target_set:
+                continue
+            service_devs = _normalize_blame_developers(service_data.get("developers", {}))
+            if not service_devs:
+                continue
+            service_total = service_data.get("total_lines", 0)
+            if service_total <= 0:
+                service_total = sum(dev["lines"] for dev in service_devs.values())
+            collected[service_name] = {
+                "total_lines": service_total,
+                "developers": service_devs,
+            }
+
+        if target_set.issubset(collected.keys()):
+            break
+
+    return collected
+
+
+def compute_developer_capacity_profiles(team_members, responsibilities, subsystem_details):
+    """Build per-developer language ownership and theoretical capacity."""
+    if not team_members or not responsibilities:
+        return []
+
+    member_set = set(team_members)
+    blame_map = _collect_blame_data_for_subsystems(responsibilities)
+    if not blame_map:
+        return []
+
+    dev_language_totals = {}
+
+    for subsystem_name in responsibilities:
+        subsystem_meta = subsystem_details.get(subsystem_name) or {}
+        subsystem_languages = subsystem_meta.get("languages") or {}
+        if not subsystem_languages:
+            continue
+
+        subsystem_blame = blame_map.get(subsystem_name)
+        if not subsystem_blame:
+            continue
+
+        total_lines = subsystem_blame.get("total_lines", 0)
+        if total_lines <= 0:
+            total_lines = sum(dev["lines"] for dev in subsystem_blame.get("developers", {}).values())
+        if total_lines <= 0:
+            continue
+
+        for dev_slug, dev_info in (subsystem_blame.get("developers") or {}).items():
+            if dev_slug not in member_set:
+                continue
+            dev_lines = dev_info.get("lines", 0)
+            if dev_lines <= 0:
+                continue
+
+            share = dev_lines / total_lines
+            if share <= 0:
+                continue
+
+            profile = dev_language_totals.setdefault(
+                dev_slug,
+                {
+                    "display_name": dev_info.get("display_name") or dev_slug,
+                    "languages": defaultdict(float),
+                },
+            )
+
+            for lang, lang_lines in subsystem_languages.items():
+                if lang_lines <= 0:
+                    continue
+                profile["languages"][lang] += lang_lines * share
+
+    developer_profiles = []
+
+    for dev_slug, profile in dev_language_totals.items():
+        normalized_languages = {
+            lang: int(round(lines))
+            for lang, lines in profile["languages"].items()
+            if lines > 0
+        }
+        if not normalized_languages:
+            continue
+
+        capacity = calculate_team_capacity(normalized_languages, team_size=1)
+        language_breakdown = capacity.get("language_breakdown", {})
+        if not language_breakdown:
+            continue
+
+        total_lines = sum(lang_data.get("lines", 0) for lang_data in language_breakdown.values())
+        developer_equivalent = capacity.get("required_developers", 0)
+
+        if developer_equivalent < 0.9:
+            continue
+
+        developer_profiles.append({
+            "slug": dev_slug,
+            "display_name": profile.get("display_name", dev_slug),
+            "language_breakdown": language_breakdown,
+            "developer_equivalent": round(developer_equivalent, 2),
+            "total_lines": int(round(total_lines)),
+        })
+
+    developer_profiles.sort(key=lambda item: item["developer_equivalent"], reverse=True)
+    return developer_profiles
+
+
+def build_global_developer_totals() -> List[Dict[str, Any]]:
+    portfolios = build_developer_language_portfolio()
+    developers = []
+    for slug, info in portfolios.items():
+        languages = info.get("languages", {})
+        if not languages:
+            continue
+        total_lines = sum(lines for lines in languages.values() if lines > 0)
+        if total_lines <= 0:
+            continue
+        contexts = info.get("contexts") or set()
+        developers.append({
+            "slug": slug,
+            "display_name": info.get("display_name", slug),
+            "total_lines": int(round(total_lines)),
+            "subsystem_count": len(contexts),
+            "subsystems": sorted(contexts),
+        })
+    developers.sort(key=lambda dev: dev["total_lines"], reverse=True)
+    return developers
+
+
 def build_team_per_date(members: list, year: int):
     aggregated = {}
     try:
@@ -4465,7 +4798,6 @@ def api_team_year(team_id: str, year: int):
                             break
                     if matching_repo_key:
                         app.logger.info(f"[teams-year] Repo match for subsystem '{subsystem_name}': {matching_repo_key}")
-                        # Sum lines of all child services under this repo
                         child_services_total = 0
                         for service_name in services_config.get(matching_repo_key, {}).keys():
                             child_lang_path = os.path.join(STATS_ROOT, "subsystems", service_name, "languages.json")
@@ -4478,30 +4810,22 @@ def api_team_year(team_id: str, year: int):
                                 except Exception as e:
                                     app.logger.warning(f"[teams-year] Failed reading child service '{service_name}' languages: {e}")
                         app.logger.info(f"[teams-year] Child services total for '{matching_repo_key}': {child_services_total}")
-                        # If repo languages.json is missing, run cloc on repo to get totals
-                        if subsystem_lines == 0:
-                            try:
-                                repo_rel = matching_repo_key
-                                repo_path = os.path.join(BASE_DIR, "repos", repo_rel)
-                                app.logger.info(f"[teams-year] Running cloc for repo '{repo_rel}' at '{repo_path}'")
-                                # Run cloc
-                                result = subprocess.run(["cloc", "--json", repo_path, "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist"], capture_output=True, text=True, check=False)
-                                if result.returncode != 0:
-                                    app.logger.warning(f"[teams-year] cloc failed for '{repo_rel}': rc={result.returncode} stderr={result.stderr}")
-                                cloc_data = json.loads(result.stdout) if result.stdout else {}
-                                total_code = 0
-                                for lang_name, lang_info in cloc_data.items():
-                                    if isinstance(lang_info, dict) and "code" in lang_info:
-                                        total_code += lang_info.get("code", 0)
-                                subsystem_lines = total_code
-                                app.logger.info(f"[teams-year] cloc total code for '{repo_rel}': {subsystem_lines}")
-                            except Exception as e:
-                                app.logger.warning(f"[teams-year] Exception running cloc for '{repo_rel}': {e}")
-                        # Subtract child services lines from repo total (cannot be negative)
-                        before_subtract = subsystem_lines
-                        subsystem_lines = max(0, subsystem_lines - child_services_total)
-                        app.logger.info(f"[teams-year] Repo remainder for '{matching_repo_key}': {before_subtract} - {child_services_total} = {subsystem_lines}")
-                        subsystem_languages = {"Remaining": subsystem_lines}
+                        if subsystem_lines > 0:
+                            before_subtract = subsystem_lines
+                            subsystem_lines = max(0, subsystem_lines - child_services_total)
+                            app.logger.info(f"[teams-year] Repo remainder for '{matching_repo_key}': {before_subtract} - {child_services_total} = {subsystem_lines}")
+                            subsystem_languages = {"Remaining": subsystem_lines}
+                        else:
+                            repo_context = _ensure_repo_language_data(matching_repo_key)
+                            remainder_langs = (repo_context or {}).get("remainder") or {}
+                            if remainder_langs:
+                                subsystem_languages = remainder_langs
+                                subsystem_lines = sum(remainder_langs.values())
+                                app.logger.info(f"[teams-year] Using cached remainder for '{matching_repo_key}': {subsystem_lines} lines")
+                            else:
+                                app.logger.warning(f"[teams-year] No language breakdown available for '{matching_repo_key}'")
+                                subsystem_languages = {}
+                                subsystem_lines = 0
                     
                     recomputed_details[subsystem_name] = {
                         "name": subsystem_name,
@@ -4516,6 +4840,11 @@ def api_team_year(team_id: str, year: int):
                         languages[lang] = languages.get(lang, 0) + lines
                 team_size = len(data.get("members", []))
                 capacity_analysis = calculate_team_capacity(languages, team_size)
+                developer_capacity_profiles = compute_developer_capacity_profiles(
+                    team.get("members", []),
+                    team_responsibilities,
+                    recomputed_details
+                )
                 
                 # Normalize subsystem keys for frontend (expects 'additions'/'deletions')
                 subsystems = data.get("subsystems", {})
@@ -4541,7 +4870,8 @@ def api_team_year(team_id: str, year: int):
                     "subsystems": subsystems,
                     "per_date": build_team_per_date(team.get("members", []), year),
                     "member_contributions": data.get("member_contributions", {}),
-                    "capacity_analysis": capacity_analysis
+                    "capacity_analysis": capacity_analysis,
+                    "developer_capacity_profiles": developer_capacity_profiles
                 })
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error loading team file {team_file}: {e}")

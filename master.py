@@ -12,6 +12,8 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import multiprocessing
 from collections import defaultdict
 
+CLOC_EXCLUDE_DIRS = ".git,node_modules,.venv,__pycache__,vendor,target,build,dist"
+
 # Setup file logging
 log_file = "master_analysis.log"
 logging.basicConfig(
@@ -121,6 +123,136 @@ def run_cmd(cmd: list[str], desc: str) -> None:
         sys.exit(result.returncode)
     else:
         logger.info(f"=== Done: {desc} ===")
+
+def load_services_config_file(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception as exc:
+        logger.info(f"Warning: Failed to load services config '{path}': {exc}")
+        return {}
+
+
+def run_cloc(paths: list[str]) -> dict:
+    existing = [p for p in paths if p and os.path.exists(p)]
+    if not existing:
+        return {}
+    cmd = [
+        "cloc",
+        "--json",
+        "--quiet",
+        f"--exclude-dir={CLOC_EXCLUDE_DIRS}",
+    ] + existing
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode not in (0, 1):
+            logger.info(f"Warning: cloc returned code {result.returncode} for {existing}")
+            return {}
+        data = json.loads(result.stdout or "{}")
+        languages = {}
+        for lang, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            code_lines = info.get("code")
+            if code_lines is None:
+                continue
+            if str(lang).lower() in {"sum", "header"}:
+                continue
+            languages[lang] = int(code_lines)
+        return languages
+    except Exception as exc:
+        logger.info(f"Warning: cloc failed for {existing}: {exc}")
+        return {}
+
+
+def discover_repo_candidates(repos_root: str, output_root: str, services_config: dict) -> list[str]:
+    repo_names = set(services_config.keys())
+    if os.path.isdir(repos_root):
+        for dirpath, dirnames, _ in os.walk(repos_root):
+            if ".git" in dirnames:
+                rel_path = os.path.relpath(dirpath, repos_root)
+                repo_names.add(rel_path)
+                dirnames[:] = []
+            else:
+                dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+    stats_repos_dir = os.path.join(output_root, "stats", "repos")
+    if os.path.isdir(stats_repos_dir):
+        for dirpath, _, files in os.walk(stats_repos_dir):
+            if "blame.json" in files:
+                blame_path = os.path.join(dirpath, "blame.json")
+                try:
+                    with open(blame_path, "r", encoding="utf-8") as f:
+                        blame_data = json.load(f)
+                    repo_full_name = blame_data.get("repo")
+                    if repo_full_name:
+                        repo_names.add(repo_full_name)
+                except Exception:
+                    continue
+    return sorted(repo_names)
+
+
+def generate_cloc_cache(repos_root: str, output_root: str, services_file: str) -> None:
+    logger.info("\n===========================================")
+    logger.info("Generating repo/service CLOC cache")
+    logger.info("===========================================")
+    services_config = load_services_config_file(services_file)
+    stats_dir = os.path.join(output_root, "stats")
+    os.makedirs(stats_dir, exist_ok=True)
+    cache_path = os.path.join(stats_dir, "cloc_cache.json")
+
+    repo_candidates = discover_repo_candidates(repos_root, output_root, services_config)
+    if not repo_candidates:
+        logger.info("No repositories discovered for CLOC cache generation")
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        return
+
+    cache = {}
+    for repo_name in repo_candidates:
+        repo_path = os.path.join(repos_root, repo_name)
+        if not os.path.isdir(repo_path):
+            logger.info(f"Skipping repo '{repo_name}' (path not found)")
+            continue
+        repo_lang = run_cloc([repo_path]) or {}
+        service_langs = {}
+        allocated = defaultdict(int)
+        for service_name, rel_paths in (services_config.get(repo_name) or {}).items():
+            abs_paths = []
+            for rel_path in rel_paths or []:
+                if not rel_path:
+                    continue
+                abs_path = os.path.join(repo_path, rel_path)
+                if os.path.exists(abs_path):
+                    abs_paths.append(abs_path)
+            if not abs_paths:
+                continue
+            lang_map = run_cloc(abs_paths)
+            if not lang_map:
+                continue
+            service_langs[service_name] = lang_map
+            for lang, lines in lang_map.items():
+                allocated[lang] += lines
+        remainder = {}
+        if repo_lang:
+            for lang, total in repo_lang.items():
+                remainder_val = total - allocated.get(lang, 0)
+                if remainder_val > 0:
+                    remainder[lang] = remainder_val
+        cache[repo_name] = {
+            "repo": repo_lang,
+            "services": service_langs,
+            "remainder": remainder,
+        }
+
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, sort_keys=True)
+    logger.info(f"CLOC cache written to {cache_path} ({len(cache)} repos)")
+
 
 def process_month_worker(month_data: dict) -> tuple[int, bool]:
     """Worker function to process a single month. Returns (month, success)."""
@@ -478,6 +610,11 @@ def main() -> None:
     logger.info("\n=== All yearly analyses completed successfully ===")
     if skip_blame:
         logger.info("Note: Ownership/blame analysis was skipped. Run without --skip-blame for complete analysis.")
+
+    try:
+        generate_cloc_cache(repos_root, output_root, services_file)
+    except Exception as exc:
+        logger.info(f"Warning: Failed to generate CLOC cache: {exc}")
     
     # Note about repos directory: It's kept for blame analysis only (for badges)
     # The actual service/subsystem statistics are now in stats/subsystems/
