@@ -27,6 +27,7 @@ _SERVICE_LANGUAGE_CACHE: Dict[Tuple[str, str], Dict[str, int]] = {}
 _CLOC_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
+app.config["READ_ONLY_MODE"] = False
 
 # Global storage for clone progress
 clone_operations = {}
@@ -823,7 +824,7 @@ def test_simple():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", read_only=app.config.get("READ_ONLY_MODE", False))
 
 
 @app.route("/api/stats/check")
@@ -5705,7 +5706,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dashboard server")
     parser.add_argument("--host", "--listen-address", dest="host", default="127.0.0.1", help="Host/IP to bind the dashboard server")
     parser.add_argument("--port", type=int, default=5001, help="Port to bind the dashboard server")
+    parser.add_argument("--read-only", action="store_true", help="Run dashboard in read-only mode (disable updates/settings)")
     args = parser.parse_args()
+
+    app.config["READ_ONLY_MODE"] = args.read_only
 
     app.run(host=args.host, port=args.port, debug=True,
             exclude_patterns=["repos/*", "repos/**/*", "stats/*", "stats/**/*"])

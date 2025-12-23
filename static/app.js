@@ -1,6 +1,9 @@
 // static/app.js - Fixed version
 console.log("app.js loaded");
 
+const APP_CONFIG = (typeof window !== "undefined" && window.APP_CONFIG) ? window.APP_CONFIG : {};
+const READ_ONLY_MODE = !!(APP_CONFIG && APP_CONFIG.readOnly);
+
 let state = {
   mode: "subsystems", // "users", "teams", or "subsystems"
   users: [],
@@ -313,8 +316,19 @@ async function loadUsersAndSubsystems() {
       
       if (!repositoriesConfigured) {
         console.log("No repositories configured - redirecting to settings");
-        // Auto-open settings focused on repositories tab for first-time users
-        openSettings("repositories");
+        if (READ_ONLY_MODE) {
+          if (main) {
+            main.innerHTML = `
+              <div class="empty-state">
+                <p>No repositories are configured, and settings are disabled in read-only mode.</p>
+                <p>Restart the dashboard without --read-only to configure repositories.</p>
+              </div>
+            `;
+          }
+        } else {
+          // Auto-open settings focused on repositories tab for first-time users
+          openSettings("repositories");
+        }
         return; // Don't proceed with loading other data yet
       }
     } catch (error) {
@@ -6619,6 +6633,19 @@ function initializeHamburgerMenu() {
   const settingsLink = $("settings-link");
   const aboutLink = $("about-link");
 
+  const disableMenuLink = (link, message) => {
+    if (!link) return;
+    link.classList.add("disabled");
+    link.setAttribute("aria-disabled", "true");
+    if (message) {
+      link.setAttribute("title", message);
+    }
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  };
+
   hamburgerButton.addEventListener("click", (e) => {
     e.stopPropagation();
     const isActive = hamburgerButton.classList.contains("active");
@@ -6642,19 +6669,25 @@ function initializeHamburgerMenu() {
     }
   });
 
-  // Run Update link
-  runUpdateLink.addEventListener("click", (e) => {
-    e.preventDefault();
-    closeHamburgerMenu();
-    startUpdateProcess();
-  });
+  if (READ_ONLY_MODE) {
+    const msg = "Disabled in read-only mode";
+    disableMenuLink(runUpdateLink, msg);
+    disableMenuLink(settingsLink, msg);
+  } else {
+    // Run Update link
+    runUpdateLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeHamburgerMenu();
+      startUpdateProcess();
+    });
 
-  // Settings link
-  settingsLink.addEventListener("click", (e) => {
-    e.preventDefault();
-    closeHamburgerMenu();
-    openSettingsModal();
-  });
+    // Settings link
+    settingsLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeHamburgerMenu();
+      openSettingsModal();
+    });
+  }
 
   // About link
   aboutLink.addEventListener("click", (e) => {
@@ -6785,6 +6818,10 @@ function initializeSettings() {
 }
 
 function openSettings(defaultTab = "ignore-users") {
+  if (READ_ONLY_MODE) {
+    alert("Settings are disabled in read-only mode.");
+    return;
+  }
   const modal = $("settings-modal");
   modal.classList.add("show");
   
@@ -6822,32 +6859,34 @@ function openSettingsModal() {
 async function closeSettingsModal() {
   const modal = $("settings-modal");
   
-  // Check if stats exist, and if not, prompt user to run update
-  try {
-    const statsResponse = await fetch("/api/stats/check");
-    if (statsResponse.ok) {
-      const statsData = await statsResponse.json();
-      
-      // If no stats exist and there are repositories configured, suggest running update
-      if (!statsData.has_data) {
-        const reposResponse = await fetch("/api/settings/repositories");
-        if (reposResponse.ok) {
-          const reposData = await reposResponse.json();
-          if (reposData.repositories && reposData.repositories.length > 0) {
-            // We have repos but no stats - show custom dialog
-            modal.classList.remove("show");
-            modal.removeEventListener("click", handleModalBackdropClick);
-            
-            // Show custom confirmation dialog
-            showFirstUpdateDialog();
-            return;
+  if (!READ_ONLY_MODE) {
+    // Check if stats exist, and if not, prompt user to run update
+    try {
+      const statsResponse = await fetch("/api/stats/check");
+      if (statsResponse.ok) {
+        const statsData = await statsResponse.json();
+        
+        // If no stats exist and there are repositories configured, suggest running update
+        if (!statsData.has_data) {
+          const reposResponse = await fetch("/api/settings/repositories");
+          if (reposResponse.ok) {
+            const reposData = await reposResponse.json();
+            if (reposData.repositories && reposData.repositories.length > 0) {
+              // We have repos but no stats - show custom dialog
+              modal.classList.remove("show");
+              modal.removeEventListener("click", handleModalBackdropClick);
+              
+              // Show custom confirmation dialog
+              showFirstUpdateDialog();
+              return;
+            }
           }
         }
       }
+    } catch (error) {
+      console.error("Error checking stats status:", error);
+      // Continue closing modal even if check fails
     }
-  } catch (error) {
-    console.error("Error checking stats status:", error);
-    // Continue closing modal even if check fails
   }
   
   modal.classList.remove("show");
@@ -9205,6 +9244,10 @@ let updateState = {
 };
 
 function startUpdateProcess() {
+  if (READ_ONLY_MODE) {
+    alert("Updates are disabled in read-only mode.");
+    return;
+  }
   if (updateState.isRunning) {
     alert("Update is already running. Please wait for it to complete.");
     return;

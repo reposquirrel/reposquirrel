@@ -804,6 +804,12 @@ body {
   background: #374151;
 }
 
+.hamburger-dropdown a.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 /* Modal Styles */
 
 .modal {
