@@ -1,0 +1,13 @@
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.log
+repos/
+stats/
+__pycache__/
+*.egg-info/
+node_modules/
+.env
+update_logs.txt
+test_output/
