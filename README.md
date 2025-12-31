@@ -1,5 +1,9 @@
 # Git Repository Squirrel 🐿️
 
+> 🆕 **Live Demo**: http://13.61.92.173:5555 — Explore RepoSquirrel using a couple public HashiCorp repositories. The demo omits team-specific setup (since we don’t know their org structure) but showcases what you can expect before installing locally.
+
+> ⚠️ Demo environment is for viewing only (read-only) and uses real Git history from open-source HashiCorp projects.
+
 A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases.
 
 ![Developer Details](screenshots/developer_details.png)
@@ -108,6 +112,48 @@ From the dashboard, you can:
 ![Linux Kernel Dashboard](screenshots/linux_kernel2.png)
 
 **That's it!** All configuration and repository management can be done through the web interface.
+
+## Docker & Makefile Workflow
+
+You can containerize repo-squirrel with the included `Dockerfile` and `Makefile`.
+
+### Build the image
+```bash
+make build IMAGE=repo-squirrel TAG=latest
+```
+
+### Run the dashboard
+```bash
+make run IMAGE=repo-squirrel TAG=latest PORT=5001 \
+  REPO_DIR=$PWD/repos STATS_DIR=$PWD/stats CONFIG_DIR=$PWD/configuration
+```
+
+This maps the host directories into the container so repository clones, generated stats, and configuration overrides live on your filesystem. Toggle read-only mode by setting `READ_ONLY=true`:
+```bash
+make run READ_ONLY=true
+```
+
+### Exporting the image
+To move the built container to another machine:
+```bash
+make save IMAGE=repo-squirrel TAG=latest SAVE_FILE=reposquirrel.tar.gz
+scp reposquirrel.tar.gz other-host:/path/
+```
+Load it on the target box:
+```bash
+gunzip -c reposquirrel.tar.gz | docker load
+```
+
+You can also run the container manually:
+```bash
+docker run --rm -it \
+  -p 5001:5001 \
+  -e PORT=5001 -e READ_ONLY=false \
+  -v $PWD/repos:/app/repos \
+  -v $PWD/stats:/app/stats \
+  -v $PWD/configuration:/app/configuration \
+  repo-squirrel:latest
+```
 
 ## Usage
 
