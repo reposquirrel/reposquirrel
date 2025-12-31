@@ -8,9 +8,11 @@ import sys
 import argparse
 import subprocess
 import re
+import shlex
+import multiprocessing
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Tuple, Optional, Set
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 from flask import Flask, jsonify, send_from_directory, render_template, abort, request, Response
 
@@ -19,12 +21,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATS_ROOT = os.path.join(BASE_DIR, "stats")
 REPO_ROOT = os.path.join(BASE_DIR, "repos")
 CLOC_CACHE_FILE = os.path.join(STATS_ROOT, "cloc_cache.json")
+BADGE_CACHE_FILE = os.path.join(STATS_ROOT, "badges_summary.json")
 
 # Caches for expensive operations
 _SERVICES_CONFIG_CACHE: Optional[Dict[str, Dict[str, List[str]]]] = None
 _REPO_LANGUAGE_CACHE: Dict[str, Dict[str, Any]] = {}
 _SERVICE_LANGUAGE_CACHE: Dict[Tuple[str, str], Dict[str, int]] = {}
 _CLOC_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
+_BADGE_CACHE_DATA: Optional[Dict[str, Any]] = None
+_BADGE_CACHE_MTIME: Optional[float] = None
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
@@ -57,6 +62,221 @@ def log_update_message(message_dict):
             f.write(log_entry)
     except Exception as e:
         print(f"Error writing to update log: {e}")
+
+LOG_SNIPPET_CHAR_LIMIT = 1200
+
+def _format_command(cmd: List[str]) -> str:
+    return " ".join(shlex.quote(part) for part in cmd)
+
+def _summarize_stream(text: Optional[str], limit: int = LOG_SNIPPET_CHAR_LIMIT) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"…{text[-limit:]}"
+
+def _log_subprocess_streams(label: str, stdout: Optional[str], stderr: Optional[str], progress: float) -> None:
+    stdout_summary = _summarize_stream(stdout)
+    if stdout_summary:
+        log_update_message({
+            'type': 'info',
+            'message': f"{label} STDOUT (tail):\n{stdout_summary}",
+            'progress': progress
+        })
+    stderr_summary = _summarize_stream(stderr)
+    if stderr_summary:
+        log_update_message({
+            'type': 'info',
+            'message': f"{label} STDERR (tail):\n{stderr_summary}",
+            'progress': progress
+        })
+
+def _log_command_start(label: str, cmd: List[str], progress: float) -> None:
+    log_update_message({
+        'type': 'info',
+        'message': f"{label}: starting command {_format_command(cmd)}",
+        'progress': progress
+    })
+
+
+def _run_command_with_live_logs(label: str, cmd: List[str], cwd: Optional[str], progress: float, timeout: Optional[int] = None, env: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
+    """Run a subprocess and stream its output into the progress queue."""
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env
+    )
+
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    def _reader(stream, stream_name: str, collector: List[str]):
+        try:
+            for line in iter(stream.readline, ''):
+                collector.append(line)
+                stripped = line.rstrip()
+                if stripped:
+                    timestamp = datetime.utcnow().isoformat(timespec='milliseconds') + "Z"
+                    log_update_message({
+                        'type': 'detail',
+                        'message': f"{timestamp} {stripped}",
+                        'progress': progress
+                    })
+        finally:
+            stream.close()
+
+    threads: List[threading.Thread] = []
+    for stream, name, collector in (
+        (process.stdout, 'stdout', stdout_lines),
+        (process.stderr, 'stderr', stderr_lines),
+    ):
+        if stream is not None:
+            reader_thread = threading.Thread(target=_reader, args=(stream, name, collector), daemon=True)
+            reader_thread.start()
+            threads.append(reader_thread)
+
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        raise
+    finally:
+        for reader_thread in threads:
+            reader_thread.join(timeout=1)
+
+    return return_code, ''.join(stdout_lines), ''.join(stderr_lines)
+
+
+def _build_badge_display_name_map(target_slugs: Set[str], user_months: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, str]:
+    display_names = {slug: slug for slug in target_slugs}
+    if not target_slugs:
+        return display_names
+    months_lookup = user_months or list_user_months()
+    for slug in target_slugs:
+        months = months_lookup.get(slug) or []
+        if not months:
+            continue
+        period = months[0]
+        try:
+            summary_path = find_user_summary(slug, period["from"], period["to"])
+            if os.path.isfile(summary_path):
+                summary_data = load_json(summary_path)
+                display_names[slug] = summary_data.get("author_name", slug)
+        except Exception:
+            continue
+    return display_names
+
+
+def build_badge_cache_data() -> Optional[Dict[str, Any]]:
+    """Aggregate badge data for all developers for fast API responses."""
+    try:
+        badges_by_user = analyze_developer_badges()
+        user_months = list_user_months()
+        display_names = _build_badge_display_name_map(set(badges_by_user.keys()), user_months)
+        badge_type_counts = Counter()
+        top_badge_holders: List[Dict[str, Any]] = []
+        top_ownership_holders: List[Dict[str, Any]] = []
+        per_user_payload: Dict[str, Dict[str, Any]] = {}
+        total_badges = 0
+        for slug, badges in badges_by_user.items():
+            total_badges += len(badges)
+            type_counts = Counter(badge.get("type", "unknown") for badge in badges)
+            badge_type_counts.update(type_counts)
+            type_counts_dict = {k: int(v) for k, v in type_counts.items()}
+            display_name = display_names.get(slug, slug)
+            top_badge_holders.append({
+                "slug": slug,
+                "display_name": display_name,
+                "badge_count": len(badges),
+                "type_counts": type_counts_dict
+            })
+            ownership_badge_count = type_counts_dict.get("ownership_percentage", 0)
+            if ownership_badge_count > 0:
+                subsystems = sorted({
+                    badge.get("subsystem")
+                    for badge in badges
+                    if badge.get("type") == "ownership_percentage" and badge.get("subsystem")
+                })
+                top_ownership_holders.append({
+                    "slug": slug,
+                    "display_name": display_name,
+                    "ownership_badge_count": ownership_badge_count,
+                    "subsystems": subsystems
+                })
+            per_user_payload[slug] = {
+                "display_name": display_name,
+                "badges": badges
+            }
+        badge_types_dict = {k: int(v) for k, v in badge_type_counts.items()}
+        for key in ["productivity", "maintainer", "ownership", "ownership_percentage"]:
+            badge_types_dict.setdefault(key, 0)
+        summary = {
+            "users_with_badges": len(badges_by_user),
+            "total_badges": total_badges,
+            "badge_types": badge_types_dict,
+            "total_users": len(user_months)
+        }
+        top_badge_holders.sort(
+            key=lambda entry: (
+                -entry["badge_count"],
+                -entry["type_counts"].get("productivity", 0),
+                entry["slug"]
+            )
+        )
+        top_ownership_holders.sort(
+            key=lambda entry: (-entry["ownership_badge_count"], entry["slug"])
+        )
+        return {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "summary": summary,
+            "top_badge_holders": top_badge_holders[:50],
+            "top_ownership_holders": top_ownership_holders[:50],
+            "per_user": per_user_payload
+        }
+    except Exception as exc:
+        print(f"Error building badge cache: {exc}")
+        return None
+
+
+def load_badge_cache(force_reload: bool = False) -> Optional[Dict[str, Any]]:
+    global _BADGE_CACHE_DATA, _BADGE_CACHE_MTIME
+    try:
+        if not force_reload and _BADGE_CACHE_DATA is not None:
+            return _BADGE_CACHE_DATA
+        if not os.path.exists(BADGE_CACHE_FILE):
+            return None
+        with open(BADGE_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _BADGE_CACHE_DATA = data
+        _BADGE_CACHE_MTIME = os.path.getmtime(BADGE_CACHE_FILE)
+        return data
+    except Exception as exc:
+        print(f"Error loading badge cache: {exc}")
+        return None
+
+
+def save_badge_cache(data: Dict[str, Any]) -> Dict[str, Any]:
+    global _BADGE_CACHE_DATA, _BADGE_CACHE_MTIME
+    os.makedirs(os.path.dirname(BADGE_CACHE_FILE), exist_ok=True)
+    with open(BADGE_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    _BADGE_CACHE_DATA = data
+    _BADGE_CACHE_MTIME = os.path.getmtime(BADGE_CACHE_FILE)
+    return data
+
+
+def refresh_badge_cache() -> Optional[Dict[str, Any]]:
+    badge_data = build_badge_cache_data()
+    if not badge_data:
+        return None
+    return save_badge_cache(badge_data)
 
 # Automatic cleanup on server startup
 def reset_update_state():
@@ -882,17 +1102,44 @@ def api_users():
 
 @app.route("/api/users/<user_slug>/badges")
 def api_user_badges(user_slug: str):
-    """Get badges for a specific user based on blame/ownership analysis."""
+    """Get precomputed badges for a specific user."""
     try:
-        print(f"Getting badges for user: {user_slug}")
-        all_badges = analyze_developer_badges()
-        user_badges = all_badges.get(user_slug, [])
-        print(f"Found {len(user_badges)} badges for user {user_slug}")
-        
+        badge_cache = load_badge_cache()
+        if badge_cache is None:
+            badge_cache = refresh_badge_cache()
+        if badge_cache is None:
+            return jsonify({
+                "badges": [],
+                "error": "Badge data not available. Please run the update pipeline to generate ownership analytics."
+            }), 503
+        user_entry = badge_cache.get("per_user", {}).get(user_slug, {})
+        user_badges = user_entry.get("badges", [])
         return jsonify({"badges": user_badges})
     except Exception as e:
-        print(f"Error analyzing badges for user {user_slug}: {str(e)}")
+        print(f"Error retrieving badges for user {user_slug}: {str(e)}")
         return jsonify({"badges": [], "error": str(e)})
+
+
+@app.route("/api/users/badges-overview")
+def api_users_badges_overview():
+    """Return aggregated badge statistics for developers overview dashboard."""
+    try:
+        badge_cache = load_badge_cache()
+        if badge_cache is None:
+            badge_cache = refresh_badge_cache()
+        if badge_cache is None:
+            return jsonify({
+                "error": "Badge data not available. Please run the update pipeline to generate ownership analytics."
+            }), 503
+        return jsonify({
+            "generated_at": badge_cache.get("generated_at"),
+            "summary": badge_cache.get("summary", {}),
+            "top_badge_holders": badge_cache.get("top_badge_holders", []),
+            "top_ownership_holders": badge_cache.get("top_ownership_holders", [])
+        })
+    except Exception as e:
+        print(f"Error serving badge overview: {e}")
+        return jsonify({"error": str(e)})
 
 
 @app.route("/api/developers/total-ownership")
@@ -3372,6 +3619,9 @@ def run_full_update_async(force_update=False):
             # Execute master.py for BOTH years (not just current year months!)
             python_exe = sys.executable or "python3"
             successful_years = []
+            cpu_workers = max(1, multiprocessing.cpu_count())
+            python_env = os.environ.copy()
+            python_env.setdefault("PYTHONUNBUFFERED", "1")
             
             for i, year in enumerate(years_to_process):
                 year_start_time = datetime.now()
@@ -3394,42 +3644,46 @@ def run_full_update_async(force_update=False):
                     "--alias-file", os.path.join(BASE_DIR, "configuration", "alias.json"),
                     "--ignore-file", os.path.join(BASE_DIR, "configuration", "ignore_user.txt"),
                     "--parallel",
-                    "--max-workers", "4"
+                    "--cpu-count", str(cpu_workers)
                 ]
+                _log_command_start(f'master.py ({year})', master_cmd, year_progress)
                 
                 try:
-                    result = subprocess.run(
+                    returncode, stdout_text, stderr_text = _run_command_with_live_logs(
+                        f'master.py ({year})',
                         master_cmd,
                         cwd=BASE_DIR,
-                        capture_output=True,
-                        text=True,
-                        timeout=144000  # 40 hour timeout per year for enterprise-scale operations
+                        progress=year_progress,
+                        timeout=144000,  # 40 hour timeout per year for enterprise-scale operations
+                        env=python_env
                     )
                     
                     year_end_time = datetime.now()
                     year_duration = (year_end_time - year_start_time).total_seconds()
                     
-                    if result.returncode == 0:
+                    if returncode == 0:
                         successful_years.append(year)
                         log_update_message({
                             'type': 'info',
-                            'message': f'✅ Year {year}: SUCCESS! Generated all monthly data and yearly summaries ({year_duration:.1f}s)',
+                            'message': f'✅ Year {year}: SUCCESS! (exit={returncode}) Generated all monthly data and yearly summaries ({year_duration:.1f}s)',
                             'progress': year_progress + 35
                         })
                     else:
-                        error_msg = result.stderr.strip()[:100] if result.stderr else "Unknown error"
+                        error_msg = stderr_text.strip()[:100] if stderr_text else "Unknown error"
                         log_update_message({
                             'type': 'warning',
-                            'message': f'⚠️ Year {year}: Issues detected - {error_msg}... (continuing)',
+                            'message': f'⚠️ Year {year}: Issues detected (exit={returncode}) - {error_msg}... (continuing)',
                             'progress': year_progress + 35
                         })
+                        _log_subprocess_streams(f'master.py ({year})', stdout_text, stderr_text, year_progress + 35)
                             
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as e:
                     log_update_message({
                         'type': 'warning',
                         'message': f'⚠️ Year {year}: Analysis timed out after 40 hours (continuing with other years)',
                         'progress': year_progress + 35
                     })
+                    _log_subprocess_streams(f'master.py ({year}) timeout', getattr(e, 'stdout', None), getattr(e, 'stderr', None), year_progress + 35)
                 except Exception as e:
                     log_update_message({
                         'type': 'warning',
@@ -3519,30 +3773,42 @@ def run_full_update_async(force_update=False):
                 })
                 
                 # Step 1: Run summery.py for this month
+                summery_cmd = [
+                    "python", summery_script,
+                    "--from", date_from,
+                    "--to", date_to,
+                    "--repos-root", "repos/appgate-sdp-int",
+                    "--output-root", ".",
+                    "--alias-file", "configuration/alias.json",
+                    "--ignore-file", "configuration/ignore_user.txt"
+                ]
                 try:
-                    summery_result = subprocess.run([
-                        "python", summery_script,
-                        "--from", date_from,
-                        "--to", date_to,
-                        "--repos-root", "repos/appgate-sdp-int",
-                        "--output-root", ".",
-                        "--alias-file", "configuration/alias.json",
-                        "--ignore-file", "configuration/ignore_user.txt"
-                    ], cwd=BASE_DIR, capture_output=True, text=True, timeout=18000)  # 5 hours for user stats with enterprise repos
+                    _log_command_start(f'summery.py {date_from}→{date_to}', summery_cmd, month_progress_start)
+                    summery_result = subprocess.run(
+                        summery_cmd,
+                        cwd=BASE_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=18000  # 5 hours for user stats with enterprise repos
+                    )
                     
                     if summery_result.returncode != 0:
                         log_update_message({
                             'type': 'warning',
-                            'message': f'⚠️ User statistics for {current_year}-{month:02d} had issues, but continuing...',
+                            'message': f'⚠️ User statistics for {current_year}-{month:02d} had issues (exit={summery_result.returncode}), but continuing...',
                             'progress': month_progress_start + (month_progress_end - month_progress_start) * 0.5
                         })
+                        _log_subprocess_streams(f'summery.py {date_from}→{date_to}', summery_result.stdout, summery_result.stderr,
+                                                month_progress_start + (month_progress_end - month_progress_start) * 0.5)
                     
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as e:
                     log_update_message({
                         'type': 'warning',
                         'message': f'⚠️ User statistics for {current_year}-{month:02d} timed out, but continuing...',
                         'progress': month_progress_start + (month_progress_end - month_progress_start) * 0.5
                     })
+                    _log_subprocess_streams(f'summery.py {date_from}→{date_to} timeout', getattr(e, 'stdout', None), getattr(e, 'stderr', None),
+                                            month_progress_start + (month_progress_end - month_progress_start) * 0.5)
                 except Exception as e:
                     log_update_message({
                         'type': 'warning',
@@ -3551,32 +3817,42 @@ def run_full_update_async(force_update=False):
                     })
                 
                 # Step 2: Run service.py for this month (WITHOUT --parallel to avoid pickle issues)
+                service_cmd = [
+                    "python", service_script,
+                    "--from", date_from,
+                    "--to", date_to,
+                    "--repos-root", "repos/appgate-sdp-int",
+                    "--output-root", ".",
+                    "--services-file", "configuration/services.json",
+                    "--alias-file", "configuration/alias.json",
+                    "--ignore-file", "configuration/ignore_user.txt"
+                    # NOTE: No --parallel flag to avoid pickle issues
+                ]
                 try:
-                    service_result = subprocess.run([
-                        "python", service_script,
-                        "--from", date_from,
-                        "--to", date_to,
-                        "--repos-root", "repos/appgate-sdp-int",
-                        "--output-root", ".",
-                        "--services-file", "configuration/services.json",
-                        "--alias-file", "configuration/alias.json",
-                        "--ignore-file", "configuration/ignore_user.txt"
-                        # NOTE: No --parallel flag to avoid pickle issues
-                    ], cwd=BASE_DIR, capture_output=True, text=True, timeout=36000)  # 10 hours for subsystem stats with massive enterprise repos
+                    _log_command_start(f'service.py {date_from}→{date_to}', service_cmd, month_progress_end)
+                    service_result = subprocess.run(
+                        service_cmd,
+                        cwd=BASE_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=36000  # 10 hours for subsystem stats with massive enterprise repos
+                    )
                     
                     if service_result.returncode != 0:
                         log_update_message({
                             'type': 'warning',
-                            'message': f'⚠️ Subsystem statistics for {current_year}-{month:02d} had issues, but continuing...',
+                            'message': f'⚠️ Subsystem statistics for {current_year}-{month:02d} had issues (exit={service_result.returncode}), but continuing...',
                             'progress': month_progress_end
                         })
+                        _log_subprocess_streams(f'service.py {date_from}→{date_to}', service_result.stdout, service_result.stderr, month_progress_end)
                     
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as e:
                     log_update_message({
                         'type': 'warning',
                         'message': f'⚠️ Subsystem statistics for {current_year}-{month:02d} timed out, but continuing...',
                         'progress': month_progress_end
                     })
+                    _log_subprocess_streams(f'service.py {date_from}→{date_to} timeout', getattr(e, 'stdout', None), getattr(e, 'stderr', None), month_progress_end)
                 except Exception as e:
                     log_update_message({
                         'type': 'warning',
@@ -3629,7 +3905,7 @@ def run_full_update_async(force_update=False):
             
             blame_script = os.path.join(BASE_DIR, "blame.py")
             if os.path.exists(blame_script):
-                blame_result = subprocess.run([
+                blame_cmd = [
                     "python", blame_script,
                     "--repos-root", "repos/appgate-sdp-int",
                     "--output-root", ".",
@@ -3637,7 +3913,15 @@ def run_full_update_async(force_update=False):
                     "--alias-file", "configuration/alias.json",
                     "--ignore-file", "configuration/ignore_user.txt",
                     "--parallel"  # blame.py parallel works fine, it's only service.py that has issues
-                ], cwd=BASE_DIR, capture_output=True, text=True, timeout=72000)  # 20 hour timeout for ownership analysis with enterprise-scale repos
+                ]
+                _log_command_start('blame.py ownership analysis', blame_cmd, 75)
+                blame_result = subprocess.run(
+                    blame_cmd,
+                    cwd=BASE_DIR,
+                    capture_output=True,
+                    text=True,
+                    timeout=72000  # 20 hour timeout for ownership analysis with enterprise-scale repos
+                )
                 
                 blame_end_time = datetime.now()
                 blame_duration = (blame_end_time - blame_start_time).total_seconds()
@@ -3651,8 +3935,35 @@ def run_full_update_async(force_update=False):
                 else:
                     log_update_message({
                         'type': 'warning',
-                        'message': f'⚠️ Ownership analysis completed with warnings [{blame_end_time.strftime("%H:%M:%S")}] (duration: {blame_duration:.1f}s)',
+                        'message': f'⚠️ Ownership analysis completed with warnings (exit={blame_result.returncode}) [{blame_end_time.strftime("%H:%M:%S")}] (duration: {blame_duration:.1f}s)',
                         'progress': 95
+                    })
+                    _log_subprocess_streams('blame.py ownership analysis', blame_result.stdout, blame_result.stderr, 95)
+                try:
+                    log_update_message({
+                        'type': 'info',
+                        'message': '🏅 Refreshing developer badge cache from latest ownership data...',
+                        'progress': 96
+                    })
+                    badge_cache = refresh_badge_cache()
+                    if badge_cache and badge_cache.get('summary'):
+                        badge_count = badge_cache['summary'].get('users_with_badges', 0)
+                        log_update_message({
+                            'type': 'info',
+                            'message': f'✅ Badge cache updated ({badge_count} developers with badges)',
+                            'progress': 96
+                        })
+                    else:
+                        log_update_message({
+                            'type': 'warning',
+                            'message': '⚠️ Badge cache generation produced no data. UI will rebuild badges on demand.',
+                            'progress': 96
+                        })
+                except Exception as cache_exc:
+                    log_update_message({
+                        'type': 'warning',
+                        'message': f'⚠️ Failed to refresh badge cache: {cache_exc}',
+                        'progress': 96
                     })
             else:
                 log_update_message({
@@ -3661,18 +3972,21 @@ def run_full_update_async(force_update=False):
                     'progress': 95
                 })
                 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             log_update_message({
                 'type': 'warning',
                 'message': f'⚠️ Ownership analysis timed out after 20 hours [{datetime.now().strftime("%H:%M:%S")}]',
                 'progress': 95
             })
+            _log_subprocess_streams('blame.py ownership analysis timeout', getattr(e, 'stdout', None), getattr(e, 'stderr', None), 95)
         except Exception as e:
             log_update_message({
                 'type': 'warning',
                 'message': f'⚠️ Ownership analysis failed: {str(e)} [{datetime.now().strftime("%H:%M:%S")}]',
                 'progress': 95
             })
+            if hasattr(e, 'stdout') or hasattr(e, 'stderr'):
+                _log_subprocess_streams('blame.py ownership analysis failure', getattr(e, 'stdout', None), getattr(e, 'stderr', None), 95)
         
         # Final completion
         final_end_time = datetime.now()

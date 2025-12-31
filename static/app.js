@@ -4289,10 +4289,7 @@ async function showUsersOverviewDashboard() {
     setViewHeader("Developers Overview", "Development team statistics and activity", "Developers");
     
     const main = $("main-content");
-    main.innerHTML = createLoadingIndicator(
-      "Loading Developers Overview", 
-      "Analyzing user statistics and team metrics across all repositories..."
-    );
+    main.innerHTML = "";
     
     const overviewData = await fetchJSON('/api/users/overview');
     let capacityLeaders = [];
@@ -4576,57 +4573,8 @@ async function showUsersOverviewDashboard() {
       main.appendChild(yearlySection);
     }
     
-    // Initialize progress tracker for async sections
-    progressTracker.init();
-    progressTracker.show();
-    progressTracker.addTask('badge-stats', 'Achievement Badge Analysis');
-    progressTracker.addTask('ownership-stats', 'Code Ownership Statistics');
-    // 'ownership-changes' task removed - feature disabled due to fake data
-    
-    // Badge Statistics
-    try {
-      await addBadgeStatistics(main, progressTracker.getAbortSignal());
-      progressTracker.completeTask('badge-stats');
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        console.log("Badge statistics cancelled by user");
-        progressTracker.completeTask('badge-stats', false);
-        return; // Stop further processing if cancelled
-      }
-      console.error("Badge statistics failed:", error);
-      progressTracker.completeTask('badge-stats', false);
-    }
-    
-    // Ownership Statistics
-    try {
-      await addOwnershipStatistics(main, progressTracker.getAbortSignal());
-      progressTracker.completeTask('ownership-stats');
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        console.log("Ownership statistics cancelled by user");
-        progressTracker.completeTask('ownership-stats', false);
-        return; // Stop further processing if cancelled
-      }
-      console.error("Ownership statistics failed:", error);
-      progressTracker.completeTask('ownership-stats', false);
-    }
-    
-    // Ownership Changes Analysis - REMOVED (was using simulated/fake data)
-    // Real ownership trends are available on individual developer pages
-    /*
-    try {
-      await addOwnershipChangesAnalysis(main, progressTracker.getAbortSignal());
-      progressTracker.completeTask('ownership-changes');
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        console.log("Ownership changes cancelled by user");
-        progressTracker.completeTask('ownership-changes', false);
-        return; // Stop further processing if cancelled
-      }
-      console.error("Ownership changes failed:", error);
-      progressTracker.completeTask('ownership-changes', false);
-    }
-    */
+    await addBadgeStatistics(main);
+    await addOwnershipStatistics(main);
     
     state.loadingUsersOverview = false;
     console.log("Users overview dashboard loading completed");
@@ -4637,26 +4585,19 @@ async function showUsersOverviewDashboard() {
     setViewHeader("Developers Overview", "Error loading overview data", "Error");
     const main = $("main-content");
     main.innerHTML = '<div class="error">Failed to load developers overview: ' + error.message + '</div>';
-    progressTracker.hide();
   } finally {
     state.loadingUsersOverview = false;
     console.log("Users overview dashboard loading finished");
   }
 }
 
-async function addBadgeStatistics(container, abortSignal) {
+async function addBadgeStatistics(container) {
   try {
     console.log("Loading badge statistics for users overview...");
     
-    // Check if section already exists
     if (container.querySelector('.badge-statistics-section')) {
       console.log("Badge statistics section already exists, skipping");
       return;
-    }
-    
-    // Check if cancelled before starting
-    if (abortSignal && abortSignal.aborted) {
-      throw new DOMException('Operation cancelled', 'AbortError');
     }
     
     const badgeSection = document.createElement("div");
@@ -4666,55 +4607,33 @@ async function addBadgeStatistics(container, abortSignal) {
       "Summary of badges earned by developers across the team. Shows distribution of productivity awards, maintainer recognitions, and ownership achievements.",
       "h2"
     );
-    
     container.appendChild(badgeSection);
 
-    // Get all users and load their badges
-    const usersWithBadges = [];
-    let totalBadges = 0;
-    const badgeTypes = {
-      productivity: 0,
-      ownership: 0,
-      maintainer: 0,
-      ownership_percentage: 0
-    };
+    const badgeOverview = await fetchJSON('/api/users/badges-overview');
+    if (!badgeOverview || !badgeOverview.summary) {
+      const emptyMessage = document.createElement("div");
+      emptyMessage.className = "note-text";
+      emptyMessage.textContent = "Badge data is not available. Run the update pipeline to generate ownership analytics.";
+      badgeSection.appendChild(emptyMessage);
+      return;
+    }
 
-    // Load badges for all users (with reasonable timeout)
-    const badgePromises = state.users.map(async user => {
-      try {
-        const badges = await loadUserBadges(user.slug);
-        if (badges && badges.length > 0) {
-          usersWithBadges.push({
-            user: user,
-            badges: badges,
-            badgeCount: badges.length
-          });
-          
-          totalBadges += badges.length;
-          
-          // Count by type
-          badges.forEach(badge => {
-            if (badgeTypes.hasOwnProperty(badge.type)) {
-              badgeTypes[badge.type]++;
-            }
-          });
-        }
-      } catch (error) {
-        console.warn(`Failed to load badges for ${user.slug}:`, error);
-      }
-    });
+    const summary = badgeOverview.summary || {};
+    const totalUsers = summary.total_users || state.users.length || 0;
+    const usersWithBadgesCount = summary.users_with_badges || 0;
+    const totalBadges = summary.total_badges || 0;
+    const badgeTypes = summary.badge_types || {};
+    const topBadgeHolders = badgeOverview.top_badge_holders || [];
+    const ownershipLeaders = badgeOverview.top_ownership_holders || [];
 
-    await Promise.all(badgePromises);
-
-    // Create statistics grid
     const statsGrid = document.createElement("div");
     statsGrid.className = "badge-stats-grid";
 
     const badgeStats = [
-      { title: 'Users with Badges', value: usersWithBadges.length, subtitle: `out of ${state.users.length} developers`, emoji: '🎖️', color: '#F59E0B' },
+      { title: 'Users with Badges', value: usersWithBadgesCount, subtitle: `out of ${totalUsers} developers`, emoji: '🎖️', color: '#F59E0B' },
       { title: 'Total Badges', value: totalBadges, subtitle: 'across all users', emoji: '🏆', color: '#10B981' },
-      { title: 'Productivity Awards', value: badgeTypes.productivity, subtitle: 'most productive dev', emoji: '🚀', color: '#3B82F6' },
-      { title: 'Ownership Badges', value: badgeTypes.ownership_percentage, subtitle: 'significant ownership', emoji: '👑', color: '#8B5CF6' }
+      { title: 'Productivity Awards', value: badgeTypes.productivity || 0, subtitle: 'most productive dev', emoji: '🚀', color: '#3B82F6' },
+      { title: 'Ownership Badges', value: badgeTypes.ownership_percentage || 0, subtitle: 'significant ownership', emoji: '👑', color: '#8B5CF6' }
     ];
 
     badgeStats.forEach(stat => {
@@ -4735,15 +4654,11 @@ async function addBadgeStatistics(container, abortSignal) {
 
     badgeSection.appendChild(statsGrid);
 
-    // Create content layout for badge holders
-    if (usersWithBadges.length > 0) {
+    if (topBadgeHolders.length > 0) {
       const contentLayout = document.createElement("div");
       contentLayout.className = "badge-content-layout";
       
-      const topBadgeHolders = usersWithBadges
-        .sort((a, b) => b.badgeCount - a.badgeCount)
-        .slice(0, 8); // Show more badge holders
-
+      const highlightHolders = topBadgeHolders.slice(0, 8);
       const topHoldersDiv = document.createElement("div");
       topHoldersDiv.className = "badge-holders-section";
       topHoldersDiv.innerHTML = '<h3>🌟 Top Badge Holders</h3>';
@@ -4751,22 +4666,27 @@ async function addBadgeStatistics(container, abortSignal) {
       const holdersList = document.createElement("div");
       holdersList.className = "badge-holders-grid";
 
-      topBadgeHolders.forEach((holder, index) => {
+      highlightHolders.forEach((holder, index) => {
         const holderItem = document.createElement("div");
-        holderItem.className = "badge-holder-card clickable";
-        holderItem.onclick = () => navigateToUser(holder.user.slug);
-        
-        const badges = holder.badges;
-        const productivityBadges = badges.filter(b => b.type === 'productivity').length;
-        const ownershipBadges = badges.filter(b => b.type === 'ownership_percentage').length;
-        const maintainerBadges = badges.filter(b => b.type === 'maintainer').length;
-        
+        holderItem.className = "badge-holder-card";
+        holderItem.classList.add(state.users.some(u => u.slug === holder.slug) ? "clickable" : "inactive");
+        if (state.users.some(u => u.slug === holder.slug)) {
+          holderItem.onclick = () => navigateToUser(holder.slug);
+        } else {
+          holderItem.style.cursor = "default";
+          holderItem.title = "Inactive contributor (no recent activity in analysis period)";
+        }
+
+        const productivityBadges = holder.type_counts?.productivity || 0;
+        const ownershipBadges = holder.type_counts?.ownership_percentage || 0;
+        const maintainerBadges = holder.type_counts?.maintainer || 0;
+
         holderItem.innerHTML = `
           <div class="holder-rank">
             <span class="rank-number">${index + 1}</span>
           </div>
           <div class="holder-info">
-            <div class="holder-name">${holder.user.display_name || holder.user.slug}</div>
+            <div class="holder-name">${holder.display_name || holder.slug}</div>
             <div class="holder-badges">
               ${productivityBadges > 0 ? `<span class="mini-badge productivity">🚀 ${productivityBadges}</span>` : ''}
               ${ownershipBadges > 0 ? `<span class="mini-badge ownership">👑 ${ownershipBadges}</span>` : ''}
@@ -4774,7 +4694,7 @@ async function addBadgeStatistics(container, abortSignal) {
             </div>
           </div>
           <div class="holder-total">
-            <span class="total-count">${holder.badgeCount}</span>
+            <span class="total-count">${holder.badge_count}</span>
             <span class="total-label">badges</span>
           </div>
         `;
@@ -4784,13 +4704,11 @@ async function addBadgeStatistics(container, abortSignal) {
       topHoldersDiv.appendChild(holdersList);
       contentLayout.appendChild(topHoldersDiv);
       badgeSection.appendChild(contentLayout);
-      
-      // Add Top 10 Badge Holders ranking list
+
       const rankingGrid = document.createElement("div");
       rankingGrid.className = "ranking-grid";
       rankingGrid.style.marginTop = "20px";
-      
-      // Top 10 Total Badge Holders
+
       const topBadgesCard = document.createElement("div");
       topBadgesCard.className = "ranking-list";
       topBadgesCard.innerHTML = `
@@ -4804,101 +4722,105 @@ async function addBadgeStatistics(container, abortSignal) {
           </div>
         </div>
       `;
-      
+
       const topBadgesList = document.createElement("div");
       topBadgesList.className = "ranking-items";
-      
-      usersWithBadges
-        .sort((a, b) => b.badgeCount - a.badgeCount)
-        .slice(0, 20)
-        .forEach((holder, index) => {
-          const item = document.createElement("div");
-          item.className = "ranking-item clickable";
-          item.onclick = () => navigateToUser(holder.user.slug);
-          
-          const badges = holder.badges;
-          const productivityBadges = badges.filter(b => b.type === 'productivity').length;
-          const ownershipBadges = badges.filter(b => b.type === 'ownership_percentage').length;
-          const maintainerBadges = badges.filter(b => b.type === 'maintainer').length;
-          
-          item.innerHTML = `
-            <span class="ranking-position">#${index + 1}</span>
-            <span class="ranking-name">${holder.user.display_name || holder.user.slug}</span>
-            <div class="ranking-meta">
-              <span class="ranking-value">${holder.badgeCount} total</span>
-              <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;">
-                ${productivityBadges > 0 ? `🚀${productivityBadges} ` : ''}${ownershipBadges > 0 ? `👑${ownershipBadges} ` : ''}${maintainerBadges > 0 ? `🔧${maintainerBadges}` : ''}
-              </span>
-            </div>
-          `;
-          topBadgesList.appendChild(item);
-        });
-      
-      topBadgesCard.appendChild(topBadgesList);
-      rankingGrid.appendChild(topBadgesCard);
-      
-      // Top 10 Ownership Badge Holders
-      const ownershipBadgesCard = document.createElement("div");
-      ownershipBadgesCard.className = "ranking-list";
-      ownershipBadgesCard.innerHTML = `
-        <div class="ranking-header">
-          <span class="ranking-emoji">👑</span>
-          <div class="title-with-help">
-            <div>
-              <h3 style="margin: 0;">Top 20 Ownership Badge Holders</h3>
-              <p class="ranking-subtitle">By number of ownership badges</p>
-            </div>
-          </div>
-        </div>
-      `;
-      
-      const ownershipBadgesList = document.createElement("div");
-      ownershipBadgesList.className = "ranking-items";
-      
-      const usersWithOwnershipBadges = usersWithBadges
-        .map(holder => ({
-          ...holder,
-          ownershipBadgeCount: holder.badges.filter(b => b.type === 'ownership_percentage').length
-        }))
-        .filter(holder => holder.ownershipBadgeCount > 0)
-        .sort((a, b) => b.ownershipBadgeCount - a.ownershipBadgeCount)
-        .slice(0, 20);
-      
-      usersWithOwnershipBadges.forEach((holder, index) => {
+
+      topBadgeHolders.slice(0, 20).forEach((holder, index) => {
         const item = document.createElement("div");
-        item.className = "ranking-item clickable";
-        item.onclick = () => navigateToUser(holder.user.slug);
-        
-        // Get ownership badge details
-        const ownershipBadges = holder.badges.filter(b => b.type === 'ownership_percentage');
-        const subsystems = ownershipBadges.map(b => b.subsystem).join(', ');
-        
+        const isActive = state.users.some(u => u.slug === holder.slug);
+        item.className = isActive ? "ranking-item clickable" : "ranking-item inactive";
+        if (isActive) {
+          item.onclick = () => navigateToUser(holder.slug);
+        } else {
+          item.style.cursor = "default";
+          item.title = "Inactive contributor (no recent activity in analysis period)";
+        }
+
+        const productivityBadges = holder.type_counts?.productivity || 0;
+        const ownershipBadges = holder.type_counts?.ownership_percentage || 0;
+        const maintainerBadges = holder.type_counts?.maintainer || 0;
+
         item.innerHTML = `
           <span class="ranking-position">#${index + 1}</span>
-          <span class="ranking-name">${holder.user.display_name || holder.user.slug}</span>
+          <span class="ranking-name">${holder.display_name || holder.slug}</span>
           <div class="ranking-meta">
-            <span class="ranking-value">${holder.ownershipBadgeCount} subsystems</span>
-            <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;" title="${subsystems}">
-              ${subsystems.length > 30 ? subsystems.substring(0, 30) + '...' : subsystems}
+            <span class="ranking-value">${holder.badge_count} total</span>
+            <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;">
+              ${productivityBadges > 0 ? `🚀${productivityBadges} ` : ''}${ownershipBadges > 0 ? `👑${ownershipBadges} ` : ''}${maintainerBadges > 0 ? `🔧${maintainerBadges}` : ''}
             </span>
           </div>
         `;
-        ownershipBadgesList.appendChild(item);
+        topBadgesList.appendChild(item);
       });
-      
-      ownershipBadgesCard.appendChild(ownershipBadgesList);
-      rankingGrid.appendChild(ownershipBadgesCard);
-      
+
+      topBadgesCard.appendChild(topBadgesList);
+      rankingGrid.appendChild(topBadgesCard);
+
+      if (ownershipLeaders.length > 0) {
+        const ownershipBadgesCard = document.createElement("div");
+        ownershipBadgesCard.className = "ranking-list";
+        ownershipBadgesCard.innerHTML = `
+          <div class="ranking-header">
+            <span class="ranking-emoji">👑</span>
+            <div class="title-with-help">
+              <div>
+                <h3 style="margin: 0;">Top 20 Ownership Badge Holders</h3>
+                <p class="ranking-subtitle">By number of ownership badges</p>
+              </div>
+            </div>
+          </div>
+        `;
+
+        const ownershipBadgesList = document.createElement("div");
+        ownershipBadgesList.className = "ranking-items";
+
+        ownershipLeaders.slice(0, 20).forEach((holder, index) => {
+          const item = document.createElement("div");
+          const isActive = state.users.some(u => u.slug === holder.slug);
+          item.className = isActive ? "ranking-item clickable" : "ranking-item inactive";
+          if (isActive) {
+            item.onclick = () => navigateToUser(holder.slug);
+          } else {
+            item.style.cursor = "default";
+            item.title = "Inactive contributor (no recent activity in analysis period)";
+          }
+
+          const subsystems = holder.subsystems || [];
+          const subsystemsText = subsystems.join(', ');
+
+          item.innerHTML = `
+            <span class="ranking-position">#${index + 1}</span>
+            <span class="ranking-name">${holder.display_name || holder.slug}</span>
+            <div class="ranking-meta">
+              <span class="ranking-value">${holder.ownership_badge_count} subsystems</span>
+              <span class="ranking-subtext" style="font-size: 0.85em; color: #94a3b8;" title="${subsystemsText}">
+                ${subsystemsText.length > 30 ? subsystemsText.substring(0, 30) + '...' : subsystemsText}
+              </span>
+            </div>
+          `;
+          ownershipBadgesList.appendChild(item);
+        });
+
+        ownershipBadgesCard.appendChild(ownershipBadgesList);
+        rankingGrid.appendChild(ownershipBadgesCard);
+      }
+
       badgeSection.appendChild(rankingGrid);
+    } else {
+      const emptyMessage = document.createElement("div");
+      emptyMessage.className = "note-text";
+      emptyMessage.style.marginTop = "12px";
+      emptyMessage.textContent = "No badge data available for the current analysis window.";
+      badgeSection.appendChild(emptyMessage);
     }
 
   } catch (error) {
     console.error("Error loading badge statistics:", error);
-    // Don't break the overview, just skip badges section
   }
 }
 
-async function addOwnershipStatistics(container, abortSignal) {
+async function addOwnershipStatistics(container) {
   try {
     console.log("Loading ownership statistics for users overview...");
     
@@ -4906,11 +4828,6 @@ async function addOwnershipStatistics(container, abortSignal) {
     if (container.querySelector('.ownership-statistics-section')) {
       console.log("Ownership statistics section already exists, skipping");
       return;
-    }
-    
-    // Check if cancelled before starting
-    if (abortSignal && abortSignal.aborted) {
-      throw new DOMException('Operation cancelled', 'AbortError');
     }
     
     const ownershipSection = document.createElement("div");
@@ -9232,6 +9149,8 @@ async function saveCapacityConfig() {
 // Update Process Management
 // --------------------------
 
+const MAX_DETAIL_LINES = 500;
+
 let updateState = {
   isRunning: false,
   steps: [
@@ -9257,6 +9176,15 @@ function startUpdateProcess() {
   updateState.isRunning = true;
   updateState.currentStep = 0;
   updateState.progress = 0;
+
+  const logContent = $("update-log-content");
+  if (logContent) {
+    logContent.innerHTML = "";
+  }
+  const detailContent = $("update-detailed-content");
+  if (detailContent) {
+    detailContent.innerHTML = "";
+  }
 
   // Show modal
   const modal = $("update-modal");
@@ -9284,6 +9212,7 @@ function updateProgressUI() {
 
 function addUpdateLogMessage(message, type = 'info') {
   const logContent = $("update-log-content");
+  if (!logContent) return;
   const messageDiv = document.createElement("div");
   messageDiv.className = `log-message ${type}`;
   messageDiv.textContent = message;
@@ -9291,6 +9220,22 @@ function addUpdateLogMessage(message, type = 'info') {
   
   // Auto-scroll to bottom
   logContent.scrollTop = logContent.scrollHeight;
+}
+
+function addDetailedProgressMessage(message) {
+  const detailContent = $("update-detailed-content");
+  if (!detailContent || !message) return;
+  const shouldStick = detailContent.scrollTop + detailContent.clientHeight >= detailContent.scrollHeight - 8;
+  const line = document.createElement("div");
+  line.className = "detail-line";
+  line.textContent = message;
+  detailContent.appendChild(line);
+  while (detailContent.children.length > MAX_DETAIL_LINES) {
+    detailContent.removeChild(detailContent.firstChild);
+  }
+  if (shouldStick) {
+    detailContent.scrollTop = detailContent.scrollHeight;
+  }
 }
 
 async function runUpdate() {
@@ -9339,6 +9284,13 @@ async function runUpdate() {
             case 'success':
               addUpdateLogMessage(data.message, "success");
               if (data.progress !== undefined) {
+                updateState.progress = data.progress;
+                updateProgressUI();
+              }
+              break;
+            case 'detail':
+              addDetailedProgressMessage(data.message);
+              if (typeof data.progress === "number" && data.progress > updateState.progress) {
                 updateState.progress = data.progress;
                 updateProgressUI();
               }
@@ -9503,6 +9455,9 @@ async function runAnalysisScript() {
             case 'success':
               addUpdateLogMessage(data.message, "success");
               break;
+            case 'detail':
+              addDetailedProgressMessage(data.message);
+              break;
             case 'error':
               addUpdateLogMessage(data.message, "error");
               break;
@@ -9549,9 +9504,15 @@ function closeUpdateModal() {
   updateState.currentStep = 0;
   updateState.progress = 0;
   
-  // Clear log
+  // Clear logs
   const logContent = $("update-log-content");
-  logContent.innerHTML = "";
+  if (logContent) {
+    logContent.innerHTML = "";
+  }
+  const detailContent = $("update-detailed-content");
+  if (detailContent) {
+    detailContent.innerHTML = "";
+  }
   
   // Hide actions
   const actions = $("update-actions");

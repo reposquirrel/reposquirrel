@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
 from collections import defaultdict
+import importlib
+from typing import Optional
 
 CLOC_EXCLUDE_DIRS = ".git,node_modules,.venv,__pycache__,vendor,target,build,dist"
 
@@ -86,11 +88,17 @@ def parse_args() -> argparse.Namespace:
         help="Enable parallel processing for improved performance",
     )
     parser.add_argument(
-        "--max-workers",
-        dest="max_workers",
+        "--cpu-count",
+        dest="cpu_count",
         type=int,
         default=None,
-        help="Maximum number of parallel workers (default: auto-detect based on CPU cores)",
+        help="Number of CPU workers to base parallelism on (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        dest="cpu_count",
+        type=int,
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -196,7 +204,7 @@ def discover_repo_candidates(repos_root: str, output_root: str, services_config:
     return sorted(repo_names)
 
 
-def generate_cloc_cache(repos_root: str, output_root: str, services_file: str) -> None:
+def generate_cloc_cache(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
     logger.info("\n===========================================")
     logger.info("Generating repo/service CLOC cache")
     logger.info("===========================================")
@@ -212,12 +220,20 @@ def generate_cloc_cache(repos_root: str, output_root: str, services_file: str) -
             json.dump({}, f)
         return
 
-    cache = {}
-    for repo_name in repo_candidates:
+    if max_parallel_workers is not None and max_parallel_workers > 0:
+        worker_count = max_parallel_workers
+    else:
+        worker_count = min(multiprocessing.cpu_count(), max(1, len(repo_candidates)))
+    if worker_count > 1:
+        logger.info(f"Processing {len(repo_candidates)} repositories in parallel (CPU workers={worker_count})")
+    else:
+        logger.info("Processing repositories sequentially")
+
+    def process_repo(repo_name: str):
         repo_path = os.path.join(repos_root, repo_name)
         if not os.path.isdir(repo_path):
             logger.info(f"Skipping repo '{repo_name}' (path not found)")
-            continue
+            return repo_name, None
         repo_lang = run_cloc([repo_path]) or {}
         service_langs = {}
         allocated = defaultdict(int)
@@ -243,15 +259,64 @@ def generate_cloc_cache(repos_root: str, output_root: str, services_file: str) -
                 remainder_val = total - allocated.get(lang, 0)
                 if remainder_val > 0:
                     remainder[lang] = remainder_val
-        cache[repo_name] = {
+        return repo_name, {
             "repo": repo_lang,
             "services": service_langs,
             "remainder": remainder,
         }
 
+    cache = {}
+    if worker_count > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(process_repo, repo): repo for repo in repo_candidates}
+            for future in as_completed(future_map):
+                repo_name = future_map[future]
+                try:
+                    name, data = future.result()
+                    if data is not None:
+                        cache[name] = data
+                except Exception as exc:
+                    logger.info(f"Warning: Failed to process repo '{repo_name}': {exc}")
+    else:
+        for repo_name in repo_candidates:
+            _, data = process_repo(repo_name)
+            if data is not None:
+                cache[repo_name] = data
+
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, sort_keys=True)
     logger.info(f"CLOC cache written to {cache_path} ({len(cache)} repos)")
+
+
+def refresh_badge_cache_via_server() -> None:
+    """Refresh badge cache by reusing dashboard_server logic."""
+    try:
+        dashboard_server = importlib.import_module("dashboard_server")
+    except Exception as exc:
+        logger.info(f"Warning: Unable to import dashboard_server for badge cache refresh: {exc}")
+        return
+
+    refresh_func = getattr(dashboard_server, "refresh_badge_cache", None)
+    if not callable(refresh_func):
+        logger.info("Warning: dashboard_server.refresh_badge_cache is unavailable; skipping badge cache refresh")
+        return
+
+    logger.info("\n===========================================")
+    logger.info("Refreshing developer badge cache")
+    logger.info("===========================================")
+    try:
+        data = refresh_func()
+        if data and data.get("summary"):
+            summary = data["summary"]
+            logger.info(
+                "Badge cache updated: %s users with badges, %s total badges",
+                summary.get("users_with_badges", 0),
+                summary.get("total_badges", 0),
+            )
+        else:
+            logger.info("Badge cache refresh completed but produced no data. Ensure blame data exists.")
+    except Exception as exc:
+        logger.info(f"Warning: Exception while refreshing badge cache: {exc}")
 
 
 def process_month_worker(month_data: dict) -> tuple[int, bool]:
@@ -351,7 +416,7 @@ def main() -> None:
     alias_file = args.alias_file
     skip_blame = args.skip_blame
     parallel = args.parallel
-    max_workers = args.max_workers
+    cpu_count = args.cpu_count
 
     if year < 1:
         logger.info("ERROR: year must be a positive integer")
@@ -378,13 +443,13 @@ def main() -> None:
         )
 
     # Determine number of workers
-    if max_workers is None:
-        # Use a reasonable default: min of available CPU cores and number of months to process
+    if cpu_count is None or cpu_count <= 0:
         available_cores = multiprocessing.cpu_count()
         months_to_process = last_month - first_month + 1
-        # Increase cap to 6 for systems with more cores, as blame analysis is often I/O bound
-        worker_cap = 6 if available_cores >= 8 else 4
+        worker_cap = 8 if available_cores >= 8 else max(2, available_cores)
         max_workers = min(available_cores, months_to_process, worker_cap)
+    else:
+        max_workers = min(cpu_count, last_month - first_month + 1)
 
     logger.info("Master yearly analysis")
     logger.info("----------------------")
@@ -396,7 +461,7 @@ def main() -> None:
     logger.info(f"Alias       : {alias_file}")
     logger.info(f"Ignore      : {ignore_file}")
     if parallel:
-        logger.info(f"Parallel    : Enabled (max workers: {max_workers})")
+        logger.info(f"Parallel    : Enabled (CPU workers: {max_workers})")
     else:
         logger.info(f"Parallel    : Disabled (sequential processing)")
 
@@ -566,11 +631,11 @@ def main() -> None:
     logger.info("\n===========================================")
     logger.info("Generating language statistics for subsystems")
     logger.info("===========================================")
-    generate_subsystem_language_stats(repos_root, output_root, services_file)
+    generate_subsystem_language_stats(repos_root, output_root, services_file, max_parallel_workers=max_workers)
 
     # Precompute LOC evolution for all subsystems (monthly code lines per year)
     try:
-        precompute_loc_evolution(year, repos_root, services_file, output_root)
+        precompute_loc_evolution(year, repos_root, services_file, output_root, max_parallel_workers=max_workers)
         logger.info("Precomputed LOC evolution for subsystems")
     except Exception as e:
         logger.info(f"Warning: LOC evolution precompute failed: {e}")
@@ -602,6 +667,7 @@ def main() -> None:
             blame_cmd,
             desc="blame.py (full history)",
         )
+        refresh_badge_cache_via_server()
     else:
         logger.info("\n===========================================")
         logger.info("Skipping blame.py (--skip-blame specified)")
@@ -612,7 +678,7 @@ def main() -> None:
         logger.info("Note: Ownership/blame analysis was skipped. Run without --skip-blame for complete analysis.")
 
     try:
-        generate_cloc_cache(repos_root, output_root, services_file)
+        generate_cloc_cache(repos_root, output_root, services_file, max_parallel_workers=max_workers)
     except Exception as exc:
         logger.info(f"Warning: Failed to generate CLOC cache: {exc}")
     
@@ -1543,7 +1609,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
             logger.info(f"  Created yearly summary for team: {team_name} ({monthly_files_found} months)")
 
 
-def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str) -> None:
+def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
     """Generate language statistics for each subsystem using cloc."""
     import json
     import subprocess
@@ -1609,49 +1675,69 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                             subsystem_repos[subsystem_name] = []
                         subsystem_repos[subsystem_name].append((repo_name, [""]))  # Empty path = entire repo
     
-    for subsystem_name, repo_paths in subsystem_repos.items():
-        logger.info(f"  Processing subsystem: {subsystem_name}")
-        
-        # Create subsystem stats directory if it doesn't exist
-        subsystem_dir = os.path.join(subsystems_stats_root, subsystem_name)
-        os.makedirs(subsystem_dir, exist_ok=True)
-        
-        # Collect all paths for this subsystem
-        all_paths = []
-        for repo_name, service_paths in repo_paths:
-            repo_path = os.path.join(repos_root, repo_name)
-            if not os.path.exists(repo_path):
-                logger.info(f"    Repository not found: {repo_path}, skipping...")
-                continue
-            
-            for service_path in service_paths:
-                if service_path == "":
-                    # Empty path means entire repo
-                    all_paths.append(repo_path)
-                else:
-                    # Specific path within repo
-                    full_path = os.path.join(repo_path, service_path.rstrip("/"))
-                    if os.path.exists(full_path):
-                        all_paths.append(full_path)
-        
-        if not all_paths:
-            logger.info(f"    No valid paths found for subsystem {subsystem_name}, skipping...")
-            continue
-        
-        # Run cloc on all paths for this subsystem
+    subsystem_items = sorted(subsystem_repos.items())
+    if not subsystem_items:
+        logger.info("  No subsystems discovered for language statistics.")
+        return
+    
+    if max_parallel_workers is not None and max_parallel_workers > 0:
+        max_workers = max_parallel_workers
+    else:
+        max_workers = max(1, multiprocessing.cpu_count())
+    use_parallel = len(subsystem_items) > 1 and max_workers > 1
+    if use_parallel:
+        logger.info(f"  Processing {len(subsystem_items)} subsystems in parallel (CPU workers: {max_workers})")
+    else:
+        logger.info("  Processing subsystems sequentially")
+    
+    def process_subsystem(subsystem_name, repo_paths):
         try:
+            logger.info(f"  Processing subsystem: {subsystem_name}")
+            subsystem_dir = os.path.join(subsystems_stats_root, subsystem_name)
+            os.makedirs(subsystem_dir, exist_ok=True)
+            all_paths = []
+            for repo_name, service_paths in repo_paths:
+                repo_path = os.path.join(repos_root, repo_name)
+                if not os.path.exists(repo_path):
+                    logger.info(f"    Repository not found: {repo_path}, skipping...")
+                    continue
+                for service_path in service_paths:
+                    if service_path == "":
+                        all_paths.append(repo_path)
+                    else:
+                        full_path = os.path.join(repo_path, service_path.rstrip("/"))
+                        if os.path.exists(full_path):
+                            all_paths.append(full_path)
+            if not all_paths:
+                logger.info(f"    No valid paths found for subsystem {subsystem_name}, skipping...")
+                return False
             cloc_result = run_cloc_for_paths(all_paths)
             if cloc_result:
-                # Save language stats file
                 languages_file = os.path.join(subsystem_dir, "languages.json")
                 with open(languages_file, "w", encoding="utf-8") as f:
                     json.dump(cloc_result, f, indent=2)
                 logger.info(f"    Generated language stats: {languages_file}")
-            else:
-                logger.info(f"    No language statistics generated for {subsystem_name}")
+                return True
+            logger.info(f"    No language statistics generated for {subsystem_name}")
+            return False
         except Exception as e:
             logger.info(f"    Error generating language stats for {subsystem_name}: {e}")
-            continue
+            return False
+    
+    if use_parallel:
+        futures = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for subsystem_name, repo_paths in subsystem_items:
+                futures[executor.submit(process_subsystem, subsystem_name, repo_paths)] = subsystem_name
+            for future in as_completed(futures):
+                subsystem_name = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.info(f"    Unexpected error for subsystem {subsystem_name}: {exc}")
+    else:
+        for subsystem_name, repo_paths in subsystem_items:
+            process_subsystem(subsystem_name, repo_paths)
 
 
 def run_cloc_for_paths(paths: list) -> dict:
@@ -1739,7 +1825,7 @@ def run_cloc_for_paths(paths: list) -> dict:
         except OSError:
             pass
 
-def precompute_loc_evolution(year: int, repos_root: str, services_file: str, output_root: str) -> None:
+def precompute_loc_evolution(year: int, repos_root: str, services_file: str, output_root: str, max_parallel_workers: Optional[int] = None) -> None:
     """
     Precompute monthly LOC evolution for all subsystems and persist to
     stats/subsystems/<name>/monthly/<year>.json.
@@ -1803,215 +1889,252 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 # Do not overwrite explicit mapping from services.json
                 subsystem_repos.setdefault(subsystem_name, {"repo": repo_key, "paths": [""]})
 
-    # Compute monthly series for each subsystem
-    for subsystem_name, info in subsystem_repos.items():
-        repo_key = info.get("repo")
-        paths = info.get("paths") or [""]
+    subsystem_items = sorted(subsystem_repos.items())
+    if not subsystem_items:
+        logger.info("[loc-precompute] No subsystems discovered. Skipping LOC evolution precompute.")
+        return
 
+    prepared_subsystems = []
+    for subsystem_name, info in subsystem_items:
+        repo_key = info.get("repo")
         repo_path = os.path.join(repos_root_abs, repo_key) if repo_key else None
         if not repo_path or not os.path.isdir(repo_path):
             logger.info("[loc-precompute] Skipping %s: repo %s not found (path=%s)",
                         subsystem_name, repo_key, repo_path)
             continue
+        paths = info.get("paths") or [""]
+        filtered_paths = tuple(p for p in paths if p)
+        prepared_subsystems.append((subsystem_name, repo_key, repo_path, filtered_paths))
 
+    if not prepared_subsystems:
+        logger.info("[loc-precompute] No valid subsystems to process after repository checks.")
+        return
+
+    month_labels = [f"{year:04d}-{month:02d}" for month in range(1, 13)]
+    series_map: dict[str, dict[str, dict]] = {
+        subsystem_name: {
+            label: {"month": label, "code_lines": 0, "files": 0} for label in month_labels
+        }
+        for subsystem_name, _, _, _ in prepared_subsystems
+    }
+
+    tasks = []
+    for subsystem_name, repo_key, repo_path, filtered_paths in prepared_subsystems:
         logger.info("[loc-precompute] %s (%s)", subsystem_name, repo_key)
-        series: list[dict] = []
-
-        filtered_paths = [p for p in paths if p]
-
         for month in range(1, 13):
-            since = f"{year:04d}-{month:02d}-01"
-            if month == 12:
-                until = f"{year + 1:04d}-01-01"
-            else:
-                until = f"{year:04d}-{month + 1:02d}-01"
+            tasks.append((subsystem_name, repo_key, repo_path, filtered_paths, month))
 
-            month_label = f"{year:04d}-{month:02d}"
+    if max_parallel_workers is not None and max_parallel_workers > 0:
+        max_workers = max_parallel_workers
+    else:
+        max_workers = max(1, multiprocessing.cpu_count())
 
+    logger.info(
+        "[loc-precompute] Processing %s subsystem-month combinations (CPU workers=%s)",
+        len(tasks),
+        max_workers,
+    )
+
+    def process_month_task(subsystem_name, repo_key, repo_path, filtered_paths, month):
+        filtered_list = list(filtered_paths)
+        since = f"{year:04d}-{month:02d}-01"
+        until = f"{year + 1:04d}-01-01" if month == 12 else f"{year:04d}-{month + 1:02d}-01"
+        month_label = f"{year:04d}-{month:02d}"
+
+        try:
+            rev_list_cmd = [
+                "git", "-C", repo_path, "rev-list",
+                f"--since={since}", f"--until={until}", "--reverse", "HEAD",
+            ]
+            if filtered_list:
+                rev_list_cmd.append("--")
+                rev_list_cmd.extend(filtered_list)
+
+            rl = subprocess.run(
+                rev_list_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            if rl.returncode != 0:
+                logger.warning(
+                    "[loc-precompute] rev-list failed for %s (%s) %s..%s: rc=%s stderr=%s",
+                    subsystem_name,
+                    repo_key,
+                    since,
+                    until,
+                    rl.returncode,
+                    (rl.stderr or "").strip(),
+                )
+                return subsystem_name, month_label, 0, 0
+
+            revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
+            if not revs:
+                logger.info(
+                    "[loc-precompute] No commits for %s in %s..%s",
+                    subsystem_name,
+                    since,
+                    until,
+                )
+                return subsystem_name, month_label, 0, 0
+
+            rev = revs[0]
+
+            if filtered_list:
+                ls_cmd = ["git", "-C", repo_path, "ls-tree", "--name-only", rev, "--"]
+                ls_cmd.extend(filtered_list)
+                ls = subprocess.run(
+                    ls_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if ls.returncode != 0:
+                    logger.warning(
+                        "[loc-precompute] ls-tree failed for %s at %s: rc=%s stderr=%s",
+                        repo_key,
+                        rev,
+                        ls.returncode,
+                        (ls.stderr or "").strip(),
+                    )
+                    return subsystem_name, month_label, 0, 0
+
+                present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
+                if not present_files:
+                    logger.info(
+                        "[loc-precompute] No files for %s at %s in paths %s",
+                        subsystem_name,
+                        rev,
+                        filtered_list,
+                    )
+                    return subsystem_name, month_label, 0, 0
+
+            tmpdir = tempfile.mkdtemp(prefix="loc-precompute-")
             try:
-                # 1) Find first commit in the month affecting these paths
-                rev_list_cmd = [
-                    "git", "-C", repo_path, "rev-list",
-                    f"--since={since}", f"--until={until}", "--reverse", "HEAD",
-                ]
-                if filtered_paths:
-                    rev_list_cmd.append("--")
-                    rev_list_cmd.extend(filtered_paths)
+                tar_path = os.path.join(tmpdir, "snapshot.tar")
+                archive_cmd = ["git", "-C", repo_path, "archive", "--format=tar", rev]
+                if filtered_list:
+                    archive_cmd.extend(filtered_list)
 
-                rl = subprocess.run(
-                    rev_list_cmd,
+                ar = subprocess.run(
+                    archive_cmd,
+                    capture_output=True,
+                    text=False,
+                    check=False,
+                )
+
+                if ar.returncode != 0 or not ar.stdout:
+                    logger.warning(
+                        "[loc-precompute] archive failed for %s %s: rc=%s",
+                        repo_key,
+                        rev,
+                        ar.returncode,
+                    )
+                    return subsystem_name, month_label, 0, 0
+
+                with open(tar_path, "wb") as tf:
+                    tf.write(ar.stdout)
+
+                with tarfile.open(tar_path, "r") as tar:
+                    tar.extractall(path=tmpdir)
+
+                cloc_cmd = [
+                    "cloc",
+                    "--json",
+                    tmpdir,
+                    "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
+                ]
+                cl = subprocess.run(
+                    cloc_cmd,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
 
-                if rl.returncode != 0:
+                if cl.returncode != 0 or not cl.stdout.strip():
                     logger.warning(
-                        "[loc-precompute] rev-list failed for %s (%s) %s..%s: rc=%s stderr=%s",
+                        "[loc-precompute] cloc failed for %s %s: rc=%s",
                         subsystem_name,
-                        repo_key,
-                        since,
-                        until,
-                        rl.returncode,
-                        (rl.stderr or "").strip(),
+                        rev,
+                        cl.returncode,
                     )
-                    series.append({"month": month_label, "code_lines": 0, "files": 0})
-                    continue
+                    return subsystem_name, month_label, 0, 0
 
-                revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
-                if not revs:
-                    logger.info(
-                        "[loc-precompute] No commits for %s in %s..%s",
-                        subsystem_name,
-                        since,
-                        until,
-                    )
-                    series.append({"month": month_label, "code_lines": 0, "files": 0})
-                    continue
-
-                rev = revs[0]
-
-                # 2) For path-scoped subsystems, ensure there are files at that commit
-                if filtered_paths:
-                    ls_cmd = ["git", "-C", repo_path, "ls-tree", "--name-only", rev, "--"]
-                    ls_cmd.extend(filtered_paths)
-
-                    ls = subprocess.run(
-                        ls_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-
-                    if ls.returncode != 0:
-                        logger.warning(
-                            "[loc-precompute] ls-tree failed for %s at %s: rc=%s stderr=%s",
-                            repo_key,
-                            rev,
-                            ls.returncode,
-                            (ls.stderr or "").strip(),
-                        )
-                        series.append({"month": month_label, "code_lines": 0, "files": 0})
-                        continue
-
-                    present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
-                    if not present_files:
-                        logger.info(
-                            "[loc-precompute] No files for %s at %s in paths %s",
-                            subsystem_name,
-                            rev,
-                            filtered_paths,
-                        )
-                        series.append({"month": month_label, "code_lines": 0, "files": 0})
-                        continue
-
-                # 3) Create archive of repo@rev into a temp dir, then run cloc
-                tmpdir = tempfile.mkdtemp(prefix="loc-precompute-")
                 try:
-                    tar_path = os.path.join(tmpdir, "snapshot.tar")
-
-                    archive_cmd = ["git", "-C", repo_path, "archive", "--format=tar", rev]
-                    if filtered_paths:
-                        archive_cmd.extend(filtered_paths)
-
-                    ar = subprocess.run(
-                        archive_cmd,
-                        capture_output=True,
-                        text=False,
-                        check=False,
-                    )
-
-                    if ar.returncode != 0 or not ar.stdout:
-                        logger.warning(
-                            "[loc-precompute] archive failed for %s %s: rc=%s",
-                            repo_key,
-                            rev,
-                            ar.returncode,
-                        )
-                        series.append({"month": month_label, "code_lines": 0, "files": 0})
-                        continue
-
-                    with open(tar_path, "wb") as tf:
-                        tf.write(ar.stdout)
-
-                    with tarfile.open(tar_path, "r") as tar:
-                        tar.extractall(path=tmpdir)
-
-                    cloc_cmd = [
-                        "cloc",
-                        "--json",
-                        tmpdir,
-                        "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
-                    ]
-                    cl = subprocess.run(
-                        cloc_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-
-                    if cl.returncode != 0 or not cl.stdout.strip():
-                        logger.warning(
-                            "[loc-precompute] cloc failed for %s %s: rc=%s",
-                            subsystem_name,
-                            rev,
-                            cl.returncode,
-                        )
-                        series.append({"month": month_label, "code_lines": 0, "files": 0})
-                        continue
-
-                    try:
-                        cloc_data = json.loads(cl.stdout)
-                    except json.JSONDecodeError as e:
-                        logger.warning(
-                            "[loc-precompute] Failed to parse cloc JSON for %s %s: %s",
-                            subsystem_name,
-                            rev,
-                            e,
-                        )
-                        series.append({"month": month_label, "code_lines": 0, "files": 0})
-                        continue
-
-                    total_code = 0
-                    total_files = 0
-                    for lang_name, lang_info in cloc_data.items():
-                        if lang_name in ("header", "SUM"):
-                            continue
-                        if isinstance(lang_info, dict):
-                            total_code += lang_info.get("code", 0)
-                            total_files += lang_info.get("nFiles", 0)
-
-                    logger.info(
-                        "[loc-precompute] %s %s: code_lines=%s files=%s",
+                    cloc_data = json.loads(cl.stdout)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "[loc-precompute] Failed to parse cloc JSON for %s %s: %s",
                         subsystem_name,
-                        month_label,
-                        total_code,
-                        total_files,
+                        rev,
+                        e,
                     )
-                    series.append(
-                        {"month": month_label, "code_lines": total_code, "files": total_files}
-                    )
+                    return subsystem_name, month_label, 0, 0
 
-                finally:
-                    shutil.rmtree(tmpdir, ignore_errors=True)
+                total_code = 0
+                total_files = 0
+                for lang_name, lang_info in cloc_data.items():
+                    if lang_name in ("header", "SUM"):
+                        continue
+                    if isinstance(lang_info, dict):
+                        total_code += lang_info.get("code", 0)
+                        total_files += lang_info.get("nFiles", 0)
 
-            except Exception as e:
-                # Never let a single month blow up the whole precompute
-                logger.warning(
-                    "[loc-precompute] Error computing LOC for %s %s: %s",
+                logger.info(
+                    "[loc-precompute] %s %s: code_lines=%s files=%s",
                     subsystem_name,
                     month_label,
-                    e,
+                    total_code,
+                    total_files,
                 )
-                series.append({"month": month_label, "code_lines": 0, "files": 0})
+                return subsystem_name, month_label, total_code, total_files
 
-        # Persist series for this subsystem
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        except Exception as e:
+            logger.warning(
+                "[loc-precompute] Error computing LOC for %s %s: %s",
+                subsystem_name,
+                month_label,
+                e,
+            )
+            return subsystem_name, month_label, 0, 0
+
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(process_month_task, *task): task[:2] for task in tasks
+            }
+            for future in as_completed(future_map):
+                try:
+                    subsystem_name, month_label, code_lines, total_files = future.result()
+                    series_map[subsystem_name][month_label] = {
+                        "month": month_label,
+                        "code_lines": code_lines,
+                        "files": total_files,
+                    }
+                except Exception as exc:
+                    subsystem_name, _ = future_map[future]
+                    logger.warning("[loc-precompute] Unexpected failure for %s: %s", subsystem_name, exc)
+    else:
+        for task in tasks:
+            subsystem_name, month_label, code_lines, total_files = process_month_task(*task)
+            series_map[subsystem_name][month_label] = {
+                "month": month_label,
+                "code_lines": code_lines,
+                "files": total_files,
+            }
+
+    for subsystem_name, _, _, _ in prepared_subsystems:
         out_dir = os.path.join(subsystems_root, subsystem_name, "monthly")
         os.makedirs(out_dir, exist_ok=True)
         out_file = os.path.join(out_dir, f"{year:04d}.json")
+        ordered_series = [series_map[subsystem_name][label] for label in month_labels]
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(
-                {"generated_at": datetime.utcnow().isoformat() + "Z", "series": series},
+                {"generated_at": datetime.utcnow().isoformat() + "Z", "series": ordered_series},
                 f,
                 indent=2,
             )

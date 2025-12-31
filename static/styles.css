@@ -2714,6 +2714,25 @@ body {
   background: #020617;
 }
 
+.detailed-log-content {
+  height: 220px;
+  background: #010a1c;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #cbd5f5;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+.detailed-log-content .detail-line {
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.detailed-log-content .detail-line:last-child {
+  border-bottom: none;
+}
+
 .log-message {
   padding: 4px 8px;
   margin-bottom: 2px;

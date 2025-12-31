@@ -7,8 +7,11 @@ import json
 import re
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import multiprocessing
+import time
+
+FILE_PARALLEL_HEARTBEAT_SECONDS = 20
 
 # -----------------------------
 # Argument parsing
@@ -60,11 +63,17 @@ def parse_args() -> argparse.Namespace:
         help="Enable parallel processing of repositories for improved performance",
     )
     parser.add_argument(
-        "--max-workers",
-        dest="max_workers",
+        "--cpu-count",
+        dest="cpu_count",
         type=int,
         default=None,
-        help="Maximum number of parallel workers (default: auto-detect based on CPU cores)",
+        help="Number of CPU workers to base file-level parallelism on (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        dest="cpu_count",
+        type=int,
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -408,6 +417,68 @@ def ensure_repo_dev_service_entry(dev: Dict[str, Any], service_name: str) -> Dic
     return services[service_name]
 
 
+def create_empty_repo_stats(repo_rel_path: str) -> Dict[str, Any]:
+    return {
+        "repo": repo_rel_path,
+        "total_lines": 0,
+        "services": {},
+        "developers": {},
+    }
+
+
+def merge_repo_stats(target: Dict[str, Any], addition: Dict[str, Any]) -> None:
+    if not addition:
+        return
+
+    target["total_lines"] = target.get("total_lines", 0) + addition.get("total_lines", 0)
+
+    target_services = target.setdefault("services", {})
+    for svc_name, svc_data in addition.get("services", {}).items():
+        merged_svc = target_services.setdefault(
+            svc_name,
+            {"total_lines": 0, "developers": {}},
+        )
+        merged_svc["total_lines"] = merged_svc.get("total_lines", 0) + svc_data.get("total_lines", 0)
+
+        merged_devs = merged_svc.setdefault("developers", {})
+        for slug, dev_data in svc_data.get("developers", {}).items():
+            merged_dev = merged_devs.setdefault(
+                slug,
+                {
+                    "slug": slug,
+                    "display_name": dev_data.get("display_name"),
+                    "emails": set(),
+                    "lines": 0,
+                },
+            )
+            if not merged_dev.get("display_name"):
+                merged_dev["display_name"] = dev_data.get("display_name")
+            merged_dev["lines"] += dev_data.get("lines", 0)
+            merged_dev.setdefault("emails", set()).update(dev_data.get("emails", set()))
+
+    target_devs = target.setdefault("developers", {})
+    for slug, dev_data in addition.get("developers", {}).items():
+        merged_dev = target_devs.setdefault(
+            slug,
+            {
+                "slug": slug,
+                "display_name": dev_data.get("display_name"),
+                "emails": set(),
+                "lines": 0,
+                "services": {},
+            },
+        )
+        if not merged_dev.get("display_name"):
+            merged_dev["display_name"] = dev_data.get("display_name")
+        merged_dev["lines"] += dev_data.get("lines", 0)
+        merged_dev.setdefault("emails", set()).update(dev_data.get("emails", set()))
+
+        merged_services = merged_dev.setdefault("services", {})
+        for svc_name, svc_stats in dev_data.get("services", {}).items():
+            svc_entry = merged_services.setdefault(svc_name, {"lines": 0})
+            svc_entry["lines"] += svc_stats.get("lines", 0)
+
+
 def pick_top_developer_by_lines(devs: Dict[str, Any], total_lines: int) -> Optional[Dict[str, Any]]:
     """
     From a developers dict, pick the top dev by 'lines'.
@@ -626,12 +697,12 @@ def analyze_repo(
     alias_map: Dict[str, str],
     services_config: Dict[str, Dict[str, list]],
     ignored_slugs: Set[str],
+    file_workers: int = 1,
 ) -> Optional[Dict[str, Any]]:
     """
     Analyze one repo using git blame on all tracked files.
-
-    Returns:
-      repo_data dict or None if nothing was processed.
+    When file_workers > 1, files are processed in parallel batches and the
+    intermediate statistics are merged together.
     """
     if not os.path.isdir(repo_path):
         print(f"    ! Repo path does not exist: {repo_path}")
@@ -642,84 +713,80 @@ def analyze_repo(
         print(f"    ! Not a git repo (no .git directory): {repo_path}")
         return None
 
-    repo_data: Dict[str, Any] = {
-        "repo": repo_rel_path,
-        "total_lines": 0,
-        "services": {},
-        "developers": {},
-    }
-
     files = get_tracked_files(repo_path)
     if not files:
         return None
 
     total_files = len(files)
     print(f"     Analyzing {total_files} files...")
-    
-    for i, f in enumerate(files):
-        if i > 0 and i % 100 == 0:  # Progress every 100 files
-            print(f"     Progress: {i}/{total_files} files ({i/total_files*100:.1f}%)")
-            sys.stdout.flush()
-            
-        analyze_file_blame(
-            repo_rel_path,
-            repo_path,
-            f,
-            repo_data,
-            alias_map,
-            services_config,
-            ignored_slugs,
-        )
+
+    repo_data = create_empty_repo_stats(repo_rel_path)
+    file_workers = max(1, min(file_workers, total_files))
+
+    if file_workers <= 1 or total_files < 20:
+        for i, f in enumerate(files, 1):
+            analyze_file_blame(
+                repo_rel_path,
+                repo_path,
+                f,
+                repo_data,
+                alias_map,
+                services_config,
+                ignored_slugs,
+            )
+            if i % 100 == 0 or i == total_files:
+                print(f"     Progress: {i}/{total_files} files ({i/total_files*100:.1f}%)")
+                sys.stdout.flush()
+    else:
+        print(f"     ⚙️  File-level parallelism enabled ({file_workers} workers)")
+        chunk_size = max(10, total_files // (file_workers * 4) or 1)
+
+        def process_batch(batch_files: List[str]) -> Dict[str, Any]:
+            batch_data = create_empty_repo_stats(repo_rel_path)
+            for path in batch_files:
+                analyze_file_blame(
+                    repo_rel_path,
+                    repo_path,
+                    path,
+                    batch_data,
+                    alias_map,
+                    services_config,
+                    ignored_slugs,
+                )
+            return batch_data
+
+        batches = [files[i : i + chunk_size] for i in range(0, total_files, chunk_size)]
+        processed = 0
+        with ThreadPoolExecutor(max_workers=file_workers) as executor:
+            future_to_size = {
+                executor.submit(process_batch, batch): len(batch)
+                for batch in batches
+            }
+            pending = set(future_to_size.keys())
+            while pending:
+                done, pending = wait(pending, timeout=FILE_PARALLEL_HEARTBEAT_SECONDS, return_when=FIRST_COMPLETED)
+                if not done:
+                    print(f"     ... still processing ({processed}/{total_files} files complete)")
+                    sys.stdout.flush()
+                    continue
+                for future in done:
+                    batch_size = future_to_size.pop(future, 0)
+                    try:
+                        batch_result = future.result()
+                    except Exception as exc:
+                        print(f"     ⚠️  Batch failed: {exc}")
+                        batch_result = None
+                    if batch_result:
+                        merge_repo_stats(repo_data, batch_result)
+                    processed += batch_size
+                    if processed % 100 == 0 or processed == total_files:
+                        print(f"     Progress: {processed}/{total_files} files ({processed/total_files*100:.1f}%)")
+                        sys.stdout.flush()
 
     if repo_data.get("total_lines", 0) == 0:
         return None
 
     return repo_data
-
-
-# -----------------------------
-# Worker function for parallel processing
-# -----------------------------
-
-def blame_repo_worker(repo_data):
-    """Worker function for processing a single repository in parallel mode"""
-    repo_rel = repo_data["repo_rel"]
-    repo_path = repo_data["repo_path"]
-    alias_map = repo_data["alias_map"]
-    services_config = repo_data["services_config"]
-    ignored_slugs = repo_data["ignored_slugs"]
-    output_root = repo_data["output_root"]
-    repos_root = repo_data["repos_root"]
-    
-    repo_result = analyze_repo(
-        repo_rel,
-        repo_path,
-        alias_map,
-        services_config,
-        ignored_slugs,
-    )
-    if not repo_result:
-        return (repo_rel, None, "no blame data")
-
-    finalize_repo_data(repo_result)
-
-    out_folder = ensure_repo_blame_output_folder(output_root, repo_rel)
-    out_path = os.path.join(out_folder, "blame.json")
-
-    summary = {
-        "repo": repo_result["repo"],
-        "services": repo_result["services"],
-        "developers": repo_result["developers"],
-        "top_developer": repo_result.get("top_developer"),
-        "total_lines": repo_result.get("total_lines", 0),
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "repos_root": os.path.abspath(repos_root),
-    }
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-
-    return (repo_rel, out_path, "success")
 
 
 # -----------------------------
@@ -736,7 +803,7 @@ def main() -> None:
     ignore_file = args.ignore_file
     alias_file = args.alias_file
     parallel = args.parallel
-    max_workers = args.max_workers
+    cpu_count = args.cpu_count
 
     print("Analyzing LOCAL git repos for blame-based ownership...")
     print(f"Repos root: {repos_root}")
@@ -746,17 +813,16 @@ def main() -> None:
         print(f"No git repos found under '{repos_root}'. Nothing to do.")
         sys.exit(0)
 
-    # Determine number of workers
-    if max_workers is None:
-        available_cores = multiprocessing.cpu_count()
-        # Increase cap to 6 for systems with more cores, as blame analysis is often I/O bound  
-        worker_cap = 6 if available_cores >= 8 else 4
-        max_workers = min(available_cores, len(repo_list), worker_cap)
+    if cpu_count is None or cpu_count <= 0:
+        cpu_count = multiprocessing.cpu_count()
 
     print(f"Discovered {len(repo_list)} repos:")
-    if parallel and len(repo_list) > 1:
-        print(f"🚀 Processing repositories in parallel (max workers: {max_workers})")
+    if parallel:
+        file_workers = max(1, cpu_count) * 4
+        file_workers = min(file_workers, 64)
+        print(f"🚀 Processing repositories sequentially with file-level parallelism (file workers per repo: {file_workers})")
     else:
+        file_workers = 1
         print("📊 Processing repositories sequentially")
 
     alias_map = load_aliases(alias_file)
@@ -774,87 +840,43 @@ def main() -> None:
     repo_list = sorted(repo_list)
     total_repos = len(repo_list)
 
-    if parallel and len(repo_list) > 1:
-        # Parallel processing
-        # Prepare repo tasks with all necessary data
-        repo_tasks = []
-        for repo_rel in repo_list:
-            repo_path = os.path.join(repos_root, repo_rel)
-            repo_tasks.append({
-                "repo_rel": repo_rel,
-                "repo_path": repo_path,
-                "alias_map": alias_map,
-                "services_config": services_config,
-                "ignored_slugs": ignored_slugs,
-                "output_root": output_root,
-                "repos_root": repos_root
-            })
+    for repo_index, repo_rel in enumerate(repo_list, 1):
+        repo_path = os.path.join(repos_root, repo_rel)
+        print(f"  -> {repo_rel} ({repo_index}/{total_repos})")
+        sys.stdout.flush()
 
-        # Execute repo processing in parallel
-        completed_repos = 0
-        failed_repos = 0
-        
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_repo = {executor.submit(blame_repo_worker, task): task["repo_rel"] for task in repo_tasks}
-            
-            for future in as_completed(future_to_repo):
-                repo_rel = future_to_repo[future]
-                try:
-                    repo_rel, out_path, status = future.result()
-                    completed_repos += 1
-                    print(f"  ✅ {repo_rel} ({completed_repos}/{total_repos})")
-                    if status == "success":
-                        print(f"     -> blame stats written to {out_path}")
-                    elif status == "no blame data":
-                        print(f"     (no blame data)")
-                    sys.stdout.flush()
-                except Exception as e:
-                    failed_repos += 1
-                    print(f"  ❌ {repo_rel} ({completed_repos + failed_repos}/{total_repos}): {e}")
-                    
-        if failed_repos > 0:
-            print(f"\n⚠️  Completed with {failed_repos} failures out of {total_repos} repositories")
-        else:
-            print(f"\n✅ All {completed_repos} repositories processed successfully in parallel!")
-            
-    else:
-        # Sequential processing (original behavior)
-        for repo_index, repo_rel in enumerate(repo_list, 1):
-            repo_path = os.path.join(repos_root, repo_rel)
-            print(f"  -> {repo_rel} ({repo_index}/{total_repos})")
-            sys.stdout.flush()  # Ensure immediate output
-            
-            repo_data = analyze_repo(
-                repo_rel,
-                repo_path,
-                alias_map,
-                services_config,
-                ignored_slugs,
-            )
-            if not repo_data:
-                print("     (no blame data)")
-                continue
+        repo_data = analyze_repo(
+            repo_rel,
+            repo_path,
+            alias_map,
+            services_config,
+            ignored_slugs,
+            file_workers=file_workers,
+        )
+        if not repo_data:
+            print("     (no blame data)")
+            continue
 
-            finalize_repo_data(repo_data)
+        finalize_repo_data(repo_data)
 
-            out_folder = ensure_repo_blame_output_folder(output_root, repo_rel)
-            out_path = os.path.join(out_folder, "blame.json")
+        out_folder = ensure_repo_blame_output_folder(output_root, repo_rel)
+        out_path = os.path.join(out_folder, "blame.json")
 
-            summary = {
-                "repo": repo_data["repo"],
-                "services": repo_data["services"],
-                "developers": repo_data["developers"],
-                "top_developer": repo_data.get("top_developer"),
-                "total_lines": repo_data.get("total_lines", 0),
-                "generated_at": datetime.utcnow().isoformat() + "Z",
-                "repos_root": os.path.abspath(repos_root),
-            }
+        summary = {
+            "repo": repo_data["repo"],
+            "services": repo_data["services"],
+            "developers": repo_data["developers"],
+            "top_developer": repo_data.get("top_developer"),
+            "total_lines": repo_data.get("total_lines", 0),
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "repos_root": os.path.abspath(repos_root),
+        }
 
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(summary, f, indent=2)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
 
-            print(f"     -> blame stats written to {out_path}")
-            sys.stdout.flush()  # Ensure immediate output
+        print(f"     -> blame stats written to {out_path}")
+        sys.stdout.flush()
 
     print("\n=== Done ===")
 
