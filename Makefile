@@ -32,3 +32,7 @@ save:
 	@mkdir -p $(dir $(SAVE_FILE))
 	docker save $(IMAGE):$(TAG) | gzip > $(SAVE_FILE)
 	@echo "Saved image to $(SAVE_FILE)"
+main-to-latest:
+	docker pull ghcr.io/reposquirrel/reposquirrel:main
+	docker tag ghcr.io/reposquirrel/reposquirrel:main ghcr.io/reposquirrel/reposquirrel:latest
+	docker push ghcr.io/reposquirrel/reposquirrel:latest

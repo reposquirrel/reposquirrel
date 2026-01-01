@@ -1,0 +1,10 @@
+services:
+  reposquirrel:
+    image: ghcr.io/reposquirrel/reposquirrel:main
+    ports:
+      - "5000:5000"
+    volumes:
+      - reposquirrel-data:/data
+volumes:
+  reposquirrel-data:
+
