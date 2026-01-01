@@ -237,6 +237,184 @@ function clearMain() {
   state.charts = {};
 }
 
+function formatDateTime(value) {
+  if (!value) return "--";
+  try {
+    const date = new Date(value);
+    if (isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString();
+  } catch (error) {
+    return value;
+  }
+}
+
+async function refreshLastUpdateBanner() {
+  try {
+    const response = await fetch("/api/update/last-run");
+    if (!response.ok) {
+      throw new Error("Failed to fetch last update info");
+    }
+    const data = await response.json();
+    renderLastUpdateBanner(data);
+    renderUpdateSettingsStatus(data);
+  } catch (error) {
+    console.error("Failed to refresh last update info:", error);
+  }
+}
+
+function renderLastUpdateBanner(data) {
+  const textEl = $("last-update-text");
+  const kindEl = $("last-update-kind");
+  const nextEl = $("next-background-run");
+  const statusEl = $("background-status-label");
+  const info = data?.last_update;
+  if (textEl) {
+    if (info?.timestamp) {
+      textEl.textContent = formatDateTime(info.timestamp);
+    } else {
+      textEl.textContent = "Never";
+    }
+  }
+  if (kindEl) {
+    kindEl.textContent = info?.type || "--";
+    kindEl.classList.remove("pill-success", "pill-warning", "pill-error");
+    if (info?.status === "success") {
+      kindEl.classList.add("pill-success");
+    } else if (info?.status === "failed") {
+      kindEl.classList.add("pill-error");
+    }
+  }
+  if (nextEl) {
+    if (data?.background_enabled) {
+      const nextText = data?.next_run ? formatDateTime(data.next_run) : "Scheduling…";
+      nextEl.textContent = `Next background refresh: ${nextText}`;
+    } else {
+      nextEl.textContent = "Background refresh disabled";
+    }
+  }
+  if (statusEl) {
+    const running = !!data?.background_running;
+    const enabled = !!data?.background_enabled;
+    statusEl.classList.remove("active", "error", "idle");
+    if (!enabled) {
+      statusEl.textContent = "Background refresh disabled";
+      statusEl.classList.add("idle");
+    } else if (running) {
+      statusEl.textContent = "Background refresh running";
+      statusEl.classList.add("active");
+    } else {
+      statusEl.textContent = "Idle";
+      statusEl.classList.add("idle");
+    }
+  }
+}
+
+function renderUpdateSettingsStatus(data) {
+  const lastEl = $("background-last-update");
+  const nextEl = $("background-next-run");
+  const statusEl = $("background-current-status");
+  if (lastEl) {
+    const lastInfo = data?.last_update;
+    lastEl.textContent = lastInfo?.timestamp ? `${formatDateTime(lastInfo.timestamp)} (${lastInfo.type || 'manual'})` : 'Never';
+  }
+  if (nextEl) {
+    if (data?.background_enabled) {
+      nextEl.textContent = data?.next_run ? formatDateTime(data.next_run) : 'Scheduling…';
+    } else {
+      nextEl.textContent = 'Background refresh disabled';
+    }
+  }
+  if (statusEl) {
+    statusEl.classList.remove("active", "error", "idle");
+    if (!data?.background_enabled) {
+      statusEl.textContent = 'Disabled';
+      statusEl.classList.add("idle");
+    } else if (data?.background_running) {
+      statusEl.textContent = 'Running';
+      statusEl.classList.add("active");
+    } else {
+      statusEl.textContent = 'Idle';
+      statusEl.classList.add("idle");
+    }
+  }
+}
+
+async function loadUpdateSettings() {
+  try {
+    const response = await fetch("/api/settings/update-config");
+    if (!response.ok) {
+      throw new Error("Failed to load update settings");
+    }
+    const data = await response.json();
+    const enabledToggle = $("background-update-enabled");
+    const intervalInput = $("background-update-interval");
+    if (enabledToggle) {
+      enabledToggle.checked = !!data.background_enabled;
+    }
+    if (intervalInput) {
+      intervalInput.value = data.interval_hours || 24;
+    }
+    renderUpdateSettingsStatus(data);
+  } catch (error) {
+    console.error("Failed to load background update settings:", error);
+  }
+}
+
+async function saveUpdateSettings() {
+  if (READ_ONLY_MODE) {
+    alert("Settings are disabled in read-only mode.");
+    return;
+  }
+  const enabled = $("background-update-enabled")?.checked ?? false;
+  const intervalValue = parseInt($("background-update-interval")?.value || "24", 10);
+  if (Number.isNaN(intervalValue) || intervalValue < 1) {
+    alert("Please enter a valid interval (minimum 1 hour).");
+    return;
+  }
+  try {
+    try {
+      await fetch("/api/update/reset", { method: "POST" });
+    } catch (resetError) {
+      console.warn("Unable to reset update state before saving:", resetError);
+    }
+
+    const response = await fetch("/api/settings/update-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        background_enabled: enabled,
+        interval_hours: intervalValue
+      })
+    });
+    const result = await response.json();
+    if (!response.ok || result.error) {
+      throw new Error(result.error || "Failed to save update settings");
+    }
+    const settingsPayload = result.settings || result;
+    renderUpdateSettingsStatus(settingsPayload);
+    const messageParts = ["Background update settings saved."];
+    if (result.background_started) {
+      messageParts.push("Background refresh started in the background.");
+    }
+    alert(messageParts.join(" "));
+    refreshLastUpdateBanner();
+    scheduleLastUpdateRefresh();
+  } catch (error) {
+    console.error("Failed to save update settings:", error);
+    alert(error.message || "Failed to save update settings");
+  }
+}
+
+let lastUpdateBannerInterval;
+function scheduleLastUpdateRefresh() {
+  if (lastUpdateBannerInterval) {
+    clearInterval(lastUpdateBannerInterval);
+  }
+  lastUpdateBannerInterval = setInterval(refreshLastUpdateBanner, 60000);
+}
+
 function setViewHeader(title, subtitle, pillText) {
   $("view-title").textContent = title;
   $("view-subtitle").textContent = subtitle || "";
@@ -6534,6 +6712,9 @@ document.addEventListener("DOMContentLoaded", () => {
       console.error("Failed to initialize settings:", error);
     }
     
+    refreshLastUpdateBanner();
+    scheduleLastUpdateRefresh();
+    
   } catch (error) {
     console.error("Error during initialization:", error);
   }
@@ -6724,6 +6905,9 @@ function initializeSettings() {
   // Team capacity configuration
   $("add-language-capacity").addEventListener("click", addLanguageCapacity);
   $("save-capacity-config").addEventListener("click", saveCapacityConfig);
+  
+  // Background updates
+  $("save-update-settings").addEventListener("click", saveUpdateSettings);
 
   // Initialize management states
   window.aliasesData = {};
@@ -6754,6 +6938,7 @@ function openSettings(defaultTab = "ignore-users") {
   loadRepositoriesUI();
   loadSubsystemsUI();
   loadTeamResponsibilitiesUI();
+  loadUpdateSettings();
   
   // Add backdrop click prevention
   modal.addEventListener("click", handleModalBackdropClick);
@@ -6872,6 +7057,8 @@ function switchSettingsTab(tabName) {
   // Load data for specific tabs
   if (tabName === "capacity") {
     loadCapacityConfig();
+  } else if (tabName === "updates") {
+    loadUpdateSettings();
   }
 }
 
@@ -9302,6 +9489,7 @@ async function runUpdate() {
                 updateProgressUI();
               }
               eventSource.close();
+              refreshLastUpdateBanner();
               reject(new Error(data.message));
               return;
             case 'complete':
@@ -9309,6 +9497,8 @@ async function runUpdate() {
               updateState.progress = 100;
               updateProgressUI();
               addUpdateLogMessage("🎉 Update process completed successfully!", "success");
+              refreshLastUpdateBanner();
+              scheduleLastUpdateRefresh();
               
               // Show completion actions
               const actions = $("update-actions");

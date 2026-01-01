@@ -7,10 +7,14 @@ import time
 import sys
 import argparse
 import subprocess
+import logging
 import re
 import shlex
 import multiprocessing
-from datetime import datetime, timedelta
+import shutil
+import tempfile
+import copy
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Tuple, Optional, Set
 from collections import defaultdict, Counter
 
@@ -33,6 +37,9 @@ _BADGE_CACHE_MTIME: Optional[float] = None
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Global storage for clone progress
 clone_operations = {}
@@ -64,6 +71,35 @@ def log_update_message(message_dict):
         print(f"Error writing to update log: {e}")
 
 LOG_SNIPPET_CHAR_LIMIT = 1200
+
+
+UPDATE_SETTINGS_FILE = os.path.join(BASE_DIR, "configuration", "update_settings.json")
+DEFAULT_UPDATE_SETTINGS = {
+    "background_enabled": False,
+    "interval_hours": 24,
+    "last_update": None,
+    "last_background_completed_at": None,
+    "last_manual_completed_at": None,
+}
+update_settings_lock = threading.Lock()
+background_scheduler_event = threading.Event()
+background_scheduler_stop_event = threading.Event()
+background_scheduler_thread: Optional[threading.Thread] = None
+background_state = {
+    "running": False,
+    "next_run": None,
+}
+
+background_state_lock = threading.Lock()
+background_cancel_event = threading.Event()
+
+
+def get_background_state_snapshot() -> Dict[str, Any]:
+    with background_state_lock:
+        return {
+            "running": background_state.get("running", False),
+            "next_run": background_state.get("next_run")
+        }
 
 def _format_command(cmd: List[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
@@ -152,6 +188,286 @@ def _run_command_with_live_logs(label: str, cmd: List[str], cwd: Optional[str], 
             reader_thread.join(timeout=1)
 
     return return_code, ''.join(stdout_lines), ''.join(stderr_lines)
+
+
+
+def ensure_update_settings_file() -> None:
+    os.makedirs(os.path.dirname(UPDATE_SETTINGS_FILE), exist_ok=True)
+    if not os.path.exists(UPDATE_SETTINGS_FILE):
+        with open(UPDATE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_UPDATE_SETTINGS, f, indent=2)
+
+
+def load_update_settings() -> Dict[str, Any]:
+    ensure_update_settings_file()
+    with update_settings_lock:
+        try:
+            with open(UPDATE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        merged = copy.deepcopy(DEFAULT_UPDATE_SETTINGS)
+        merged.update(data or {})
+        interval = merged.get('interval_hours', 24)
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError):
+            interval = 24
+        merged['interval_hours'] = max(1, interval)
+        return merged
+
+
+def save_update_settings(settings: Dict[str, Any]) -> None:
+    ensure_update_settings_file()
+    with update_settings_lock:
+        with open(UPDATE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+
+
+def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if value.endswith('Z'):
+            value = value[:-1]
+            dt = datetime.fromisoformat(value)
+            return dt.replace(tzinfo=timezone.utc).astimezone(timezone.utc).replace(tzinfo=None)
+        dt = datetime.fromisoformat(value)
+        return dt.replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def record_last_update(status: str, update_type: str) -> None:
+    try:
+        settings = load_update_settings()
+        now_iso = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        settings['last_update'] = {
+            'timestamp': now_iso,
+            'status': status,
+            'type': update_type,
+        }
+        if update_type == 'background':
+            settings['last_background_completed_at'] = now_iso
+        elif update_type == 'manual':
+            settings['last_manual_completed_at'] = now_iso
+        save_update_settings(settings)
+    finally:
+        schedule_background_check()
+
+
+def schedule_background_check() -> None:
+    background_scheduler_event.set()
+
+
+def calculate_years_to_process() -> List[int]:
+    current_date = datetime.now()
+    start_year = (current_date - timedelta(days=365)).year
+    current_year = current_date.year
+    if start_year == current_year:
+        return [current_year]
+    return [start_year, current_year]
+
+
+def build_low_priority_command(base_cmd: List[str]) -> List[str]:
+    cmd = list(base_cmd)
+    ionice_path = shutil.which('ionice')
+    nice_path = shutil.which('nice')
+    cpulimit_path = shutil.which('cpulimit')
+    if ionice_path:
+        cmd = [ionice_path, '-c', '3'] + cmd
+    if nice_path:
+        cmd = [nice_path, '-n', '19'] + cmd
+    if cpulimit_path:
+        cmd = [cpulimit_path, '-l', '30', '--'] + cmd
+    return cmd
+
+
+def swap_stats_directories(temp_output_root: str) -> None:
+    temp_stats = os.path.join(temp_output_root, 'stats')
+    if not os.path.exists(temp_stats):
+        raise RuntimeError('Temporary stats directory not found after background update')
+    final_stats = os.path.join(BASE_DIR, 'stats')
+    backup_stats = os.path.join(BASE_DIR, 'stats_backup')
+    if os.path.exists(backup_stats):
+        shutil.rmtree(backup_stats, ignore_errors=True)
+    moved_backup = False
+    try:
+        if os.path.exists(final_stats):
+            os.rename(final_stats, backup_stats)
+            moved_backup = True
+        os.rename(temp_stats, final_stats)
+    except Exception:
+        if moved_backup and not os.path.exists(final_stats) and os.path.exists(backup_stats):
+            os.rename(backup_stats, final_stats)
+        raise
+    finally:
+        if os.path.exists(backup_stats):
+            shutil.rmtree(backup_stats, ignore_errors=True)
+
+
+def perform_background_update(reason: str = 'scheduled') -> bool:
+    if app.config.get('READ_ONLY_MODE'):
+        logger.info('Skipping background update in read-only mode')
+        return False
+    if background_cancel_event.is_set():
+        logger.info('Background update cancelled before start')
+        return False
+    logger.info('Starting background update (%s)', reason)
+    if not run_git_pull_all(False):
+        logger.warning('Background update aborted: repository scan failed')
+        return False
+    if background_cancel_event.is_set():
+        logger.info('Background update cancelled after repository validation')
+        return False
+    temp_dir = tempfile.mkdtemp(prefix='background-update-', dir=BASE_DIR)
+    temp_output_root = os.path.join(temp_dir, 'output')
+    os.makedirs(temp_output_root, exist_ok=True)
+    python_exe = sys.executable or 'python3'
+    master_script = os.path.join(BASE_DIR, 'master.py')
+    cpu_workers = max(1, multiprocessing.cpu_count())
+    python_env = os.environ.copy()
+    python_env.setdefault('PYTHONUNBUFFERED', '1')
+    try:
+        years = calculate_years_to_process()
+        for year in years:
+            if background_cancel_event.is_set():
+                logger.info('Background update cancelled before processing year %s', year)
+                return False
+            base_cmd = [
+                python_exe,
+                master_script,
+                '--year', str(year),
+                '--repos-root', os.path.join(BASE_DIR, 'repos'),
+                '--output-root', temp_output_root,
+                '--services-file', os.path.join(BASE_DIR, 'configuration', 'services.json'),
+                '--alias-file', os.path.join(BASE_DIR, 'configuration', 'alias.json'),
+                '--ignore-file', os.path.join(BASE_DIR, 'configuration', 'ignore_user.txt'),
+                '--parallel',
+                '--cpu-count', str(cpu_workers),
+            ]
+            cmd = build_low_priority_command(base_cmd)
+            logger.info('Background update running master.py for year %s', year)
+            result = subprocess.run(
+                cmd,
+                cwd=BASE_DIR,
+                text=True,
+                capture_output=True,
+                timeout=144000,
+                env=python_env,
+            )
+            if result.returncode != 0:
+                stderr_tail = '\n'.join((result.stderr or '').strip().splitlines()[-5:])
+                logger.error('Background update failed for year %s: %s', year, stderr_tail)
+                return False
+        if background_cancel_event.is_set():
+            logger.info('Background update cancelled before swapping stats')
+            return False
+        swap_stats_directories(temp_output_root)
+        logger.info('Background update completed successfully; stats swapped in place')
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def trigger_background_update(reason: str = 'manual') -> bool:
+    if app.config.get('READ_ONLY_MODE'):
+        return False
+    if update_process_active:
+        return False
+    with background_state_lock:
+        if background_state['running']:
+            return False
+        background_state['running'] = True
+    background_cancel_event.clear()
+    thread = threading.Thread(target=_background_update_job, args=(reason,), daemon=True)
+    thread.start()
+    return True
+
+
+def _background_update_job(reason: str) -> None:
+    status = 'failed'
+    try:
+        success = perform_background_update(reason=reason)
+        if background_cancel_event.is_set() and not success:
+            status = 'cancelled'
+        else:
+            status = 'success' if success else 'failed'
+    except Exception as exc:
+        logger.exception('Background update crashed: %s', exc)
+        status = 'failed'
+    finally:
+        background_cancel_event.clear()
+        record_last_update(status, 'background')
+        with background_state_lock:
+            background_state['running'] = False
+        schedule_background_check()
+
+
+def wait_for_scheduler_event(timeout: float) -> bool:
+    triggered = background_scheduler_event.wait(timeout)
+    if triggered:
+        background_scheduler_event.clear()
+    return triggered
+
+
+def background_scheduler_loop() -> None:
+    logger.info('Background update scheduler started')
+    while not background_scheduler_stop_event.is_set():
+        if app.config.get('READ_ONLY_MODE'):
+            with background_state_lock:
+                background_state['next_run'] = None
+            wait_for_scheduler_event(300)
+            continue
+        settings = load_update_settings()
+        if not settings.get('background_enabled', False):
+            with background_state_lock:
+                background_state['next_run'] = None
+            wait_for_scheduler_event(300)
+            continue
+        interval_hours = max(1, int(settings.get('interval_hours', 24)))
+        last_completed = parse_timestamp(settings.get('last_background_completed_at'))
+        if not last_completed:
+            last_completed = datetime.utcnow() - timedelta(hours=interval_hours)
+        next_run = last_completed + timedelta(hours=interval_hours)
+        with background_state_lock:
+            background_state['next_run'] = next_run.isoformat(timespec='seconds') + 'Z'
+        now = datetime.utcnow()
+        wait_seconds = (next_run - now).total_seconds()
+        if wait_seconds <= 0:
+            triggered = trigger_background_update('scheduled')
+            if not triggered:
+                wait_for_scheduler_event(300)
+            else:
+                wait_for_scheduler_event(60)
+        else:
+            wait_for_scheduler_event(min(wait_seconds, 300))
+
+
+def start_background_scheduler() -> None:
+    global background_scheduler_thread
+    if background_scheduler_thread and background_scheduler_thread.is_alive():
+        return
+    background_scheduler_thread = threading.Thread(target=background_scheduler_loop, daemon=True)
+    background_scheduler_thread.start()
+
+
+def cancel_background_update(wait: bool = False, timeout: float = 30.0) -> None:
+    background_cancel_event.set()
+    if wait:
+        start = time.time()
+        while time.time() - start < timeout:
+            with background_state_lock:
+                if not background_state.get("running"):
+                    break
+            time.sleep(0.25)
+    background_scheduler_event.set()
+
+
+def interrupt_all_updates() -> None:
+    reset_update_state()
+    cancel_background_update(wait=True)
+
 
 
 def _build_badge_display_name_map(target_slugs: Set[str], user_months: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, str]:
@@ -2950,6 +3266,48 @@ def api_settings_repositories():
             return jsonify({"error": str(e)}), 500
 
 
+
+@app.route("/api/settings/update-config", methods=["GET", "POST"])
+def api_update_settings():
+    settings = load_update_settings()
+    state = get_background_state_snapshot()
+    payload = {
+        "background_enabled": settings.get("background_enabled", False),
+        "interval_hours": settings.get("interval_hours", 24),
+        "last_update": settings.get("last_update"),
+        "last_background_completed_at": settings.get("last_background_completed_at"),
+        "last_manual_completed_at": settings.get("last_manual_completed_at"),
+        "next_run": state.get("next_run"),
+        "background_running": state.get("running")
+    }
+    if request.method == "GET":
+        return jsonify(payload)
+    if app.config.get("READ_ONLY_MODE"):
+        return jsonify({"error": "Settings are read-only"}), 403
+    data = request.get_json(silent=True) or {}
+    background_enabled = bool(data.get("background_enabled", False))
+    interval_hours = data.get("interval_hours", 24)
+    try:
+        interval_hours = int(interval_hours)
+    except (TypeError, ValueError):
+        return jsonify({"error": "interval_hours must be an integer"}), 400
+    if interval_hours < 1:
+        return jsonify({"error": "interval_hours must be >= 1"}), 400
+    interrupt_all_updates()
+    settings["background_enabled"] = background_enabled
+    settings["interval_hours"] = interval_hours
+    save_update_settings(settings)
+    schedule_background_check()
+    background_started = trigger_background_update('settings-save')
+    state = get_background_state_snapshot()
+    payload.update({
+        "background_enabled": background_enabled,
+        "interval_hours": interval_hours,
+        "next_run": state.get("next_run"),
+        "background_running": state.get("running")
+    })
+    return jsonify({"success": True, "settings": payload, "background_started": background_started})
+
 @app.route("/api/settings/capacity-config", methods=["GET", "POST"])
 def api_settings_capacity_config():
     """Get or update capacity configuration."""
@@ -3337,6 +3695,37 @@ def api_update_git_pull():
         return jsonify({"error": str(e)}), 500
 
 
+
+@app.route("/api/update/last-run", methods=["GET"])
+def api_last_update():
+    settings = load_update_settings()
+    state = get_background_state_snapshot()
+    return jsonify({
+        "last_update": settings.get("last_update"),
+        "background_enabled": settings.get("background_enabled", False),
+        "next_run": state.get("next_run"),
+        "background_running": state.get("running")
+    })
+
+
+@app.route("/api/update/background/run", methods=["POST"])
+def api_trigger_background_update():
+    if app.config.get("READ_ONLY_MODE"):
+        return jsonify({"error": "Updates are disabled in read-only mode"}), 403
+    settings = load_update_settings()
+    if not settings.get("background_enabled", False):
+        return jsonify({"error": "Enable background updates first"}), 400
+    if update_process_active:
+        return jsonify({"error": "Manual update in progress"}), 409
+    state = get_background_state_snapshot()
+    if state.get("running"):
+        return jsonify({"error": "Background update already running"}), 409
+    triggered = trigger_background_update('manual')
+    if not triggered:
+        return jsonify({"error": "Unable to start background update"}), 409
+    return jsonify({"success": True, "message": "Background update scheduled"})
+
+
 @app.route("/api/update/run-analysis", methods=["POST"])
 def api_update_run_analysis():
     """Start the complete update process (git pull + analysis) asynchronously."""
@@ -3349,6 +3738,9 @@ def api_update_run_analysis():
     
     if update_process_active:
         return jsonify({"error": "Update process already running"}), 409
+    state = get_background_state_snapshot()
+    if state.get("running"):
+        return jsonify({"error": "Background update currently running"}), 409
     
     try:
         # Parse request data safely - handle empty requests gracefully
@@ -3400,9 +3792,14 @@ def api_update_status():
     """Get current update process status."""
     global update_process_active
     
+    settings = load_update_settings()
+    state = get_background_state_snapshot()
     return jsonify({
         "is_running": update_process_active,
-        "queue_size": update_progress_queue.qsize()
+        "queue_size": update_progress_queue.qsize(),
+        "background_running": state.get("running"),
+        "next_run": state.get("next_run"),
+        "last_update": settings.get("last_update")
     })
 
 
@@ -3469,6 +3866,7 @@ def run_full_update_async(force_update=False):
     global update_process_active
     
     update_process_active = True
+    overall_success = False
     
     # Start a new log section
     start_new_update_log()
@@ -3716,6 +4114,7 @@ def run_full_update_async(force_update=False):
                     'message': 'Update process completed successfully!',
                     'progress': 100
                 })
+                overall_success = True
             else:
                 log_update_message({
                     'type': 'error',
@@ -4007,6 +4406,7 @@ def run_full_update_async(force_update=False):
         })
     finally:
         update_process_active = False
+        record_last_update('success' if overall_success else 'failed', 'manual')
 
 def run_git_pull_all(force_update=False):
     """Run git pull on all repositories and report progress."""
@@ -4125,6 +4525,12 @@ def run_git_pull_all(force_update=False):
         })
         return False
 
+
+
+def launch_background_scheduler():
+    start_background_scheduler()
+
+launch_background_scheduler()
 
 @app.route("/api/teams")
 def api_teams():

@@ -837,8 +837,8 @@ body {
   background: #0f172a;
   border: 2px solid #374151;
   border-radius: 12px;
-  width: 90%;
-  max-width: 700px;
+  width: 95%;
+  max-width: 1100px;
   max-height: 90vh;
   overflow: hidden;
   transform: scale(0.9);
@@ -3878,4 +3878,101 @@ body {
   .ranking-grid {
     grid-template-columns: 1fr;
   }
+}
+
+
+/* Last update banner */
+.last-update-banner {
+  background: #0f172a;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.last-update-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #e2e8f0;
+}
+
+.last-update-row.secondary {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.pill-small {
+  font-size: 12px;
+  padding: 2px 8px;
+  text-transform: capitalize;
+}
+
+.status-dot {
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  background: #1f2937;
+  color: #cbd5f5;
+}
+
+.status-dot.active {
+  background: #15803d;
+  color: #ecfccb;
+}
+
+.status-dot.error {
+  background: #b91c1c;
+  color: #fee2e2;
+}
+
+.background-update-status {
+  background: #0b1220;
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 16px 0;
+  color: #cbd5f5;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.background-update-status p {
+  margin: 4px 0;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.toggle-label input {
+  transform: scale(1.2);
+}
+
+.pill-success {
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+.pill-warning {
+  background: #92400e;
+  color: #fef3c7;
+}
+
+.pill-error {
+  background: #991b1b;
+  color: #fee2e2;
+}
+
+.status-dot.idle {
+  background: #1f2937;
+  color: #cbd5f5;
 }

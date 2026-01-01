@@ -66,10 +66,21 @@
       </div>
     </aside>
 
-    <main class="main">
-      <header class="main-header">
-        <div>
-          <h1 id="view-title">Select a user or repo</h1>
+<main class="main">
+  <div class="last-update-banner" id="last-update-banner">
+    <div class="last-update-row">
+      <span class="label">Last update:</span>
+      <span id="last-update-text">Never</span>
+      <span id="last-update-kind" class="pill pill-small">--</span>
+    </div>
+    <div class="last-update-row secondary">
+      <span id="next-background-run">Next background refresh: --</span>
+      <span id="background-status-label" class="status-dot idle">Idle</span>
+    </div>
+  </div>
+  <header class="main-header">
+    <div>
+      <h1 id="view-title">Select a user or repo</h1>
           <p id="view-subtitle"></p>
         </div>
         <div id="view-pill" class="pill"></div>
@@ -99,6 +110,7 @@
       </div>
       <div class="modal-body">
         <div class="settings-tabs">
+          <button class="settings-tab" data-tab="updates">Updates</button>
           <button class="settings-tab active" data-tab="ignore-users">Ignore Users</button>
           <button class="settings-tab" data-tab="aliases">User Aliases</button>
           <button class="settings-tab" data-tab="teams">Teams</button>
@@ -109,6 +121,29 @@
         </div>
         
         <div class="settings-content">
+          <div id="updates-tab" class="settings-tab-content">
+            <h3>Background Updates</h3>
+            <p>Enable automatic refreshes that run in the background with minimal resource usage. Fresh data is prepared in a temporary workspace and swapped in only after it finishes.</p>
+            <div class="form-group">
+              <label class="toggle-label">
+                <input type="checkbox" id="background-update-enabled">
+                <span>Enable background refresh</span>
+              </label>
+            </div>
+            <div class="form-group">
+              <label for="background-update-interval">Refresh interval (hours)</label>
+              <input type="number" id="background-update-interval" min="1" max="168" value="24">
+            </div>
+            <div class="background-update-status">
+              <p>Last background update: <span id="background-last-update">Never</span></p>
+              <p>Next scheduled run: <span id="background-next-run">--</span></p>
+              <p>Current status: <span id="background-current-status">Idle</span></p>
+            </div>
+            <div class="settings-actions">
+              <button id="save-update-settings" class="btn btn-primary">Save Changes</button>
+            </div>
+          </div>
+
           <div id="ignore-users-tab" class="settings-tab-content active">
             <h3>Ignore Users</h3>
             <p>Select users to exclude from statistics. These are typically bots, automated accounts, or other non-human contributors.</p>
@@ -452,6 +487,8 @@
               
               <button id="save-capacity-config" class="btn btn-primary" style="margin-top: 20px;">Save Configuration</button>
             </div>
+          </div>
+
           </div>
 
         </div>
