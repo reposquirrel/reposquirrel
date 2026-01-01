@@ -5503,102 +5503,123 @@ async function showTeamsOverviewDashboard() {
       return;
     }
 
-    // Load team analytics data with consistency fix
+    // Load team analytics data with preference for recent activity
     let teamsAnalytics = [];
-    let periodLabel = "Overall";
+    let periodLabel = "Last 3 Months";
+    const preferredInitialPeriod = "last3months";
+    let initialDataLoaded = false;
+
     try {
-      console.log("Initial team overview load - using consistent yearly data");
-      
-      // Use the same logic as period toggle to ensure consistency from first load
-      const currentYear = new Date().getFullYear();
-      
-      // Fetch yearly data for each team to ensure consistency
-      const yearlyTeamData = [];
-      const teamPromises = state.teams.slice(0, 8).map(async team => { // Limit to first 8 teams for performance
-        try {
-          const yearlyData = await fetchJSON(`/api/teams/${encodeURIComponent(team.id)}/year/${currentYear}`);
-          
-          console.log(`Team ${team.id} yearly data structure:`, {
-            total_commits: yearlyData.total_commits,
-            per_subsystem_keys: Object.keys(yearlyData.per_subsystem || {}),
-            subsystems_keys: Object.keys(yearlyData.subsystems || {}),
-            all_keys: Object.keys(yearlyData)
-          });
-          
-          // Try different possible field names for subsystem data
-          const subsystemData = yearlyData.per_subsystem || 
-                                yearlyData.subsystems || 
-                                yearlyData.subsystem_breakdown ||
-                                yearlyData.subsystem_summary ||
-                                yearlyData.per_repo ||
-                                {};
-                                
-          // Also try counting from members' subsystem contributions if direct subsystem data isn't available
-          let activeSubsystemsCount = Object.keys(subsystemData).length;
-          
-          // If no subsystem data found, try to derive from other sources
-          if (activeSubsystemsCount === 0) {
-            // Check if there are members with per-subsystem data
-            if (yearlyData.members && Array.isArray(yearlyData.members)) {
-              const allSubsystems = new Set();
-              yearlyData.members.forEach(member => {
-                if (member.per_subsystem) {
-                  Object.keys(member.per_subsystem).forEach(sub => allSubsystems.add(sub));
-                }
-                if (member.subsystems) {
-                  Object.keys(member.subsystems).forEach(sub => allSubsystems.add(sub));
-                }
-              });
-              activeSubsystemsCount = allSubsystems.size;
-            }
-          }
-          
-          console.log(`Team ${team.id} calculated active subsystems: ${activeSubsystemsCount}`);
-          
-          return {
-            id: team.id,
-            name: team.name,
-            total_commits: yearlyData.total_commits || 0,
-            total_lines_changed: (yearlyData.total_additions || 0) + (yearlyData.total_deletions || 0),
-            total_additions: yearlyData.total_additions || 0,
-            total_deletions: yearlyData.total_deletions || 0,
-            active_subsystems_count: activeSubsystemsCount,
-            responsible_subsystems_count: yearlyData.responsible_subsystems?.length || 0,
-            responsible_lines_of_code: yearlyData.total_responsible_lines || 0,
-            member_count: team.members?.length || 0  // Add member count from original team data
-          };
-        } catch (error) {
-          console.warn(`Failed to fetch yearly data for team ${team.id}:`, error);
-          return null;
+        const preferredData = await fetchJSON(`/api/teams/overview?period=${preferredInitialPeriod}`);
+        if (preferredData && Array.isArray(preferredData.teams) && preferredData.teams.length > 0) {
+            teamsAnalytics = preferredData.teams;
+            periodLabel = preferredData.period || "Last 3 Months";
+            initialDataLoaded = true;
+        } else {
+            console.warn("Preferred period data empty, falling back to overall analytics");
         }
-      });
-      
-      const resolvedTeamData = (await Promise.all(teamPromises)).filter(team => team !== null);
-      
-      if (resolvedTeamData.length > 0) {
-        console.log("Successfully fetched consistent yearly data for initial load:", resolvedTeamData.length, "teams");
-        teamsAnalytics = resolvedTeamData;
-        periodLabel = "Overall";
-      } else {
-        throw new Error("No yearly team data could be fetched");
-      }
-      
     } catch (error) {
-      console.warn("Failed to fetch consistent yearly data for initial load, falling back to overview API:", error);
-      
-      // Fallback to original overview API
-      try {
-        const response = await fetch("/api/teams/overview");
-        if (response.ok) {
-          const data = await response.json();
-          teamsAnalytics = data.teams || [];
-          periodLabel = data.period || "Overall";
-        }
-      } catch (fallbackError) {
-        console.warn("Failed to load team analytics:", fallbackError);
-      }
+        console.warn("Failed to load preferred period data, falling back to overall analytics:", error);
     }
-    
+
+    if (!initialDataLoaded) {
+        periodLabel = "Overall";
+        try {
+            console.log("Initial team overview load - using consistent yearly data");
+            
+            // Use the same logic as period toggle to ensure consistency from first load
+            const currentYear = new Date().getFullYear();
+            
+            // Fetch yearly data for each team to ensure consistency
+            const yearlyTeamData = [];
+            const teamPromises = state.teams.slice(0, 8).map(async team => { // Limit to first 8 teams for performance
+                try {
+                    const yearlyData = await fetchJSON(`/api/teams/${encodeURIComponent(team.id)}/year/${currentYear}`);
+                    
+                    console.log(`Team ${team.id} yearly data structure:`, {
+                        total_commits: yearlyData.total_commits,
+                        per_subsystem_keys: Object.keys(yearlyData.per_subsystem || {}),
+                        subsystems_keys: Object.keys(yearlyData.subsystems || {}),
+                        all_keys: Object.keys(yearlyData)
+                    });
+                    
+                    // Try different possible field names for subsystem data
+                    const subsystemData = yearlyData.per_subsystem || 
+                                          yearlyData.subsystems || 
+                                          yearlyData.subsystem_breakdown ||
+                                          yearlyData.subsystem_summary ||
+                                          yearlyData.per_repo ||
+                                          {};
+                                          
+                    // Also try counting from members' subsystem contributions if direct subsystem data isn't available
+                    let activeSubsystemsCount = Object.keys(subsystemData).length;
+                    
+                    // If no subsystem data found, try to derive from other sources
+                    if (activeSubsystemsCount === 0) {
+                        // Check if there are members with per-subsystem data
+                        if (yearlyData.members && Array.isArray(yearlyData.members)) {
+                            const allSubsystems = new Set();
+                            yearlyData.members.forEach(member => {
+                                if (member.per_subsystem) {
+                                    Object.keys(member.per_subsystem).forEach(sub => allSubsystems.add(sub));
+                                }
+                                if (member.subsystems) {
+                                    Object.keys(member.subsystems).forEach(sub => allSubsystems.add(sub));
+                                }
+                            });
+                            activeSubsystemsCount = allSubsystems.size;
+                        }
+                    }
+                    
+                    console.log(`Team ${team.id} calculated active subsystems: ${activeSubsystemsCount}`);
+                    
+                    return {
+                        id: team.id,
+                        name: team.name,
+                        total_commits: yearlyData.total_commits || 0,
+                        total_lines_changed: (yearlyData.total_additions || 0) + (yearlyData.total_deletions || 0),
+                        total_additions: yearlyData.total_additions || 0,
+                        total_deletions: yearlyData.total_deletions || 0,
+                        active_subsystems_count: activeSubsystemsCount,
+                        responsible_subsystems_count: yearlyData.responsible_subsystems?.length || 0,
+                        responsible_lines_of_code: yearlyData.total_responsible_lines || 0,
+                        member_count: team.members?.length || 0  // Add member count from original team data
+                    };
+                } catch (error) {
+                    console.warn(`Failed to fetch yearly data for team ${team.id}:`, error);
+                    return null;
+                }
+            });
+            
+            const resolvedTeamData = (await Promise.all(teamPromises)).filter(team => team !== null);
+            
+            if (resolvedTeamData.length > 0) {
+                console.log("Successfully fetched consistent yearly data for initial load:", resolvedTeamData.length, "teams");
+                teamsAnalytics = resolvedTeamData;
+                periodLabel = "Overall";
+                initialDataLoaded = true;
+            } else {
+                throw new Error("No yearly team data could be fetched");
+            }
+            
+        } catch (error) {
+            console.warn("Failed to fetch consistent yearly data for initial load, falling back to overview API:", error);
+            
+            // Fallback to original overview API
+            try {
+                const response = await fetch("/api/teams/overview");
+                if (response.ok) {
+                    const data = await response.json();
+                    teamsAnalytics = data.teams || [];
+                    periodLabel = data.period || "Overall";
+                    initialDataLoaded = true;
+                }
+            } catch (fallbackError) {
+                console.warn("Failed to load team analytics:", fallbackError);
+            }
+        }
+    }
+
     // Teams summary
     const summarySection = document.createElement("div");
     summarySection.className = "card";
