@@ -20,6 +20,14 @@ from collections import defaultdict, Counter
 
 from flask import Flask, jsonify, send_from_directory, render_template, abort, request, Response
 
+from subsystem_metrics import (
+    compute_dead_subsystems,
+    compute_subsystem_top_maintainers,
+    compute_subsystem_maintainer_timeline,
+    compute_subsystem_significant_ownership,
+    compute_subsystem_size_rankings,
+)
+
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATS_ROOT = os.path.join(BASE_DIR, "stats")
@@ -815,6 +823,18 @@ def list_service_months() -> Dict[str, List[Dict[str, Any]]]:
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_cached_subsystem_payload(subsystem_name: str, filename: str) -> Optional[Dict[str, Any]]:
+    """Load a cached subsystem JSON artifact if it exists."""
+    path = os.path.join(STATS_ROOT, "subsystems", subsystem_name, filename)
+    if not os.path.isfile(path):
+        return None
+    try:
+        return load_json(path)
+    except Exception as exc:
+        app.logger.warning("[subsystem-cache] Failed to read %s for %s: %s", filename, subsystem_name, exc)
+        return None
 
 
 def analyze_developer_badges() -> Dict[str, List[Dict[str, Any]]]:
@@ -1827,90 +1847,19 @@ def get_team_responsible_subsystems(team_id: str) -> List[str]:
 
 
 def detect_dead_subsystems(threshold_months: int = 3) -> Dict[str, Dict[str, Any]]:
-    """
-    Detect subsystems with no recent activity.
-    
-    Returns dict mapping subsystem_name to:
-    {
-        "is_dead": bool,
-        "last_activity_date": str or None,
-        "months_since_activity": int or None
-    }
-    """
-    from datetime import datetime, timedelta
-    
-    current_date = datetime.now()
-    threshold_date = current_date - timedelta(days=30 * threshold_months)
-    
-    subsystem_status = {}
-    subsystems_root = os.path.join(STATS_ROOT, "subsystems")
-    
-    if not os.path.exists(subsystems_root):
-        return subsystem_status
-    
-    for subsystem_name in os.listdir(subsystems_root):
-        subsystem_dir = os.path.join(subsystems_root, subsystem_name)
-        if not os.path.isdir(subsystem_dir):
-            continue
-        
-        # Find the most recent activity by checking all period directories
-        # Only look at monthly data, not yearly summaries
-        latest_activity_date = None
-        
-        for period_dir in os.listdir(subsystem_dir):
-            if "_" not in period_dir:
-                continue
-                
-            try:
-                date_from, date_to = period_dir.split("_", 1)
-                
-                # Skip yearly summaries (check if it spans a full year)
-                from_date_obj = datetime.strptime(date_from, "%Y-%m-%d")
-                to_date_obj = datetime.strptime(date_to, "%Y-%m-%d")
-                
-                # Skip if this is a yearly summary (spans more than 35 days)
-                days_span = (to_date_obj - from_date_obj).days
-                if days_span > 35:
-                    continue
-                
-                period_path = os.path.join(subsystem_dir, period_dir)
-                summary_file = os.path.join(period_path, "summary.json")
-                
-                if os.path.exists(summary_file):
-                    # Check if this period has any commits
-                    with open(summary_file, "r", encoding="utf-8") as f:
-                        summary_data = json.load(f)
-                    
-                    total_commits = summary_data.get("total_commits", 0)
-                    if total_commits > 0:
-                        # Use the end date of this period
-                        if latest_activity_date is None or to_date_obj > latest_activity_date:
-                            latest_activity_date = to_date_obj
-                            
-            except (ValueError, json.JSONDecodeError, IOError):
-                continue
-        
-        # Determine if subsystem is dead
-        is_dead = False
-        months_since_activity = None
-        last_activity_str = None
-        
-        if latest_activity_date:
-            last_activity_str = latest_activity_date.strftime("%Y-%m-%d")
-            months_since_activity = int((current_date - latest_activity_date).days / 30.44)  # Average days per month
-            is_dead = latest_activity_date < threshold_date
-        else:
-            # No activity found at all
-            is_dead = True
-            months_since_activity = None
-        
-        subsystem_status[subsystem_name] = {
-            "is_dead": is_dead,
-            "last_activity_date": last_activity_str,
-            "months_since_activity": months_since_activity
-        }
-    
-    return subsystem_status
+    """Return cached dead-subsystem data, falling back to on-demand computation."""
+    cache_path = os.path.join(STATS_ROOT, "subsystems", "dead_status.json")
+    if os.path.isfile(cache_path):
+        try:
+            cached_data = load_json(cache_path)
+            if isinstance(cached_data, dict):
+                cached_status = cached_data.get("subsystem_status")
+                if isinstance(cached_status, dict):
+                    return cached_status
+                return cached_data  # Legacy format without wrapper
+        except Exception as exc:
+            app.logger.warning("[subsystem-cache] Failed to load dead status cache: %s", exc)
+    return compute_dead_subsystems(STATS_ROOT, threshold_months)
 
 
 @app.route("/api/subsystems/dead-status")
@@ -1972,361 +1921,42 @@ def api_subsystem_year(subsystem_name: str, year: int):
 
 @app.route("/api/subsystems/<subsystem_name>/top-maintainers")
 def api_subsystem_top_maintainers(subsystem_name: str):
-    """Get top maintainers for a subsystem based on recent commit activity."""
+    """Serve cached top maintainer data for a subsystem."""
     try:
-        # Get current date to determine last 3 months
-        from datetime import datetime, timedelta
-        current_date = datetime.now()
-        three_months_ago = current_date - timedelta(days=90)
-        
-        subsystem_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name)
-        if not os.path.exists(subsystem_path):
-            return jsonify({"maintainers": []})
-        
-        maintainer_data = {}  # dev_slug -> {commits, display_name, etc}
-        
-        # Look for monthly summary files from last 3 months
-        for period_dir in os.listdir(subsystem_path):
-            period_path = os.path.join(subsystem_path, period_dir)
-            if not os.path.isdir(period_path):
-                continue
-            
-            # Skip yearly summaries for maintainer analysis
-            if "_2025-12-31" in period_dir:
-                continue
-            
-            # Parse date range from directory name
-            try:
-                date_parts = period_dir.split("_")
-                if len(date_parts) != 2:
-                    continue
-                
-                from_date_str = date_parts[0]
-                period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
-                
-                # Only consider periods within last 3 months
-                if period_date < three_months_ago:
-                    continue
-                
-            except (ValueError, IndexError):
-                continue
-            
-            summary_file = os.path.join(period_path, "summary.json")
-            if not os.path.exists(summary_file):
-                continue
-            
-            try:
-                summary_data = load_json(summary_file)
-                
-                # Aggregate commits from all repositories for this subsystem/period
-                repositories = summary_data.get("repositories", {})
-                for repo_data in repositories.values():
-                    developers = repo_data.get("developers", {})
-                    for dev_slug, dev_data in developers.items():
-                        commits = dev_data.get("commits", 0)
-                        if commits > 0:
-                            if dev_slug not in maintainer_data:
-                                maintainer_data[dev_slug] = {
-                                    "slug": dev_slug,
-                                    "display_name": dev_data.get("display_name", dev_slug),
-                                    "commits": 0,
-                                    "lines_added": 0,
-                                    "lines_deleted": 0,
-                                    "changed_lines": 0
-                                }
-                            maintainer_data[dev_slug]["commits"] += commits
-                            maintainer_data[dev_slug]["lines_added"] += dev_data.get("lines_added", 0)
-                            maintainer_data[dev_slug]["lines_deleted"] += dev_data.get("lines_deleted", 0)
-                            maintainer_data[dev_slug]["changed_lines"] += dev_data.get("changed_lines", 0)
-            
-            except Exception as e:
-                print(f"Error processing summary file {summary_file}: {e}")
-                continue
-        
-        # Sort by commits and take top 5
-        top_maintainers = sorted(maintainer_data.values(), key=lambda x: x["commits"], reverse=True)[:5]
-        
-        return jsonify({"maintainers": top_maintainers})
-        
+        cached = load_cached_subsystem_payload(subsystem_name, "top_maintainers.json")
+        if cached is not None:
+            return jsonify(cached)
+        payload = compute_subsystem_top_maintainers(STATS_ROOT, subsystem_name)
+        return jsonify(payload)
     except Exception as e:
         abort(500, description=f"Error analyzing top maintainers: {str(e)}")
 
 
 @app.route("/api/subsystems/<subsystem_name>/maintainer-timeline")
 def api_subsystem_maintainer_timeline(subsystem_name: str):
-    """Get historical ownership percentage timeline based on current blame data and monthly changes."""
+    """Serve cached maintainer timeline data for a subsystem."""
     try:
-        from datetime import datetime
-        from collections import defaultdict
-        
-        subsystem_path = os.path.join(STATS_ROOT, "subsystems", subsystem_name)
-        if not os.path.exists(subsystem_path):
-            return jsonify({"timeline": {}})
-        
-        # First, get current ownership from blame data
-        repos_path = os.path.join(STATS_ROOT, "repos")
-        current_ownership = {}  # {dev_slug: lines_owned}
-        total_current_lines = 0
-        
-        # Look for blame data for this subsystem (could be a repo or a service)
-        for root, dirs, files in os.walk(repos_path):
-            if "blame.json" in files:
-                blame_file = os.path.join(root, "blame.json")
-                try:
-                    blame_data = load_json(blame_file)
-                    
-                    # Check if this is a direct repo match
-                    if subsystem_name.lower() in blame_data.get("repo", "").lower():
-                        developers = blame_data.get("developers", {})
-                        total_current_lines = blame_data.get("total_lines", 0)
-                        for dev_slug, dev_data in developers.items():
-                            current_ownership[dev_slug] = dev_data.get("lines", 0)
-                        break
-                    
-                    # Check if this is a service within a repo
-                    services = blame_data.get("services", {})
-                    if subsystem_name in services:
-                        service_data = services[subsystem_name]
-                        developers = service_data.get("developers", {})
-                        total_current_lines = service_data.get("total_lines", 0)
-                        for dev_slug, dev_data in developers.items():
-                            if isinstance(dev_data, dict):
-                                current_ownership[dev_slug] = dev_data.get("lines", 0)
-                            else:
-                                current_ownership[dev_slug] = dev_data
-                        break
-                except Exception as e:
-                    continue
-        
-        if not current_ownership or total_current_lines == 0:
-            return jsonify({"timeline": {}})
-        
-        # Now get monthly net line changes (lines_added - lines_deleted)
-        # Structure: {dev_slug: {month: net_lines}}
-        monthly_net_changes = defaultdict(lambda: defaultdict(int))
-        
-        # Look for monthly summary files
-        for period_dir in os.listdir(subsystem_path):
-            period_path = os.path.join(subsystem_path, period_dir)
-            if not os.path.isdir(period_path):
-                continue
-            
-            # Skip yearly summaries
-            if "_2025-12-31" in period_dir or "_2024-12-31" in period_dir:
-                continue
-            
-            # Parse date range from directory name
-            try:
-                date_parts = period_dir.split("_")
-                if len(date_parts) != 2:
-                    continue
-                
-                from_date_str = date_parts[0]
-                period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
-                month_label = period_date.strftime("%Y-%m")
-                
-            except (ValueError, IndexError):
-                continue
-            
-            summary_file = os.path.join(period_path, "summary.json")
-            if not os.path.exists(summary_file):
-                continue
-            
-            try:
-                summary_data = load_json(summary_file)
-                
-                repositories = summary_data.get("repositories", {})
-                for repo_data in repositories.values():
-                    developers = repo_data.get("developers", {})
-                    for dev_slug, dev_data in developers.items():
-                        lines_added = dev_data.get("lines_added", 0)
-                        lines_deleted = dev_data.get("lines_deleted", 0)
-                        net_lines = lines_added - lines_deleted
-                        monthly_net_changes[dev_slug][month_label] += net_lines
-            
-            except Exception as e:
-                print(f"Error processing summary file {summary_file}: {e}")
-                continue
-        
-        # Get top 5 maintainers by recent activity (last 3 months) - same as top-maintainers endpoint
-        from datetime import timedelta
-        three_months_ago = datetime.now() - timedelta(days=90)
-        recent_activity = defaultdict(int)
-        
-        for period_dir in os.listdir(subsystem_path):
-            if period_dir == 'languages.json' or '_12-31' in period_dir:
-                continue
-            
-            try:
-                from_date_str = period_dir.split('_')[0]
-                period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
-                if period_date < three_months_ago:
-                    continue
-                
-                summary_file = os.path.join(subsystem_path, period_dir, "summary.json")
-                if not os.path.exists(summary_file):
-                    continue
-                
-                summary_data = load_json(summary_file)
-                for repo_data in summary_data.get("repositories", {}).values():
-                    for dev_slug, dev_data in repo_data.get("developers", {}).items():
-                        recent_activity[dev_slug] += dev_data.get("commits", 0)
-            except:
-                continue
-        
-        # Select top 5 by recent commits
-        top_maintainers = sorted(recent_activity.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_maintainers_slugs = [slug for slug, _ in top_maintainers]
-        
-        # Build backward timeline
-        result = {}
-        all_months = sorted(set(month for dev_data in monthly_net_changes.values() for month in dev_data.keys()))
-        
-        for dev_slug in top_maintainers_slugs:
-            percentages = []
-            
-            # Start with current ownership
-            dev_lines = current_ownership.get(dev_slug, 0)
-            total_lines = total_current_lines
-            
-            # Work backwards through months (reverse chronological order)
-            for month in reversed(all_months):
-                # Calculate ownership at this point in time
-                percentage = (dev_lines / total_lines * 100) if total_lines > 0 else 0
-                percentages.insert(0, round(percentage, 1))  # Insert at beginning since we're going backwards
-                
-                # Subtract this month's changes to get previous month's state
-                dev_lines -= monthly_net_changes[dev_slug].get(month, 0)
-                total_lines -= sum(monthly_net_changes[dev].get(month, 0) for dev in monthly_net_changes.keys())
-                
-                # Don't let values go negative
-                dev_lines = max(0, dev_lines)
-                total_lines = max(1, total_lines)  # Avoid division by zero
-            
-            result[dev_slug] = {
-                "months": all_months,
-                "ownership": percentages
-            }
-        
-        return jsonify({"timeline": result})
-        
+        cached = load_cached_subsystem_payload(subsystem_name, "maintainer_timeline.json")
+        if cached is not None:
+            return jsonify(cached)
+        payload = compute_subsystem_maintainer_timeline(STATS_ROOT, subsystem_name)
+        return jsonify(payload)
     except Exception as e:
-        print(f"Error in maintainer timeline: {e}")
-        import traceback
-        traceback.print_exc()
+        app.logger.error(f"Error in maintainer timeline for {subsystem_name}: {e}")
         abort(500, description=f"Error generating maintainer timeline: {str(e)}")
-
 
 @app.route("/api/subsystems/<subsystem_name>/significant-ownership")
 def api_subsystem_significant_ownership(subsystem_name: str):
-    """Get developers with >10% ownership of a subsystem."""
+    """Serve cached significant ownership data for a subsystem."""
     try:
-        significant_owners = []
-        
-        # Check blame files in the repos structure for ownership percentages
-        repos_path = os.path.join(STATS_ROOT, "repos")
-        if not os.path.exists(repos_path):
-            return jsonify({"owners": []})
-        
-        # Load services config to understand which repo might contain this service
-        services_config = load_services_config()
-        
-        for org_name in os.listdir(repos_path):
-            org_path = os.path.join(repos_path, org_name)
-            if not os.path.isdir(org_path):
-                continue
-                
-            for repo_name in os.listdir(org_path):
-                repo_path = os.path.join(org_path, repo_name)
-                if not os.path.isdir(repo_path):
-                    continue
-                    
-                blame_file = os.path.join(repo_path, "blame", "blame.json")
-                if not os.path.exists(blame_file):
-                    # Skip repos without blame files
-                    continue
-                
-                try:
-                    blame_data = load_json(blame_file)
-                    repo_full_name = f"{org_name}/{repo_name}"
-                    
-                    # Check if this repo matches our subsystem name
-                    repo_matches = (repo_name == subsystem_name or 
-                                   f"{org_name}/{repo_name}" == subsystem_name)
-                    
-                    # If repo matches, check repo-level developers
-                    if repo_matches:
-                        developers = blame_data.get("developers", {})
-                        total_lines = blame_data.get("total_lines", 0)
-                        
-                        for dev_slug, dev_data in developers.items():
-                            dev_lines = dev_data.get("lines", 0)
-                            ownership_share = dev_lines / total_lines if total_lines > 0 else 0
-                            
-                            # Only include developers with >10% ownership
-                            if ownership_share > 0.10:  # More than 10%
-                                significant_owners.append({
-                                    "slug": dev_slug,
-                                    "display_name": dev_data.get("display_name", dev_slug),
-                                    "lines": dev_lines,
-                                    "share": ownership_share,
-                                    "percentage": round(ownership_share * 100, 1),
-                                    "source": f"repo-{repo_name}"
-                                })
-                    
-                    # Always check per-service ownership percentages
-                    services = blame_data.get("services", {})
-                    for service_name, service_data in services.items():
-                        # Check if this service matches our subsystem
-                        if service_name == subsystem_name:
-                            service_developers = service_data.get("developers", {})
-                            service_total_lines = service_data.get("total_lines", 0)
-                            
-                            for dev_slug, dev_data in service_developers.items():
-                                dev_lines = dev_data.get("lines", 0)
-                                ownership_share = dev_lines / service_total_lines if service_total_lines > 0 else 0
-                                
-                                # Only include developers with >10% ownership
-                                if ownership_share > 0.10:  # More than 10%
-                                    # Check if we already have this developer from repo-level analysis
-                                    existing = next((o for o in significant_owners if o["slug"] == dev_slug), None)
-                                    if not existing:
-                                        significant_owners.append({
-                                            "slug": dev_slug,
-                                            "display_name": dev_data.get("display_name", dev_slug),
-                                            "lines": dev_lines,
-                                            "share": ownership_share,
-                                            "percentage": round(ownership_share * 100, 1),
-                                            "source": f"service-{service_name}-in-{repo_name}"
-                                        })
-                                    elif ownership_share > existing["share"]:
-                                        # Update if this service has higher ownership
-                                        existing.update({
-                                            "lines": dev_lines,
-                                            "share": ownership_share,
-                                            "percentage": round(ownership_share * 100, 1),
-                                            "source": f"service-{service_name}-in-{repo_name}"
-                                        })
-                
-                except Exception as e:
-                    print(f"Error processing blame file {blame_file} for significant ownership: {e}")
-                    continue
-        
-        # Sort by ownership percentage (descending) and remove duplicates
-        unique_owners = {}
-        for owner in significant_owners:
-            slug = owner["slug"]
-            if slug not in unique_owners or owner["share"] > unique_owners[slug]["share"]:
-                unique_owners[slug] = owner
-        
-        sorted_owners = sorted(unique_owners.values(), key=lambda x: x["share"], reverse=True)
-        
-        return jsonify({"owners": sorted_owners})
-        
+        cached = load_cached_subsystem_payload(subsystem_name, "significant_ownership.json")
+        if cached is not None:
+            return jsonify(cached)
+        payload = compute_subsystem_significant_ownership(STATS_ROOT, subsystem_name)
+        return jsonify(payload)
     except Exception as e:
-        print(f"Error in api_subsystem_significant_ownership: {str(e)}")
+        app.logger.error(f"Error in api_subsystem_significant_ownership for {subsystem_name}: {e}")
         return jsonify({"owners": [], "error": str(e)})
-
 
 @app.route("/api/subsystems/<subsystem_name>/languages")
 def api_subsystem_languages(subsystem_name: str):
@@ -2375,107 +2005,20 @@ def api_subsystem_loc_evolution(subsystem_name: str, year: int):
 
 @app.route("/api/subsystems/size-rankings")
 def api_subsystem_size_rankings():
-    """Get size rankings for all subsystems based on total lines of code."""
+    """Return cached subsystem size rankings (language-based)."""
+    cache_file = os.path.join(STATS_ROOT, "subsystems", "size_rankings.json")
     try:
-        subsystems_root = os.path.join(STATS_ROOT, "subsystems")
-        if not os.path.exists(subsystems_root):
-            return jsonify({"rankings": {}, "buckets": {"big": [], "medium": [], "small": []}})
-        
-        # Calculate total git blame lines across all repos
-        # Important: Deduplicate repos that appear both standalone and in monorepos
-        # Track by the final repo name component to avoid double-counting
-        total_git_lines = 0
-        repos_path = os.path.join(STATS_ROOT, "repos")
-        counted_repos = set()
-        
-        for root, dirs, files in os.walk(repos_path):
-            if "blame.json" in files:
-                blame_file = os.path.join(root, "blame.json")
-                try:
-                    blame_data = load_json(blame_file)
-                    repo_full_name = blame_data.get("repo", "")
-                    # Get the last component (e.g., "appgate-docker" from "appgate-sdp-int/appgate-docker")
-                    repo_name = repo_full_name.split("/")[-1]
-                    
-                    # Only count each unique repo name once (prefer monorepo version if duplicate)
-                    if repo_name not in counted_repos:
-                        total_git_lines += blame_data.get("total_lines", 0)
-                        counted_repos.add(repo_name)
-                except Exception as e:
-                    continue
-        
-        # Collect language statistics for all subsystems
-        subsystem_sizes = []
-        
-        for subsystem_name in os.listdir(subsystems_root):
-            subsystem_dir = os.path.join(subsystems_root, subsystem_name)
-            if not os.path.isdir(subsystem_dir):
-                continue
-                
-            languages_file = os.path.join(subsystem_dir, "languages.json")
-            total_lines = 0
-            if os.path.exists(languages_file):
-                try:
-                    with open(languages_file, "r", encoding="utf-8") as f:
-                        language_data = json.load(f)
-                    total_lines = language_data.get("totals", {}).get("code_lines", 0)
-                except (json.JSONDecodeError, IOError):
-                    total_lines = 0
-            if total_lines > 0:
-                subsystem_sizes.append({
-                    "name": subsystem_name,
-                    "total_lines": total_lines
-                })
-        
-        # Sort by total lines (descending)
-        subsystem_sizes.sort(key=lambda x: x["total_lines"], reverse=True)
-        
-        # Calculate total system lines
-        total_system_lines = sum(s["total_lines"] for s in subsystem_sizes)
-        
-        # Create rankings dictionary
-        rankings = {}
-        for i, subsystem in enumerate(subsystem_sizes):
-            rankings[subsystem["name"]] = {
-                "rank": i + 1,
-                "total_lines": subsystem["total_lines"],
-                "total_subsystems": len(subsystem_sizes)
-            }
-        
-        # Divide into 3 equal buckets
-        total_count = len(subsystem_sizes)
-        bucket_size = total_count // 3
-        remainder = total_count % 3
-        
-        # Distribute remainder: big gets +1 if remainder >= 1, medium gets +1 if remainder == 2
-        big_size = bucket_size + (1 if remainder >= 1 else 0)
-        medium_size = bucket_size + (1 if remainder >= 2 else 0)
-        small_size = bucket_size
-        
-        buckets = {
-            "big": [s["name"] for s in subsystem_sizes[:big_size]],
-            "medium": [s["name"] for s in subsystem_sizes[big_size:big_size + medium_size]],
-            "small": [s["name"] for s in subsystem_sizes[big_size + medium_size:]]
-        }
-        
-        # Add bucket info to rankings
-        for subsystem_name in buckets["big"]:
-            rankings[subsystem_name]["size_bucket"] = "big"
-        for subsystem_name in buckets["medium"]:
-            rankings[subsystem_name]["size_bucket"] = "medium"
-        for subsystem_name in buckets["small"]:
-            rankings[subsystem_name]["size_bucket"] = "small"
-        
-        return jsonify({
-            "rankings": rankings,
-            "buckets": buckets,
-            "total_subsystems": total_count,
-            "total_system_lines": total_system_lines,
-            "total_git_lines": total_git_lines
-        })
-        
+        if os.path.isfile(cache_file):
+            try:
+                cached = load_json(cache_file)
+                if isinstance(cached, dict):
+                    return jsonify(cached)
+            except Exception as exc:
+                app.logger.warning("[subsystem-cache] Failed to read size rankings cache: %s", exc)
+        payload = compute_subsystem_size_rankings(STATS_ROOT)
+        return jsonify(payload)
     except Exception as e:
-        print(f"Error in api_subsystem_size_rankings: {str(e)}")
+        app.logger.error(f"Error in api_subsystem_size_rankings: {str(e)}")
         return jsonify({"rankings": {}, "buckets": {"big": [], "medium": [], "small": []}, "error": str(e)})
 
 

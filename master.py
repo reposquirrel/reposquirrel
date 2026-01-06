@@ -7,6 +7,7 @@ import subprocess
 import json
 import re
 import logging
+import tempfile
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -27,6 +28,21 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="reposquirrel-subsystem-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -681,6 +697,15 @@ def main() -> None:
         generate_cloc_cache(repos_root, output_root, services_file, max_parallel_workers=max_workers)
     except Exception as exc:
         logger.info(f"Warning: Failed to generate CLOC cache: {exc}")
+
+    try:
+        precompute_subsystem_dashboard_caches(
+            output_root,
+            lookback_days=90,
+            max_parallel_workers=max_workers,
+        )
+    except Exception as exc:
+        logger.info(f"Warning: Failed to precompute subsystem dashboard caches: {exc}")
     
     # Note about repos directory: It's kept for blame analysis only (for badges)
     # The actual service/subsystem statistics are now in stats/subsystems/
@@ -2139,6 +2164,116 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 indent=2,
             )
         logger.info("[loc-precompute] Wrote %s", out_file)
+
+
+def precompute_subsystem_dashboard_caches(
+    output_root: str,
+    lookback_days: int = 90,
+    max_parallel_workers: Optional[int] = None,
+) -> None:
+    from subsystem_metrics import (
+        compute_dead_subsystems,
+        compute_subsystem_top_maintainers,
+        compute_subsystem_maintainer_timeline,
+        compute_subsystem_significant_ownership,
+        compute_subsystem_size_rankings,
+    )
+
+    stats_root = os.path.join(output_root, "stats")
+    subsystems_root = os.path.join(stats_root, "subsystems")
+    if not os.path.isdir(subsystems_root):
+        logger.info("[subsystem-cache] No subsystems directory at %s; skipping cache generation.", subsystems_root)
+        return
+
+    logger.info("\n===========================================")
+    logger.info("Precomputing subsystem dashboard caches")
+    logger.info("===========================================")
+
+    timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    try:
+        dead_status = compute_dead_subsystems(stats_root)
+        dead_payload = {
+            "generated_at": timestamp,
+            "threshold_months": 3,
+            "subsystem_status": dead_status,
+        }
+        dead_path = os.path.join(subsystems_root, "dead_status.json")
+        _write_json_atomic(dead_path, dead_payload)
+        logger.info("[subsystem-cache] Dead status cached for %s subsystems", len(dead_status))
+    except Exception as exc:
+        logger.info("[subsystem-cache] Warning: dead status computation failed: %s", exc)
+
+    subsystem_names = sorted(
+        name for name in os.listdir(subsystems_root) if os.path.isdir(os.path.join(subsystems_root, name))
+    )
+    if not subsystem_names:
+        logger.info("[subsystem-cache] No subsystem directories found. Skipping dashboard cache generation.")
+        return
+
+    if max_parallel_workers and max_parallel_workers > 0:
+        worker_count = min(max_parallel_workers, len(subsystem_names))
+    else:
+        worker_count = min(max(1, multiprocessing.cpu_count()), len(subsystem_names))
+
+    def process_subsystem(subsystem_name: str) -> tuple[str, int]:
+        subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+        produced = 0
+
+        try:
+            top_payload = compute_subsystem_top_maintainers(stats_root, subsystem_name, lookback_days)
+            top_payload["generated_at"] = timestamp
+            _write_json_atomic(os.path.join(subsystem_dir, "top_maintainers.json"), top_payload)
+            produced += 1
+        except Exception as exc:
+            logger.info("[subsystem-cache] %s: failed to compute top maintainers (%s)", subsystem_name, exc)
+
+        try:
+            timeline_payload = compute_subsystem_maintainer_timeline(stats_root, subsystem_name)
+            timeline_payload["generated_at"] = timestamp
+            _write_json_atomic(os.path.join(subsystem_dir, "maintainer_timeline.json"), timeline_payload)
+            produced += 1
+        except Exception as exc:
+            logger.info("[subsystem-cache] %s: failed to compute maintainer timeline (%s)", subsystem_name, exc)
+
+        try:
+            ownership_payload = compute_subsystem_significant_ownership(stats_root, subsystem_name)
+            ownership_payload["generated_at"] = timestamp
+            _write_json_atomic(os.path.join(subsystem_dir, "significant_ownership.json"), ownership_payload)
+            produced += 1
+        except Exception as exc:
+            logger.info("[subsystem-cache] %s: failed to compute significant ownership (%s)", subsystem_name, exc)
+
+        return subsystem_name, produced
+
+    if worker_count > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(process_subsystem, name): name for name in subsystem_names}
+            for future in as_completed(future_map):
+                try:
+                    name, produced = future.result()
+                    logger.info("[subsystem-cache] %s: refreshed %s artifacts", name, produced)
+                except Exception as exc:
+                    name = future_map.get(future, "unknown")
+                    logger.info("[subsystem-cache] %s: unexpected failure (%s)", name, exc)
+    else:
+        for name in subsystem_names:
+            name, produced = process_subsystem(name)
+            logger.info("[subsystem-cache] %s: refreshed %s artifacts", name, produced)
+
+    try:
+        size_payload = compute_subsystem_size_rankings(stats_root)
+        size_payload["generated_at"] = timestamp
+        _write_json_atomic(os.path.join(subsystems_root, "size_rankings.json"), size_payload)
+        logger.info(
+            "[subsystem-cache] Size rankings cached (%s subsystems)",
+            size_payload.get("total_subsystems", 0),
+        )
+    except Exception as exc:
+        logger.info("[subsystem-cache] Warning: size rankings computation failed: %s", exc)
+
+    logger.info("[subsystem-cache] Completed cache refresh for %s subsystems", len(subsystem_names))
+
 
 if __name__ == "__main__":
     main()
