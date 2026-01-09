@@ -2086,6 +2086,12 @@ async function renderUserDashboard(user, month, summary) {
 
   const main = $("main-content");
 
+  let subsystemTimelineAnchor = null;
+  if (month.is_yearly) {
+    subsystemTimelineAnchor = document.createElement("div");
+    subsystemTimelineAnchor.className = "async-card-anchor";
+  }
+
   // KPIs
   const kpiContainer = document.createElement("div");
   kpiContainer.className = "kpi-grid";
@@ -2280,6 +2286,31 @@ async function renderUserDashboard(user, month, summary) {
 
     repoBox.appendChild(repoList);
     main.appendChild(repoBox);
+  }
+
+  if (subsystemTimelineAnchor) {
+    main.appendChild(subsystemTimelineAnchor);
+  }
+
+  if (month.is_yearly && subsystemTimelineAnchor) {
+    const timelineYear = parseInt(month.label, 10);
+    loadUserSubsystemActivity(user.slug, timelineYear)
+      .then(activity => {
+        try {
+          renderUserSubsystemTimeline(user.slug, activity, subsystemTimelineAnchor);
+        } catch (error) {
+          console.error("Error rendering user subsystem timeline:", error);
+          if (subsystemTimelineAnchor.parentElement) {
+            subsystemTimelineAnchor.remove();
+          }
+        }
+      })
+      .catch(error => {
+        console.error("Failed to load user subsystem timeline:", error);
+        if (subsystemTimelineAnchor.parentElement) {
+          subsystemTimelineAnchor.remove();
+        }
+      });
   }
 
   // Add contribution heatmap (build data even if summary.per_date is missing)
@@ -10322,6 +10353,211 @@ function renderUserOwnershipTimelines(userSlug, timelines, container) {
   
   timelineCard.appendChild(timelinesContainer);
   container.appendChild(timelineCard);
+}
+
+async function loadUserSubsystemActivity(userSlug, year) {
+  try {
+    return await fetchJSON(`/api/users/${encodeURIComponent(userSlug)}/subsystem-activity/${year}`);
+  } catch (error) {
+    console.error("Failed to load subsystem activity timeline for", userSlug, ":", error);
+    return null;
+  }
+}
+
+function renderUserSubsystemTimeline(userSlug, activityData, mountPoint) {
+  if (!mountPoint) {
+    mountPoint = document.createElement("div");
+    const main = $("main-content");
+    if (main) {
+      main.appendChild(mountPoint);
+    }
+  }
+
+  if (!activityData || !Array.isArray(activityData.timeline)) {
+    if (mountPoint && mountPoint.parentElement) {
+      mountPoint.remove();
+    }
+    return;
+  }
+
+  const timeline = activityData.timeline || [];
+  const summary = activityData.summary || {};
+
+  mountPoint.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = createTitleWithTooltip(
+    "🗺️ Subsystem Activity Timeline",
+    "Monthly breakdown of which subsystems this developer touched, highlighting the dominant subsystem for each month.",
+    "h2"
+  );
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "developer-subsystem-timeline";
+
+  const statsRow = document.createElement("div");
+  statsRow.className = "subsystem-timeline-stats";
+
+  const statsConfig = [
+    {
+      label: "Active Months",
+      value: summary.months_active || 0,
+      description: "Months with subsystem activity",
+    },
+    {
+      label: "Subsystems Touched",
+      value: summary.subsystems_touched || 0,
+      description: "Unique subsystems this year",
+    },
+    {
+      label: "Lines Changed",
+      value: (summary.total_changed_lines || 0).toLocaleString(),
+      description: "Lines added + deleted",
+    },
+  ];
+
+  if (summary.most_active_subsystem && summary.most_active_subsystem.name) {
+    const most = summary.most_active_subsystem;
+    statsConfig.push({
+      label: "Most Active Subsystem",
+      value: most.name,
+      description: `${(most.changed_lines || 0).toLocaleString()} lines`,
+    });
+  }
+
+  statsConfig.forEach((stat) => {
+    const statCard = document.createElement("div");
+    statCard.className = "subsystem-timeline-stat";
+
+    const statLabel = document.createElement("div");
+    statLabel.className = "stat-label";
+    statLabel.textContent = stat.label;
+
+    const statValue = document.createElement("div");
+    statValue.className = "stat-value";
+    statValue.textContent = typeof stat.value === "number" ? stat.value.toLocaleString() : stat.value;
+
+    const statDescription = document.createElement("div");
+    statDescription.className = "stat-description";
+    statDescription.textContent = stat.description || "";
+
+    statCard.appendChild(statLabel);
+    statCard.appendChild(statValue);
+    statCard.appendChild(statDescription);
+    statsRow.appendChild(statCard);
+  });
+
+  wrapper.appendChild(statsRow);
+
+  const timelineRow = document.createElement("div");
+  timelineRow.className = "subsystem-timeline-row";
+
+  timeline.forEach((monthEntry) => {
+    const monthBlock = document.createElement("div");
+    monthBlock.className = "timeline-month" + (monthEntry.has_activity ? " active" : " inactive");
+
+    const monthLabel = document.createElement("div");
+    monthLabel.className = "timeline-month-label";
+    monthLabel.textContent = monthEntry.short_label || monthEntry.display_label || monthEntry.month;
+    monthBlock.appendChild(monthLabel);
+
+    const monthMeta = document.createElement("div");
+    monthMeta.className = "timeline-month-meta";
+    if (monthEntry.has_activity) {
+      monthMeta.textContent = `${(monthEntry.total_changed_lines || 0).toLocaleString()} lines · ${(monthEntry.total_commits || 0).toLocaleString()} commits`;
+    } else {
+      monthMeta.textContent = "No subsystem activity";
+    }
+    monthBlock.appendChild(monthMeta);
+
+    if (monthEntry.has_activity && Array.isArray(monthEntry.subsystems) && monthEntry.subsystems.length > 0) {
+      const subsList = document.createElement("div");
+      subsList.className = "timeline-subsystem-list";
+
+      const subsToShow = monthEntry.subsystems.slice(0, 3);
+      subsToShow.forEach((sub) => {
+        const item = document.createElement("div");
+        item.className = "timeline-subsystem-item";
+
+        const nameEl = document.createElement("div");
+        nameEl.className = "timeline-subsystem-name";
+        nameEl.textContent = sub.name;
+
+        const linesEl = document.createElement("div");
+        linesEl.className = "timeline-subsystem-lines";
+        const lines = (sub.changed_lines || 0).toLocaleString();
+        const share = monthEntry.total_changed_lines > 0
+          ? Math.round((sub.changed_lines || 0) / monthEntry.total_changed_lines * 100)
+          : 0;
+        linesEl.textContent = share ? `${lines} lines (${share}%)` : `${lines} lines`;
+
+        const bar = document.createElement("div");
+        bar.className = "timeline-subsystem-bar";
+        const barFill = document.createElement("span");
+        const widthPercent = monthEntry.total_changed_lines > 0
+          ? Math.max(8, Math.min(100, ((sub.changed_lines || 0) / monthEntry.total_changed_lines) * 100))
+          : 100;
+        barFill.style.width = `${widthPercent}%`;
+        bar.appendChild(barFill);
+
+        item.appendChild(nameEl);
+        item.appendChild(linesEl);
+        item.appendChild(bar);
+        item.addEventListener("click", () => {
+          const stubPeriod = { label: monthEntry.label };
+          navigateToSubsystem(sub.name, stubPeriod);
+        });
+        subsList.appendChild(item);
+      });
+
+      if (monthEntry.subsystems.length > subsToShow.length) {
+        const more = document.createElement("div");
+        more.className = "timeline-more";
+        more.textContent = `+${monthEntry.subsystems.length - subsToShow.length} more`;
+        subsList.appendChild(more);
+      }
+
+      monthBlock.appendChild(subsList);
+    } else {
+      const emptyState = document.createElement("div");
+      emptyState.className = "timeline-month-empty";
+      emptyState.textContent = "Idle month";
+      monthBlock.appendChild(emptyState);
+    }
+
+    timelineRow.appendChild(monthBlock);
+  });
+
+  wrapper.appendChild(timelineRow);
+
+  if (Array.isArray(summary.top_subsystems) && summary.top_subsystems.length > 0) {
+    const topList = document.createElement("div");
+    topList.className = "timeline-top-subsystems";
+    summary.top_subsystems.forEach((sub) => {
+      const entry = document.createElement("div");
+      entry.className = "timeline-top-entry";
+
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = sub.name;
+
+      const stats = document.createElement("div");
+      stats.className = "lines";
+      const lines = (sub.changed_lines || 0).toLocaleString();
+      const months = sub.months_active || 0;
+      stats.textContent = `${lines} lines · ${months} mos`;
+
+      entry.appendChild(name);
+      entry.appendChild(stats);
+      entry.addEventListener("click", () => navigateToSubsystem(sub.name));
+      topList.appendChild(entry);
+    });
+    wrapper.appendChild(topList);
+  }
+
+  card.appendChild(wrapper);
+  mountPoint.appendChild(card);
 }
 
 function createUserOwnershipChart(canvasId, subsystemName, timelineData) {

@@ -35,6 +35,21 @@ REPO_ROOT = os.path.join(BASE_DIR, "repos")
 CLOC_CACHE_FILE = os.path.join(STATS_ROOT, "cloc_cache.json")
 BADGE_CACHE_FILE = os.path.join(STATS_ROOT, "badges_summary.json")
 
+MONTH_ABBREVIATIONS = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
+
 # Caches for expensive operations
 _SERVICES_CONFIG_CACHE: Optional[Dict[str, Dict[str, List[str]]]] = None
 _REPO_LANGUAGE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -823,6 +838,211 @@ def list_service_months() -> Dict[str, List[Dict[str, Any]]]:
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def build_user_subsystem_activity(user_slug: str, year: int) -> Dict[str, Any]:
+    """Build a monthly subsystem timeline for a developer."""
+
+    def _init_month_entries() -> Dict[str, Dict[str, Any]]:
+        entries: Dict[str, Dict[str, Any]] = {}
+        for month in range(1, 13):
+            month_key = f"{year:04d}-{month:02d}"
+            month_name = MONTH_ABBREVIATIONS[month - 1] if 1 <= month <= len(MONTH_ABBREVIATIONS) else month_key
+            entries[month_key] = {
+                "month": month_key,
+                "label": month_key,
+                "display_label": f"{month_name} {year}",
+                "short_label": month_name,
+                "from": None,
+                "to": None,
+                "total_commits": 0,
+                "total_changed_lines": 0,
+                "total_lines_added": 0,
+                "total_lines_deleted": 0,
+                "subsystems": [],
+                "has_activity": False,
+                "other_subsystems_count": 0,
+                "dominant_subsystem": None,
+            }
+        return entries
+
+    def _to_int(value: Any, default: int = 0) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if value in (None, ""):
+            return default
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _pick_number(data: Dict[str, Any], *keys: str) -> int:
+        for key in keys:
+            if key in data and data[key] is not None:
+                return _to_int(data[key])
+        return 0
+
+    month_entries = _init_month_entries()
+    subsystem_totals: Dict[str, Dict[str, Any]] = {}
+    subsystems_root = os.path.join(STATS_ROOT, "subsystems")
+
+    if os.path.isdir(subsystems_root):
+        for subsystem_name in sorted(os.listdir(subsystems_root)):
+            subsystem_path = os.path.join(subsystems_root, subsystem_name)
+            if not os.path.isdir(subsystem_path):
+                continue
+
+            for period_dir in os.listdir(subsystem_path):
+                if "_" not in period_dir:
+                    continue
+                if not period_dir.startswith(f"{year:04d}-"):
+                    continue
+
+                period_path = os.path.join(subsystem_path, period_dir)
+                if not os.path.isdir(period_path):
+                    continue
+
+                summary_path = os.path.join(period_path, "summary.json")
+                if not os.path.isfile(summary_path):
+                    continue
+
+                try:
+                    summary_data = load_json(summary_path)
+                except Exception:
+                    continue
+
+                from_date = summary_data.get("from") or period_dir.split("_", 1)[0]
+                to_date = summary_data.get("to") or period_dir.split("_", 1)[-1]
+                if not from_date or not to_date:
+                    continue
+                if not from_date.startswith(f"{year:04d}-"):
+                    continue
+
+                from_month = from_date[:7]
+                to_month = to_date[:7]
+                if from_month != to_month:
+                    continue
+                if from_month not in month_entries:
+                    continue
+
+                developers = summary_data.get("developers") or {}
+                dev_data = developers.get(user_slug)
+                if not dev_data:
+                    continue
+
+                month_entry = month_entries[from_month]
+                if month_entry["from"] is None:
+                    month_entry["from"] = from_date
+                if month_entry["to"] is None:
+                    month_entry["to"] = to_date
+
+                commits = _pick_number(dev_data, "commits")
+                lines_added = _pick_number(dev_data, "lines_added", "additions")
+                lines_deleted = _pick_number(dev_data, "lines_deleted", "deletions")
+                changed_lines_raw = dev_data.get("changed_lines")
+                changed_lines = (
+                    _to_int(changed_lines_raw)
+                    if changed_lines_raw is not None
+                    else lines_added + lines_deleted
+                )
+                net_lines_raw = dev_data.get("net_lines")
+                net_lines = (
+                    _to_int(net_lines_raw)
+                    if net_lines_raw is not None
+                    else lines_added - lines_deleted
+                )
+
+                month_entry["total_commits"] += commits
+                month_entry["total_changed_lines"] += changed_lines
+                month_entry["total_lines_added"] += lines_added
+                month_entry["total_lines_deleted"] += lines_deleted
+                month_entry["subsystems"].append(
+                    {
+                        "name": subsystem_name,
+                        "commits": commits,
+                        "lines_added": lines_added,
+                        "lines_deleted": lines_deleted,
+                        "changed_lines": changed_lines,
+                        "net_lines": net_lines,
+                    }
+                )
+                month_entry["has_activity"] = True
+
+                totals_entry = subsystem_totals.setdefault(
+                    subsystem_name,
+                    {
+                        "name": subsystem_name,
+                        "commits": 0,
+                        "lines_added": 0,
+                        "lines_deleted": 0,
+                        "changed_lines": 0,
+                        "net_lines": 0,
+                        "months": set(),
+                    },
+                )
+                totals_entry["commits"] += commits
+                totals_entry["lines_added"] += lines_added
+                totals_entry["lines_deleted"] += lines_deleted
+                totals_entry["changed_lines"] += changed_lines
+                totals_entry["net_lines"] += net_lines
+                totals_entry["months"].add(from_month)
+
+    timeline: List[Dict[str, Any]] = []
+    total_changed_lines_year = 0
+    total_commits_year = 0
+
+    for month in range(1, 13):
+        month_key = f"{year:04d}-{month:02d}"
+        entry = month_entries[month_key]
+
+        if entry["subsystems"]:
+            entry["subsystems"].sort(key=lambda item: item.get("changed_lines", 0), reverse=True)
+            entry["other_subsystems_count"] = max(0, len(entry["subsystems"]) - 1)
+            if entry["total_changed_lines"] <= 0:
+                entry["total_changed_lines"] = sum(sub.get("changed_lines", 0) for sub in entry["subsystems"])
+            dominant = entry["subsystems"][0]
+            total_lines = entry["total_changed_lines"] or dominant.get("changed_lines", 0)
+            share_percent = 0.0
+            if total_lines > 0:
+                share_percent = round((dominant.get("changed_lines", 0) / total_lines) * 100, 1)
+            entry["dominant_subsystem"] = {**dominant, "share_percent": share_percent}
+        else:
+            entry["other_subsystems_count"] = 0
+            entry["dominant_subsystem"] = None
+
+        total_changed_lines_year += entry["total_changed_lines"]
+        total_commits_year += entry["total_commits"]
+        timeline.append(entry)
+
+    top_subsystems: List[Dict[str, Any]] = []
+    for subsystem_name, stats in subsystem_totals.items():
+        months_active = len(stats.get("months", set()))
+        stats.pop("months", None)
+        stats["months_active"] = months_active
+        if total_changed_lines_year > 0:
+            stats["share_percent"] = round((stats.get("changed_lines", 0) / total_changed_lines_year) * 100, 1)
+        else:
+            stats["share_percent"] = 0.0
+        top_subsystems.append(stats)
+
+    top_subsystems.sort(key=lambda item: item.get("changed_lines", 0), reverse=True)
+
+    summary = {
+        "months_active": sum(1 for entry in timeline if entry["has_activity"]),
+        "subsystems_touched": len(subsystem_totals),
+        "total_changed_lines": total_changed_lines_year,
+        "total_commits": total_commits_year,
+        "top_subsystems": top_subsystems[:5],
+        "most_active_subsystem": top_subsystems[0] if top_subsystems else None,
+        "has_activity": any(entry["has_activity"] for entry in timeline),
+    }
+
+    return {
+        "user": user_slug,
+        "year": year,
+        "timeline": timeline,
+        "summary": summary,
+    }
 
 
 def load_cached_subsystem_payload(subsystem_name: str, filename: str) -> Optional[Dict[str, Any]]:
@@ -1696,6 +1916,28 @@ def api_user_year(user_slug: str, year: int):
     if capacity_profile:
         data["developer_capacity_profile"] = capacity_profile
     return jsonify(data)
+
+
+@app.route("/api/users/<user_slug>/subsystem-activity/<int:year>")
+def api_user_subsystem_activity(user_slug: str, year: int):
+    """Return subsystem timeline for a developer."""
+    try:
+        payload = build_user_subsystem_activity(user_slug, year)
+        return jsonify(payload)
+    except Exception as exc:
+        app.logger.error("Error generating subsystem activity for %s: %s", user_slug, exc)
+        return (
+            jsonify(
+                {
+                    "user": user_slug,
+                    "year": year,
+                    "timeline": [],
+                    "summary": {},
+                    "error": str(exc),
+                }
+            ),
+            500,
+        )
 
 
 @app.route("/api/subsystems")
