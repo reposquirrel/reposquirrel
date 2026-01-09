@@ -3963,10 +3963,11 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
     
     // Collect daily commit data for the subsystem
     const dailyCommits = {};
+    let monthlyData = [];
     
     if (period.is_yearly) {
       // For yearly view, get all monthly summaries for the year
-      const monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
+      monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
       
       // Process each monthly summary to extract developers and get their real daily data
       for (const monthSummary of monthlyData) {
@@ -4024,7 +4025,7 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
       }
     } else {
       // For monthly view, get real daily data from users
-      const monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
+      monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
       
       // Process only the month that matches our selected period
       for (const monthSummary of monthlyData) {
@@ -4106,6 +4107,15 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
       
       heatmapCard.appendChild(heatmapContainer);
       container.appendChild(heatmapCard);
+
+      if (monthlyData.length > 0) {
+        try {
+          const highlightMonth = period.is_yearly ? null : (period.from ? period.from.slice(0, 7) : null);
+          renderSubsystemLineChangeTimeline(container, monthlyData, subsystemName, highlightMonth);
+        } catch (chartError) {
+          console.error("Error creating subsystem line change timeline:", chartError);
+        }
+      }
       
     } catch (error) {
       console.error("Error creating contribution heatmap:", error);
@@ -4167,6 +4177,172 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
     console.error("Failed to load contribution activity for", subsystemName, ":", error);
     // Don't show error to user, just skip this section
   }
+}
+
+function renderSubsystemLineChangeTimeline(container, monthlyData, subsystemName, highlightMonthKey = null) {
+  if (!Array.isArray(monthlyData) || monthlyData.length === 0) {
+    return;
+  }
+
+  const entries = monthlyData
+    .map((summary) => {
+      if (!summary || !summary.from) {
+        return null;
+      }
+      const totals = extractSubsystemLineTotals(summary);
+      return {
+        monthKey: summary.from.slice(0, 7),
+        label: formatSubsystemMonthLabel(summary.from),
+        additions: totals.additions,
+        deletions: totals.deletions,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.monthKey || "").localeCompare(b.monthKey || ""));
+
+  const hasActivity = entries.some((entry) => entry.additions > 0 || entry.deletions > 0);
+  if (!hasActivity) {
+    return;
+  }
+
+  const safeSubsystemId = (subsystemName || "subsystem")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "subsystem";
+  const chartId = `chart-subsystem-line-changes-${safeSubsystemId}-${Date.now()}`;
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = createTitleWithTooltip(
+    "📈 Line Change Timeline",
+    "Monthly lines added (green) and deleted (red) for this subsystem. Use it to spot bursts of activity and quieter periods over the selected year.",
+    "h2"
+  );
+
+  const chartWrapper = document.createElement("div");
+  chartWrapper.style.height = "280px";
+  const canvas = document.createElement("canvas");
+  canvas.id = chartId;
+  chartWrapper.appendChild(canvas);
+  card.appendChild(chartWrapper);
+  container.appendChild(card);
+
+  const labels = entries.map((entry) => entry.label);
+  const additionsData = entries.map((entry) => entry.additions);
+  const deletionsData = entries.map((entry) => entry.deletions);
+  const netData = entries.map((entry) => entry.additions - entry.deletions);
+  const highlightIndex = highlightMonthKey ? entries.findIndex((entry) => entry.monthKey === highlightMonthKey) : -1;
+
+  const addedColors = labels.map((_, idx) => (idx === highlightIndex ? "rgba(16, 185, 129, 0.85)" : "rgba(34, 197, 94, 0.6)"));
+  const addedBorders = labels.map((_, idx) => (idx === highlightIndex ? "rgba(16, 185, 129, 1)" : "rgba(22, 163, 74, 1)"));
+  const deletedColors = labels.map((_, idx) => (idx === highlightIndex ? "rgba(248, 113, 113, 0.85)" : "rgba(239, 68, 68, 0.6)"));
+  const deletedBorders = labels.map((_, idx) => (idx === highlightIndex ? "rgba(239, 68, 68, 1)" : "rgba(220, 38, 38, 1)"));
+
+  const ctx = canvas.getContext("2d");
+  if (state.charts[chartId]) {
+    state.charts[chartId].destroy();
+  }
+
+  const chart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Lines Added",
+          data: additionsData,
+          backgroundColor: addedColors,
+          borderColor: addedBorders,
+          borderWidth: 1,
+          order: 1,
+        },
+        {
+          label: "Lines Deleted",
+          data: deletionsData,
+          backgroundColor: deletedColors,
+          borderColor: deletedBorders,
+          borderWidth: 1,
+          order: 1,
+        },
+        {
+          type: "line",
+          label: "Net Lines",
+          data: netData,
+          borderColor: "#2563eb",
+          backgroundColor: "rgba(37, 99, 235, 0.15)",
+          borderWidth: 2,
+          fill: false,
+          tension: 0.25,
+          pointRadius: 3,
+          order: 3,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: "index",
+        intersect: false,
+      },
+      plugins: {
+        legend: { position: "top" },
+      },
+      scales: {
+        x: {
+          title: { display: true, text: "Month" },
+        },
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: "Lines of Code" },
+        },
+      },
+    },
+  });
+
+  state.charts[chartId] = chart;
+}
+
+function extractSubsystemLineTotals(summary) {
+  if (!summary || typeof summary !== "object") {
+    return { additions: 0, deletions: 0 };
+  }
+
+  const hasTotalAdditions = typeof summary.total_lines_added === "number";
+  const hasTotalDeletions = typeof summary.total_lines_deleted === "number";
+  let additions = hasTotalAdditions ? summary.total_lines_added : null;
+  let deletions = hasTotalDeletions ? summary.total_lines_deleted : null;
+
+  if (additions !== null && deletions !== null) {
+    return { additions, deletions };
+  }
+
+  let repoAdditions = 0;
+  let repoDeletions = 0;
+  const repos = summary.repositories || {};
+  for (const repoData of Object.values(repos)) {
+    repoAdditions += repoData.lines_added || 0;
+    repoDeletions += repoData.lines_deleted || 0;
+  }
+
+  return {
+    additions: additions !== null ? additions : repoAdditions,
+    deletions: deletions !== null ? deletions : repoDeletions,
+  };
+}
+
+function formatSubsystemMonthLabel(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") {
+    return "Unknown";
+  }
+  const [year, month] = dateStr.split("-");
+  if (!year || !month) {
+    return dateStr;
+  }
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const monthIndex = parseInt(month, 10) - 1;
+  const monthLabel = monthNames[monthIndex] || month;
+  return `${monthLabel} ${year}`;
 }
 
 async function collectSubsystemMonthlyData(subsystemName, year) {
