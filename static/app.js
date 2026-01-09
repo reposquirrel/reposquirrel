@@ -4511,6 +4511,18 @@ async function showSubsystemsOverviewDashboard() {
       console.error("Error loading language lines distribution:", error);
     }
     
+    try {
+      addSubsystemWorkloadTrendSection(main, overviewData.trend);
+    } catch (error) {
+      console.error("Error rendering subsystem workload trend:", error);
+    }
+
+    try {
+      addRecentSubsystemWorkloadSection(main, overviewData.recent_trend);
+    } catch (error) {
+      console.error("Error rendering recent subsystem workload chart:", error);
+    }
+    
     // Activity section
     if (overviewData.activity) {
       const activitySection = document.createElement("div");
@@ -4627,6 +4639,293 @@ async function showSubsystemsOverviewDashboard() {
     const main = $("main-content");
     main.innerHTML = '<div class="error">Failed to load subsystems overview: ' + error.message + '</div>';
   }
+}
+
+function addSubsystemWorkloadTrendSection(container, trendData) {
+  if (!container || !trendData) {
+    return;
+  }
+  const months = Array.isArray(trendData.months) ? trendData.months.filter(Boolean) : [];
+  const rawSeries = Array.isArray(trendData.series) ? trendData.series : [];
+  if (!months.length || !rawSeries.length) {
+    return;
+  }
+
+  const filteredSeries = rawSeries
+    .map((entry) => ({
+      name: entry.name,
+      values: Array.isArray(entry.values) ? entry.values : [],
+      total: entry.total || 0,
+      isAggregate: !!entry.is_aggregate
+    }))
+    .filter((entry) => entry.values.some((value) => value > 0));
+
+  if (!filteredSeries.length) {
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = createTitleWithTooltip(
+    "📊 Workload Distribution (Last 12 Months)",
+    "Stacked monthly view of the busiest subsystems measured by lines changed. Quickly shows where engineering effort concentrated over the past year.",
+    "h2"
+  );
+
+  const chartWrapper = document.createElement("div");
+  chartWrapper.style.marginTop = "12px";
+  chartWrapper.style.height = "320px";
+  const canvas = document.createElement("canvas");
+  const chartId = `chart-subsystem-trend-${Date.now()}`;
+  canvas.id = chartId;
+  chartWrapper.appendChild(canvas);
+  card.appendChild(chartWrapper);
+
+  const ctx = canvas.getContext("2d");
+  const labels = months.map((monthKey) => formatSubsystemMonthLabel(monthKey));
+  const colorPalette = [
+    "rgba(37, 99, 235, 0.85)",
+    "rgba(34, 197, 94, 0.85)",
+    "rgba(249, 115, 22, 0.85)",
+    "rgba(168, 85, 247, 0.85)",
+    "rgba(14, 165, 233, 0.85)",
+    "rgba(244, 63, 94, 0.85)",
+    "rgba(5, 150, 105, 0.85)",
+    "rgba(234, 179, 8, 0.85)"
+  ];
+  const borderPalette = [
+    "#2563eb",
+    "#22c55e",
+    "#f97316",
+    "#a855f7",
+    "#0ea5e9",
+    "#f43f5e",
+    "#059669",
+    "#eab308"
+  ];
+
+  const datasets = filteredSeries.map((entry, idx) => {
+    const paddedValues = entry.values.slice(0, months.length);
+    while (paddedValues.length < months.length) {
+      paddedValues.push(0);
+    }
+    const paletteIndex = idx % colorPalette.length;
+    const backgroundColor = entry.isAggregate ? "rgba(107, 114, 128, 0.5)" : colorPalette[paletteIndex];
+    const borderColor = entry.isAggregate ? "rgba(107, 114, 128, 0.9)" : borderPalette[paletteIndex];
+    return {
+      label: entry.name,
+      data: paddedValues,
+      backgroundColor,
+      borderColor,
+      borderWidth: entry.isAggregate ? 1 : 0,
+      stack: "subsystem-workload"
+    };
+  });
+
+  if (state.charts[chartId]) {
+    state.charts[chartId].destroy();
+  }
+
+  const trendChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: "index",
+        intersect: false
+      },
+      plugins: {
+        legend: { position: "bottom" },
+        tooltip: {
+          callbacks: {
+            label(context) {
+              const value = context.parsed.y ?? context.parsed ?? 0;
+              const formatted = typeof value === "number" ? value.toLocaleString() : value;
+              return `${context.dataset.label}: ${formatted} lines`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          stacked: true
+        },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "Lines changed" },
+          ticks: {
+            callback(value) {
+              return typeof value === "number" ? value.toLocaleString() : value;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  state.charts[chartId] = trendChart;
+
+  const summary = document.createElement("div");
+  summary.style.display = "flex";
+  summary.style.flexWrap = "wrap";
+  summary.style.gap = "8px";
+  summary.style.marginTop = "14px";
+
+  filteredSeries.forEach((entry) => {
+    if ((entry.total || 0) <= 0) {
+      return;
+    }
+    const pill = document.createElement("span");
+    pill.style.backgroundColor = "var(--background-secondary)";
+    pill.style.border = "1px solid var(--border)";
+    pill.style.borderRadius = "999px";
+    pill.style.padding = "4px 10px";
+    pill.style.fontSize = "0.85em";
+    pill.textContent = `${entry.name}: ${(entry.total || 0).toLocaleString()} lines`;
+    summary.appendChild(pill);
+  });
+
+  if (summary.children.length > 0) {
+    card.appendChild(summary);
+  }
+
+  container.appendChild(card);
+}
+
+function addRecentSubsystemWorkloadSection(container, recentTrendData) {
+  if (!container || !recentTrendData) {
+    return;
+  }
+
+  const months = Array.isArray(recentTrendData.months) ? recentTrendData.months.filter(Boolean) : [];
+  const rawSeries = Array.isArray(recentTrendData.series) ? recentTrendData.series : [];
+  if (!months.length || !rawSeries.length) {
+    return;
+  }
+
+  const labels = months.map((monthKey) => formatSubsystemMonthLabel(monthKey));
+  const normalizedSeries = rawSeries
+    .map((entry) => {
+      const values = Array.isArray(entry.values) ? entry.values : [];
+      const safeValues = labels.map((_, idx) => {
+        const value = values[idx];
+        return typeof value === "number" ? value : 0;
+      });
+      const total = typeof entry.total === "number"
+        ? entry.total
+        : safeValues.reduce((sum, value) => sum + value, 0);
+      return {
+        name: entry.name,
+        values: safeValues,
+        total
+      };
+    })
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total);
+
+  if (!normalizedSeries.length) {
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = createTitleWithTooltip(
+    "🔎 Detailed Workload (Last 2 Months)",
+    "Shows per-subsystem line changes for the two latest months without grouping so short-term hotspots stay visible.",
+    "h2"
+  );
+
+  const helperText = document.createElement("p");
+  helperText.style.margin = "4px 0 0";
+  helperText.style.fontSize = "0.9rem";
+  helperText.style.color = "var(--text-muted, #6b7280)";
+  helperText.textContent = "Hover to inspect subsystem names and exact line counts.";
+  card.appendChild(helperText);
+
+  const chartWrapper = document.createElement("div");
+  chartWrapper.style.marginTop = "12px";
+  const dynamicHeight = Math.min(640, Math.max(260, normalizedSeries.length * 18));
+  chartWrapper.style.height = `${dynamicHeight}px`;
+  const canvas = document.createElement("canvas");
+  const chartId = `chart-subsystem-recent-${Date.now()}`;
+  canvas.id = chartId;
+  chartWrapper.appendChild(canvas);
+  card.appendChild(chartWrapper);
+  container.appendChild(card);
+
+  const ctx = canvas.getContext("2d");
+  const colorForIndex = (idx, alpha = 0.75) => {
+    const hue = (idx * 37) % 360;
+    return `hsla(${hue}, 65%, 55%, ${alpha})`;
+  };
+
+  const datasets = normalizedSeries.map((entry, idx) => ({
+    label: entry.name,
+    data: entry.values,
+    backgroundColor: colorForIndex(idx, 0.7),
+    borderColor: colorForIndex(idx, 1),
+    borderWidth: 1,
+    stack: "recent-subsystem-workload"
+  }));
+
+  if (state.charts[chartId]) {
+    state.charts[chartId].destroy();
+  }
+
+  const recentChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: "nearest",
+        intersect: true,
+        axis: "x"
+      },
+      plugins: {
+        legend: {
+          display: normalizedSeries.length <= 18,
+          position: "bottom"
+        },
+        tooltip: {
+          mode: "nearest",
+          intersect: true,
+          callbacks: {
+            label(context) {
+              const value = context.parsed.y ?? context.parsed ?? 0;
+              const formatted = typeof value === "number" ? value.toLocaleString() : value;
+              return `${context.dataset.label}: ${formatted} lines`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { stacked: true },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "Lines changed" },
+          ticks: {
+            callback(value) {
+              return typeof value === "number" ? value.toLocaleString() : value;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  state.charts[chartId] = recentChart;
 }
 
 async function showUsersOverviewDashboard() {

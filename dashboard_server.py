@@ -2097,15 +2097,24 @@ def api_subsystems_overview():
             last_month = current_date.month - 1
             last_year = current_date.year
         
-        last_month_start = f"{last_year:04d}-{last_month:02d}-01"
+        # Build trailing 12-month window ending with last month
+        trend_months = []
+        trend_year = last_year
+        trend_month = last_month
+        for _ in range(12):
+            trend_months.append((trend_year, trend_month))
+            trend_month -= 1
+            if trend_month == 0:
+                trend_month = 12
+                trend_year -= 1
+        trend_months = list(reversed(trend_months))
+        trend_month_labels = [f"{year:04d}-{month:02d}" for year, month in trend_months]
+        trend_month_set = set(trend_month_labels)
+        last_month_key = f"{last_year:04d}-{last_month:02d}"
         
-        # Find last day of last month
-        import calendar
-        last_day = calendar.monthrange(last_year, last_month)[1]
-        last_month_end = f"{last_year:04d}-{last_month:02d}-{last_day:02d}"
-        
-        # Get activity data for last month
+        # Get activity data for last month and collect trend data
         subsystems_activity = []
+        subsystem_trend_data = {}
         subsystems_root = os.path.join(STATS_ROOT, "subsystems")
         
         if os.path.exists(subsystems_root):
@@ -2114,10 +2123,37 @@ def api_subsystems_overview():
                 if not os.path.isdir(subsystem_dir):
                     continue
                 
-                # Look for last month's data
-                activity_data = {"name": subsystem_name, "commits": 0, "lines_changed": 0, "developers": 0}
+                # Prepare lookup for available monthly summaries within the window
+                period_lookup = {}
+                try:
+                    period_entries = os.listdir(subsystem_dir)
+                except OSError:
+                    period_entries = []
+                for period_dir in period_entries:
+                    period_path = os.path.join(subsystem_dir, period_dir)
+                    if not os.path.isdir(period_path):
+                        continue
+                    if "_" not in period_dir:
+                        continue
+                    parts = period_dir.split("_")
+                    if len(parts) < 2:
+                        continue
+                    start_part = parts[0]
+                    if len(start_part) < 7:
+                        continue
+                    month_key = start_part[:7]
+                    if month_key not in trend_month_set:
+                        continue
+                    end_part = parts[-1]
+                    is_same_month = end_part[:7] == month_key
+                    data_entry = period_lookup.setdefault(month_key, {"monthly": None, "any": None})
+                    if is_same_month and data_entry["monthly"] is None:
+                        data_entry["monthly"] = period_path
+                    if data_entry["any"] is None:
+                        data_entry["any"] = period_path
                 
-                # Add dead status
+                # Initialize activity data with dead status info
+                activity_data = {"name": subsystem_name, "commits": 0, "lines_changed": 0, "developers": 0}
                 if subsystem_name in dead_status:
                     activity_data["is_dead"] = dead_status[subsystem_name]["is_dead"]
                     activity_data["last_activity_date"] = dead_status[subsystem_name]["last_activity_date"]
@@ -2127,24 +2163,50 @@ def api_subsystems_overview():
                     activity_data["last_activity_date"] = None
                     activity_data["months_since_activity"] = None
                 
-                for period_dir in os.listdir(subsystem_dir):
-                    if period_dir.startswith(last_month_start[:7]):  # Match YYYY-MM
-                        period_path = os.path.join(subsystem_dir, period_dir)
-                        summary_file = os.path.join(period_path, "summary.json")
-                        
+                monthly_values = []
+                total_changes = 0
+                last_month_summary = None
+                for month_key in trend_month_labels:
+                    summary_data = None
+                    period_entry = period_lookup.get(month_key)
+                    summary_path = None
+                    if period_entry:
+                        summary_path = period_entry.get("monthly") or period_entry.get("any")
+                    if summary_path:
+                        summary_file = os.path.join(summary_path, "summary.json")
                         if os.path.exists(summary_file):
                             try:
                                 with open(summary_file, "r", encoding="utf-8") as f:
                                     summary_data = json.load(f)
-                                
-                                activity_data["commits"] = summary_data.get("total_commits", 0)
-                                activity_data["lines_changed"] = summary_data.get("total_changed_lines", 0)
-                                activity_data["developers"] = len(summary_data.get("developers", {}))
-                                break
-                                
                             except (json.JSONDecodeError, IOError):
-                                continue
+                                summary_data = None
+                    lines_changed = 0
+                    if summary_data:
+                        lines_changed = summary_data.get("total_changed_lines")
+                        if lines_changed is None:
+                            additions = summary_data.get("total_lines_added", 0)
+                            deletions = summary_data.get("total_lines_deleted", 0)
+                            lines_changed = additions + deletions
+                        if month_key == last_month_key:
+                            last_month_summary = summary_data
+                    monthly_values.append(lines_changed or 0)
+                    total_changes += lines_changed or 0
                 
+                if last_month_summary:
+                    activity_data["commits"] = last_month_summary.get("total_commits", 0)
+                    last_month_lines = last_month_summary.get("total_changed_lines")
+                    if last_month_lines is None:
+                        last_month_lines = (
+                            last_month_summary.get("total_lines_added", 0) +
+                            last_month_summary.get("total_lines_deleted", 0)
+                        )
+                    activity_data["lines_changed"] = last_month_lines
+                    activity_data["developers"] = len(last_month_summary.get("developers", {}))
+                
+                subsystem_trend_data[subsystem_name] = {
+                    "values": monthly_values,
+                    "total": total_changes
+                }
                 subsystems_activity.append(activity_data)
         
         # Sort activity data
@@ -2153,6 +2215,70 @@ def api_subsystems_overview():
         
         # Count dead subsystems
         dead_subsystems = [s for s in subsystems_activity if s["is_dead"]]
+        
+        # Prepare trend payload highlighting busiest subsystems
+        workload_series = []
+        recent_trend_payload = None
+        if subsystem_trend_data:
+            sorted_trends = sorted(
+                subsystem_trend_data.items(),
+                key=lambda item: item[1]["total"],
+                reverse=True
+            )
+            top_limit = 6
+            total_months = len(trend_month_labels)
+            for name, data in sorted_trends[:top_limit]:
+                if data["total"] <= 0:
+                    continue
+                # Ensure value list matches months
+                values = data["values"]
+                if len(values) != total_months:
+                    values = (values + [0] * total_months)[:total_months]
+                workload_series.append({
+                    "name": name,
+                    "values": values,
+                    "total": data["total"]
+                })
+            if len(sorted_trends) > top_limit:
+                others_values = [0] * len(trend_month_labels)
+                others_total = 0
+                for _, data in sorted_trends[top_limit:]:
+                    others_total += data["total"]
+                    values = data["values"]
+                    if len(values) != total_months:
+                        values = (values + [0] * total_months)[:total_months]
+                    for idx, value in enumerate(values):
+                        others_values[idx] += value
+                if others_total > 0:
+                    workload_series.append({
+                        "name": "Others",
+                        "values": others_values,
+                        "total": others_total,
+                        "is_aggregate": True
+                    })
+
+            # Build ungrouped view for the most recent months
+            if trend_month_labels:
+                recent_month_count = 2
+                months_to_include = trend_month_labels[-recent_month_count:]
+                recent_series = []
+                for name, data in sorted_trends:
+                    values = data["values"]
+                    if len(values) != total_months:
+                        values = (values + [0] * total_months)[:total_months]
+                    slice_length = len(months_to_include)
+                    recent_values = values[-slice_length:]
+                    if any(value > 0 for value in recent_values):
+                        recent_series.append({
+                            "name": name,
+                            "values": recent_values,
+                            "total": sum(recent_values)
+                        })
+                if recent_series:
+                    recent_trend_payload = {
+                        "months": months_to_include,
+                        "series": recent_series
+                    }
         
         return jsonify({
             "size_data": size_data,
@@ -2165,7 +2291,12 @@ def api_subsystems_overview():
             "dead_subsystems": {
                 "count": len(dead_subsystems),
                 "subsystems": dead_subsystems
-            }
+            },
+            "trend": {
+                "months": trend_month_labels,
+                "series": workload_series
+            },
+            "recent_trend": recent_trend_payload
         })
         
     except Exception as e:
