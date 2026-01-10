@@ -293,7 +293,9 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 
 See [LICENSE](LICENSE) file for details.
 
-For commercial use exceptions, see [COMMERCIAL_LICENSE_EXCEPTIONS.md](COMMERCIAL_LICENSE_EXCEPTIONS.md).
+Commercial organizations are welcome to trial RepoSquirrel without requesting an exception, but if you plan to use it longer-term please apply for a license exception via [COMMERCIAL_LICENSE_EXCEPTIONS.md](COMMERCIAL_LICENSE_EXCEPTIONS.md).
+
+
 
 ## Contributing
 
