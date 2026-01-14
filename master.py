@@ -8,6 +8,7 @@ import json
 import re
 import logging
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -28,6 +29,129 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+OCLOC_BIN = os.environ.get("OCLOC_BIN", "ocloc")
+_OCLOC_VERSION_CACHE: Optional[str] = None
+_OCLOC_VERSION_FAILED = False
+_OCLOC_NOT_FOUND_LOGGED = False
+
+
+def _emit_ocloc_missing_message() -> None:
+    global _OCLOC_NOT_FOUND_LOGGED
+    if _OCLOC_NOT_FOUND_LOGGED:
+        return
+    _OCLOC_NOT_FOUND_LOGGED = True
+    logger.info(
+        "ocloc binary not found. Install it from https://github.com/adhishthite/ocloc "
+        "or set OCLOC_BIN to the executable path."
+    )
+
+
+@contextmanager
+def _ocloc_ignore_file() -> Optional[str]:
+    entries = [entry.strip() for entry in CLOC_EXCLUDE_DIRS.split(",") if entry.strip()]
+    if not entries:
+        yield None
+        return
+
+    fd, tmp_path = tempfile.mkstemp(prefix="ocloc-ignore-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write("# Auto-generated ignore file for ocloc\n")
+            seen = set()
+            for entry in entries:
+                normalized = entry.strip().strip("/")
+                if not normalized:
+                    continue
+                patterns = [
+                    f"!{normalized}",
+                    f"!{normalized}/",
+                    f"!{normalized}/**",
+                    f"!**/{normalized}",
+                    f"!**/{normalized}/",
+                    f"!**/{normalized}/**",
+                ]
+                for pattern in patterns:
+                    if pattern in seen:
+                        continue
+                    tmp_file.write(pattern + "\n")
+                    seen.add(pattern)
+        yield tmp_path
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _run_ocloc_json(target_path: str, ignore_file: Optional[str] = None) -> Optional[dict]:
+    cmd = [OCLOC_BIN, "--json"]
+    if ignore_file:
+        cmd.extend(["--ignore-file", ignore_file])
+    cmd.append(target_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        _emit_ocloc_missing_message()
+        return None
+    except Exception as exc:
+        logger.info(f"Warning: Failed to run {OCLOC_BIN} for {target_path}: {exc}")
+        return None
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            logger.info(
+                "Warning: %s returned code %s for %s (stderr: %s)",
+                OCLOC_BIN,
+                result.returncode,
+                target_path,
+                stderr,
+            )
+        else:
+            logger.info(
+                "Warning: %s returned code %s for %s",
+                OCLOC_BIN,
+                result.returncode,
+                target_path,
+            )
+        return None
+
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        return None
+
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        logger.info(f"Warning: Failed to parse {OCLOC_BIN} output for {target_path}: {exc}")
+        return None
+
+
+def _get_ocloc_version() -> str:
+    global _OCLOC_VERSION_CACHE, _OCLOC_VERSION_FAILED
+    if _OCLOC_VERSION_CACHE:
+        return _OCLOC_VERSION_CACHE
+    if _OCLOC_VERSION_FAILED:
+        return ""
+
+    try:
+        result = subprocess.run([OCLOC_BIN, "--version"], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        _OCLOC_VERSION_FAILED = True
+        _emit_ocloc_missing_message()
+        return ""
+    except Exception:
+        _OCLOC_VERSION_FAILED = True
+        return ""
+
+    if result.returncode != 0:
+        _OCLOC_VERSION_FAILED = True
+        return ""
+
+    version = (result.stdout or result.stderr or "").strip() or "unknown"
+    _OCLOC_VERSION_CACHE = version
+    return version
 
 
 def _write_json_atomic(path: str, payload: dict) -> None:
@@ -166,32 +290,23 @@ def run_cloc(paths: list[str]) -> dict:
     existing = [p for p in paths if p and os.path.exists(p)]
     if not existing:
         return {}
-    cmd = [
-        "cloc",
-        "--json",
-        "--quiet",
-        f"--exclude-dir={CLOC_EXCLUDE_DIRS}",
-    ] + existing
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode not in (0, 1):
-            logger.info(f"Warning: cloc returned code {result.returncode} for {existing}")
-            return {}
-        data = json.loads(result.stdout or "{}")
-        languages = {}
-        for lang, info in data.items():
-            if not isinstance(info, dict):
+
+    aggregated = defaultdict(int)
+    with _ocloc_ignore_file() as ignore_file:
+        for path in existing:
+            data = _run_ocloc_json(path, ignore_file)
+            if not data:
                 continue
-            code_lines = info.get("code")
-            if code_lines is None:
-                continue
-            if str(lang).lower() in {"sum", "header"}:
-                continue
-            languages[lang] = int(code_lines)
-        return languages
-    except Exception as exc:
-        logger.info(f"Warning: cloc failed for {existing}: {exc}")
-        return {}
+            per_lang = data.get("languages") or {}
+            for lang, info in per_lang.items():
+                if not isinstance(info, dict):
+                    continue
+                code_lines = info.get("code")
+                if code_lines is None:
+                    continue
+                aggregated[lang] += int(code_lines)
+
+    return dict(aggregated)
 
 
 def discover_repo_candidates(repos_root: str, output_root: str, services_config: dict) -> list[str]:
@@ -222,7 +337,7 @@ def discover_repo_candidates(repos_root: str, output_root: str, services_config:
 
 def generate_cloc_cache(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
     logger.info("\n===========================================")
-    logger.info("Generating repo/service CLOC cache")
+    logger.info("Generating repo/service LOC cache via ocloc")
     logger.info("===========================================")
     services_config = load_services_config_file(services_file)
     stats_dir = os.path.join(output_root, "stats")
@@ -231,7 +346,7 @@ def generate_cloc_cache(repos_root: str, output_root: str, services_file: str, m
 
     repo_candidates = discover_repo_candidates(repos_root, output_root, services_config)
     if not repo_candidates:
-        logger.info("No repositories discovered for CLOC cache generation")
+        logger.info("No repositories discovered for LOC cache generation")
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump({}, f)
         return
@@ -301,7 +416,7 @@ def generate_cloc_cache(repos_root: str, output_root: str, services_file: str, m
 
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, sort_keys=True)
-    logger.info(f"CLOC cache written to {cache_path} ({len(cache)} repos)")
+    logger.info(f"LOC cache written to {cache_path} ({len(cache)} repos)")
 
 
 def refresh_badge_cache_via_server() -> None:
@@ -433,6 +548,10 @@ def main() -> None:
     skip_blame = args.skip_blame
     parallel = args.parallel
     cpu_count = args.cpu_count
+
+    if not _get_ocloc_version():
+        logger.info("ERROR: ocloc binary is required but was not found in PATH. Set OCLOC_BIN or install ocloc.")
+        sys.exit(1)
 
     if year < 1:
         logger.info("ERROR: year must be a positive integer")
@@ -696,7 +815,7 @@ def main() -> None:
     try:
         generate_cloc_cache(repos_root, output_root, services_file, max_parallel_workers=max_workers)
     except Exception as exc:
-        logger.info(f"Warning: Failed to generate CLOC cache: {exc}")
+        logger.info(f"Warning: Failed to generate LOC cache: {exc}")
 
     try:
         precompute_subsystem_dashboard_caches(
@@ -1635,10 +1754,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
 
 
 def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
-    """Generate language statistics for each subsystem using cloc."""
-    import json
-    import subprocess
-    import tempfile
+    """Generate language statistics for each subsystem using ocloc."""
     
     # Load services configuration
     services_config = {}
@@ -1654,13 +1770,11 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
     stats_root = os.path.join(output_root, "stats")
     subsystems_stats_root = os.path.join(stats_root, "subsystems")
     
-    # Check if cloc is available
-    try:
-        subprocess.run(["cloc", "--version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.info("cloc not found. Please install cloc to generate language statistics.")
-        logger.info("On Ubuntu/Debian: sudo apt-get install cloc")
-        logger.info("On macOS: brew install cloc")
+    # Check if ocloc is available
+    version = _get_ocloc_version()
+    if not version:
+        logger.info("ocloc not found. Please install ocloc to generate language statistics.")
+        logger.info("See https://github.com/adhishthite/ocloc for installation instructions or set OCLOC_BIN to the binary path.")
         return
     
     logger.info("Generating language statistics for subsystems...")
@@ -1766,89 +1880,65 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
 
 
 def run_cloc_for_paths(paths: list) -> dict:
-    """Run cloc on the given paths and return language statistics."""
-    import subprocess
-    import json
-    import tempfile
-    import os
-    from datetime import datetime
+    """Run LOC tool on the given paths and return language statistics."""
+    existing = [p for p in paths if p and os.path.exists(p)]
+    if not existing:
+        return {}
 
-    # Create a temporary file listing all paths
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp_file:
-        for path in paths:
-            tmp_file.write(path + "\n")
-        tmp_file_path = tmp_file.name
+    languages: dict[str, dict] = {}
+    totals = {
+        "files": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "code_lines": 0,
+    }
+    elapsed_seconds = 0.0
 
-    try:
-        cmd = [
-            "cloc",
-            "--json",
-            "--list-file=" + tmp_file_path,
-            "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
-            "--skip-uniqueness",
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-
-        if result.returncode != 0:
-            print(f"    cloc command failed with return code {result.returncode}")
-            if result.stderr:
-                print(f"    stderr: {result.stderr}")
-            return {}
-
-        if not result.stdout.strip():
-            print("    cloc produced no output")
-            return {}
-
-        try:
-            cloc_data = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            print(f"    Failed to parse cloc JSON output: {e}")
-            return {}
-
-        languages = {}
-        header = cloc_data.get("header", {})
-
-        for lang_name, lang_data in cloc_data.items():
-            if lang_name in ("header", "SUM"):
+    with _ocloc_ignore_file() as ignore_file:
+        for path in existing:
+            data = _run_ocloc_json(path, ignore_file)
+            if not data:
                 continue
-            if isinstance(lang_data, dict) and "nFiles" in lang_data:
-                languages[lang_name] = {
-                    "files": lang_data.get("nFiles", 0),
-                    "blank_lines": lang_data.get("blank", 0),
-                    "comment_lines": lang_data.get("comment", 0),
-                    "code_lines": lang_data.get("code", 0),
-                }
 
-        result_data = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "cloc_version": header.get("cloc_version", "unknown"),
-            "elapsed_seconds": header.get("elapsed_seconds", 0),
-            "languages": languages,
-        }
+            per_lang = data.get("languages") or {}
+            for lang_name, lang_data in per_lang.items():
+                if not isinstance(lang_data, dict):
+                    continue
+                entry = languages.setdefault(
+                    lang_name,
+                    {
+                        "files": 0,
+                        "blank_lines": 0,
+                        "comment_lines": 0,
+                        "code_lines": 0,
+                    },
+                )
+                entry["files"] += int(lang_data.get("files") or 0)
+                entry["blank_lines"] += int(lang_data.get("blank") or 0)
+                entry["comment_lines"] += int(lang_data.get("comment") or 0)
+                entry["code_lines"] += int(lang_data.get("code") or 0)
 
-        sum_data = cloc_data.get("SUM", {})
-        if sum_data:
-            result_data["totals"] = {
-                "files": sum_data.get("nFiles", 0),
-                "blank_lines": sum_data.get("blank", 0),
-                "comment_lines": sum_data.get("comment", 0),
-                "code_lines": sum_data.get("code", 0),
-            }
+            totals_data = data.get("totals") or {}
+            totals["files"] += int(totals_data.get("files") or 0)
+            totals["blank_lines"] += int(totals_data.get("blank") or 0)
+            totals["comment_lines"] += int(totals_data.get("comment") or 0)
+            totals["code_lines"] += int(totals_data.get("code") or 0)
 
-        return result_data
+            stats = data.get("stats") or {}
+            elapsed_seconds += float(stats.get("elapsed_seconds") or 0)
 
-    finally:
-        # Clean up temporary file
-        try:
-            os.unlink(tmp_file_path)
-        except OSError:
-            pass
+    if not languages:
+        return {}
+
+    result_data = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "ocloc_version": _get_ocloc_version() or "unknown",
+        "elapsed_seconds": elapsed_seconds,
+        "languages": languages,
+        "totals": totals,
+    }
+
+    return result_data
 
 def precompute_loc_evolution(year: int, repos_root: str, services_file: str, output_root: str, max_parallel_workers: Optional[int] = None) -> None:
     """
@@ -1857,7 +1947,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
 
     It mirrors the logic used in dashboard_server's /loc-evolution endpoint,
     but runs offline for *all* subsystems and never touches the repos on disk
-    (it uses git archive snapshots + cloc).
+    (it uses git archive snapshots + ocloc).
     """
     import subprocess
     import json
@@ -2064,47 +2154,27 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 with tarfile.open(tar_path, "r") as tar:
                     tar.extractall(path=tmpdir)
 
-                cloc_cmd = [
-                    "cloc",
-                    "--json",
-                    tmpdir,
-                    "--exclude-dir=.git,node_modules,.venv,__pycache__,vendor,target,build,dist",
-                ]
-                cl = subprocess.run(
-                    cloc_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                with _ocloc_ignore_file() as ignore_file:
+                    ocloc_data = _run_ocloc_json(tmpdir, ignore_file)
 
-                if cl.returncode != 0 or not cl.stdout.strip():
+                if not ocloc_data:
                     logger.warning(
-                        "[loc-precompute] cloc failed for %s %s: rc=%s",
+                        "[loc-precompute] ocloc failed for %s %s",
                         subsystem_name,
                         rev,
-                        cl.returncode,
                     )
                     return subsystem_name, month_label, 0, 0
 
-                try:
-                    cloc_data = json.loads(cl.stdout)
-                except json.JSONDecodeError as e:
-                    logger.warning(
-                        "[loc-precompute] Failed to parse cloc JSON for %s %s: %s",
-                        subsystem_name,
-                        rev,
-                        e,
-                    )
-                    return subsystem_name, month_label, 0, 0
-
-                total_code = 0
-                total_files = 0
-                for lang_name, lang_info in cloc_data.items():
-                    if lang_name in ("header", "SUM"):
-                        continue
-                    if isinstance(lang_info, dict):
-                        total_code += lang_info.get("code", 0)
-                        total_files += lang_info.get("nFiles", 0)
+                totals_info = ocloc_data.get("totals") or {}
+                total_code = int(totals_info.get("code") or 0)
+                total_files = int(totals_info.get("files") or 0)
+                if total_code == 0 and total_files == 0:
+                    per_lang = ocloc_data.get("languages") or {}
+                    for lang_info in per_lang.values():
+                        if not isinstance(lang_info, dict):
+                            continue
+                        total_code += int(lang_info.get("code") or 0)
+                        total_files += int(lang_info.get("files") or 0)
 
                 logger.info(
                     "[loc-precompute] %s %s: code_lines=%s files=%s",

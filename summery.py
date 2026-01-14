@@ -5,11 +5,12 @@ import sys
 import subprocess
 import json
 import re
-import csv
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional, Set
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+
+from language_detection import build_language_map
 
 AuthorKey = str  # email only (canonical identifier)
 
@@ -72,7 +73,7 @@ def load_ignored_users(ignore_path: str) -> Set[str]:
         
     return ignored
 
-# Languages that we treat as "documentation" when cloc reports them
+# Languages that we treat as "documentation" based on detected language names
 DOC_LANGUAGES = {
     "markdown",
     "text",
@@ -344,121 +345,12 @@ def is_test_file(path: str) -> bool:
 
 def is_doc_language(lang: str) -> bool:
     """
-    Decide if a cloc language should count as documentation (Markdown, Text, etc.).
+    Decide if a detected language should count as documentation (Markdown, Text, etc.).
     """
     if not lang:
         return False
     return lang.strip().lower() in DOC_LANGUAGES
 
-
-def get_cloc_file_languages(repo_path: str) -> Dict[str, str]:
-    """
-    Run cloc on the repo and return a mapping: relative_path -> language.
-
-    Uses: cloc --by-file --csv --quiet .
-    Requires: cloc installed and available in PATH.
-
-    Handles:
-      • leading './' in cloc output
-      • Windows '\' slashes
-      • ensures both './path' and 'path' map to the same language
-    """
-    cmd = ["cloc", "--by-file", "--csv", "--quiet", "."]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300  # 5 minute timeout for cloc
-        )
-    except FileNotFoundError:
-        print(
-            "WARNING: 'cloc' not found. Language stats will be 'Unknown'. "
-            "Install cloc to enable language breakdown.",
-            file=sys.stderr,
-        )
-        return {}
-    except subprocess.TimeoutExpired:
-        print(
-            f"WARNING: cloc timed out in {repo_path} (5 minutes). "
-            "Language stats will be 'Unknown'.",
-            file=sys.stderr,
-        )
-        return {}
-
-    if result.returncode != 0:
-        print(
-            f"WARNING: cloc failed in {repo_path} (exit {result.returncode}). "
-            f"stderr: {result.stderr.strip() if result.stderr else ''}",
-            file=sys.stderr,
-        )
-        return {}
-
-    text = result.stdout or ""
-    if not text.strip():
-        return {}
-
-    file_langs: Dict[str, str] = {}
-
-    reader = csv.reader(text.splitlines())
-    header_found = False
-    lang_idx = None
-    file_idx = None
-
-    # Find header: language,filename,blank,comment,code,...
-    for row in reader:
-        if not row:
-            continue
-
-        # Skip version/header line
-        if row[0].startswith("github.com/AlDanial/cloc"):
-            continue
-
-        lowered = [col.strip().lower() for col in row]
-        if "language" in lowered and "filename" in lowered:
-            lang_idx = lowered.index("language")
-            file_idx = lowered.index("filename")
-            header_found = True
-            break
-
-    if not header_found or lang_idx is None or file_idx is None:
-        print(
-            f"WARNING: Could not find cloc CSV header with 'language' and 'filename' in {repo_path}",
-            file=sys.stderr,
-        )
-        return {}
-
-    # Parse data rows
-    for row in reader:
-        if not row:
-            continue
-        if len(row) <= max(lang_idx, file_idx):
-            continue
-
-        lang = row[lang_idx].strip()
-        fname = row[file_idx].strip()
-
-        # Skip summary rows etc.
-        if not lang or not fname or lang.upper() == "LANGUAGE" or lang.upper() == "SUM":
-            continue
-
-        # Normalize path:
-        # - convert backslashes to forward slashes
-        # - remove leading "./" if present
-        norm_path = fname.replace("\\", "/")
-        stripped = norm_path.lstrip("./")
-
-        # Store mapping for both "service/..." and "./service/..." just in case
-        if stripped:
-            file_langs[stripped] = lang
-            file_langs[f"./{stripped}"] = lang
-        else:
-            file_langs[norm_path] = lang
-
-    return file_langs
 
 
 def weekday_name_from_date_str(date_str: str) -> Optional[str]:
@@ -507,8 +399,8 @@ def analyze_repo(
         print(f"    ! Not a git repo (no .git directory): {repo_path}")
         return
 
-    # Build file -> language map using cloc
-    file_langs = get_cloc_file_languages(repo_path)
+    # Build file -> language map using local detection
+    file_langs = build_language_map(repo_path)
 
     # git log: each commit line:
     # "<sha>\x01<author_name>\x01<author_email>\x01<date>"
@@ -632,10 +524,10 @@ def analyze_repo(
             except ValueError:
                 dele = 0
 
-            # Normalize filename similar to cloc mapping (no leading ./)
+            # Normalize filename similar to the language map (no leading ./)
             norm_filename = filename.replace("\\", "/").lstrip("./")
 
-            # Language detection via cloc mapping
+            # Language detection via the local language map
             lang = file_langs.get(norm_filename, "Unknown")
 
             # Prod vs test classification (for code files)

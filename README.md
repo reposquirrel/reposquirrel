@@ -46,32 +46,17 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 ### System Requirements
 - **Python 3.7+**
 - **Git** - Must be installed and accessible from command line
-- **cloc** - Count Lines of Code tool for language detection and statistics
+- **ocloc** - High-performance LOC analyzer used for language statistics (https://github.com/adhishthite/ocloc)
 - **Unix-like environment** - Linux or macOS recommended (Windows with WSL should work)
 
-### Installing cloc
+### Installing ocloc
 
-**Ubuntu/Debian:**
+The easiest way is via Cargo (requires the Rust toolchain):
 ```bash
-sudo apt-get install cloc
+cargo install ocloc
 ```
 
-**macOS (Homebrew):**
-```bash
-brew install cloc
-```
-
-**Fedora/RHEL:**
-```bash
-sudo dnf install cloc
-```
-
-**From source:**
-```bash
-# Download and install from https://github.com/AlDanial/cloc
-```
-
-**Note:** The tool will still work without `cloc`, but language statistics will show as "Unknown".
+Alternatively, download a prebuilt release for your platform from https://github.com/adhishthite/ocloc/releases and place the `ocloc` binary somewhere on your `PATH` (or set `OCLOC_BIN`).
 
 ### Python Dependencies
 ```
@@ -88,9 +73,14 @@ pip3 install flask
 ### 1. Install Dependencies
 ```bash
 # Install system dependencies
-sudo apt-get install git cloc  # Ubuntu/Debian
+sudo apt-get install git  # Ubuntu/Debian
 # or
-brew install git cloc          # macOS
+brew install git          # macOS
+
+# Install ocloc (choose one)
+# 1) Using Cargo (recommended)
+cargo install ocloc
+# 2) Or download a release and place the binary on your PATH
 
 # Install Python dependencies
 pip3 install flask
