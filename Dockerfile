@@ -13,11 +13,14 @@ RUN apt-get update && \
 
 # Install tokei binary release (JSON support is included in release builds)
 ARG TOKEI_ARCH=x86_64-unknown-linux-gnu
-RUN set -euo pipefail && \
-    curl -sSL https://github.com/XAMPPRocky/tokei/releases/download/v${TOKEI_VERSION}/tokei-${TOKEI_ARCH}.tar.gz -o /tmp/tokei.tar.gz && \
-    tar -xzf /tmp/tokei.tar.gz -C /tmp && \
-    install -m 0755 /tmp/tokei /usr/local/bin/tokei 2>/dev/null || install -m 0755 /tmp/tokei-*/tokei /usr/local/bin/tokei && \
-    rm -rf /tmp/tokei.tar.gz /tmp/tokei /tmp/tokei-*
+RUN set -euo pipefail; \
+    curl -sSL https://github.com/XAMPPRocky/tokei/releases/download/v${TOKEI_VERSION}/tokei-${TOKEI_ARCH}.tar.gz -o /tmp/tokei.tar.gz; \
+    mkdir -p /tmp/tokei-extract; \
+    tar -xzf /tmp/tokei.tar.gz -C /tmp/tokei-extract; \
+    TOKEI_PATH=$(find /tmp/tokei-extract -type f -name tokei -print -quit); \
+    if [ -z "${TOKEI_PATH}" ]; then echo "tokei binary not found in archive" >&2; exit 1; fi; \
+    install -m 0755 "${TOKEI_PATH}" /usr/local/bin/tokei; \
+    rm -rf /tmp/tokei.tar.gz /tmp/tokei-extract
 
 WORKDIR /app
 
