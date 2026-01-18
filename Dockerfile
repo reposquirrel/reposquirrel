@@ -13,7 +13,7 @@ RUN apt-get update && \
 
 # Install tokei binary release (JSON support is included in release builds)
 ARG TOKEI_ARCH=x86_64-unknown-linux-gnu
-RUN set -euo pipefail; \
+RUN set -eux; \
     curl -sSL https://github.com/XAMPPRocky/tokei/releases/download/v${TOKEI_VERSION}/tokei-${TOKEI_ARCH}.tar.gz -o /tmp/tokei.tar.gz; \
     mkdir -p /tmp/tokei-extract; \
     tar -xzf /tmp/tokei.tar.gz -C /tmp/tokei-extract; \
