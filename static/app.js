@@ -7333,19 +7333,22 @@ function initializeHamburgerMenu() {
     }
   });
 
+  if (runUpdateLink) {
+    if (READ_ONLY_MODE) {
+      disableMenuLink(runUpdateLink, "Disabled in read-only mode");
+    } else {
+      runUpdateLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        closeHamburgerMenu();
+        startUpdateProcess();
+      });
+    }
+  }
+
   if (READ_ONLY_MODE) {
     const msg = "Disabled in read-only mode";
-    disableMenuLink(runUpdateLink, msg);
     disableMenuLink(settingsLink, msg);
-  } else {
-    // Run Update link
-    runUpdateLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      closeHamburgerMenu();
-      startUpdateProcess();
-    });
-
-    // Settings link
+  } else if (settingsLink) {
     settingsLink.addEventListener("click", (e) => {
       e.preventDefault();
       closeHamburgerMenu();
@@ -9917,7 +9920,7 @@ let updateState = {
 
 function startUpdateProcess() {
   if (READ_ONLY_MODE) {
-    alert("Updates are disabled in read-only mode.");
+    alert("Manual updates are disabled in read-only mode.");
     return;
   }
   if (updateState.isRunning) {

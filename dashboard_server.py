@@ -330,9 +330,6 @@ def swap_stats_directories(temp_output_root: str) -> None:
 
 
 def perform_background_update(reason: str = 'scheduled') -> bool:
-    if app.config.get('READ_ONLY_MODE'):
-        logger.info('Skipping background update in read-only mode')
-        return False
     if background_cancel_event.is_set():
         logger.info('Background update cancelled before start')
         return False
@@ -394,8 +391,6 @@ def perform_background_update(reason: str = 'scheduled') -> bool:
 
 
 def trigger_background_update(reason: str = 'manual') -> bool:
-    if app.config.get('READ_ONLY_MODE'):
-        return False
     if update_process_active:
         return False
     with background_state_lock:
@@ -437,11 +432,6 @@ def wait_for_scheduler_event(timeout: float) -> bool:
 def background_scheduler_loop() -> None:
     logger.info('Background update scheduler started')
     while not background_scheduler_stop_event.is_set():
-        if app.config.get('READ_ONLY_MODE'):
-            with background_state_lock:
-                background_state['next_run'] = None
-            wait_for_scheduler_event(300)
-            continue
         settings = load_update_settings()
         if not settings.get('background_enabled', False):
             with background_state_lock:
@@ -3933,8 +3923,6 @@ def api_last_update():
 
 @app.route("/api/update/background/run", methods=["POST"])
 def api_trigger_background_update():
-    if app.config.get("READ_ONLY_MODE"):
-        return jsonify({"error": "Updates are disabled in read-only mode"}), 403
     settings = load_update_settings()
     if not settings.get("background_enabled", False):
         return jsonify({"error": "Enable background updates first"}), 400
@@ -3953,6 +3941,9 @@ def api_trigger_background_update():
 def api_update_run_analysis():
     """Start the complete update process (git pull + analysis) asynchronously."""
     global update_process_active
+
+    if app.config.get("READ_ONLY_MODE"):
+        return jsonify({"error": "Manual updates are disabled in read-only mode"}), 403
     
     # Force reset state to ensure clean start
     print(f"🔍 Update request received. Current state: update_process_active={update_process_active}")
