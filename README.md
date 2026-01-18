@@ -2,12 +2,13 @@
 
 > 🆕 **Live Demo**: https://demo.reposquirrel.com:8443 — Explore RepoSquirrel using a couple public HashiCorp repositories. The demo omits team-specific setup (since we don’t know their org structure) but showcases what you can expect before installing locally.
 
+> ⚠️ Demo environment is for viewing only (read-only) and uses real Git history from open-source HashiCorp projects. Access it via HTTPS at https://demo.reposquirrel.com:8443.
+
+
 **🐳 Quick Docker Run**
 ```bash
 docker run -p 5000:5000 -v repos:/app/repos -v stats:/app/stats -v configuration:/app/configuration ghcr.io/reposquirrel/reposquirrel:latest
 ```
-
-> ⚠️ Demo environment is for viewing only (read-only) and uses real Git history from open-source HashiCorp projects. Access it via HTTPS at https://demo.reposquirrel.com:8443.
 
 A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases.
 
