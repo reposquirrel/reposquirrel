@@ -8,13 +8,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install system dependencies required by repo-squirrel
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl ca-certificates cargo && \
+    apt-get install -y --no-install-recommends git curl ca-certificates tar && \
     rm -rf /var/lib/apt/lists/*
 
-# Install tokei with JSON output support
-RUN cargo install tokei --locked --features all --version ${TOKEI_VERSION} && \
-    mv /root/.cargo/bin/tokei /usr/local/bin/tokei && \
-    rm -rf /root/.cargo
+# Install tokei binary release (JSON support is included in release builds)
+ARG TOKEI_ARCH=x86_64-unknown-linux-gnu
+RUN set -euo pipefail && \
+    curl -sSL https://github.com/XAMPPRocky/tokei/releases/download/v${TOKEI_VERSION}/tokei-${TOKEI_ARCH}.tar.gz -o /tmp/tokei.tar.gz && \
+    tar -xzf /tmp/tokei.tar.gz -C /tmp && \
+    install -m 0755 /tmp/tokei /usr/local/bin/tokei 2>/dev/null || install -m 0755 /tmp/tokei-*/tokei /usr/local/bin/tokei && \
+    rm -rf /tmp/tokei.tar.gz /tmp/tokei /tmp/tokei-*
 
 WORKDIR /app
 
