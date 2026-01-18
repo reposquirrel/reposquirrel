@@ -46,17 +46,17 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 ### System Requirements
 - **Python 3.7+**
 - **Git** - Must be installed and accessible from command line
-- **ocloc** - High-performance LOC analyzer used for language statistics (https://github.com/adhishthite/ocloc)
+- **tokei** - High-performance LOC analyzer used for language statistics (https://github.com/XAMPPRocky/tokei)
 - **Unix-like environment** - Linux or macOS recommended (Windows with WSL should work)
 
-### Installing ocloc
+### Installing tokei
 
-The easiest way is via Cargo (requires the Rust toolchain):
+The easiest way is via Cargo (requires the Rust toolchain) so that JSON output support is enabled:
 ```bash
-cargo install ocloc
+cargo install tokei --features all
 ```
 
-Alternatively, download a prebuilt release for your platform from https://github.com/adhishthite/ocloc/releases and place the `ocloc` binary somewhere on your `PATH` (or set `OCLOC_BIN`).
+Alternatively, install via your package manager (Homebrew, winget, etc.) or download a release from https://github.com/XAMPPRocky/tokei/releases and place the `tokei` binary somewhere on your `PATH`. Set `TOKEI_BIN` if it lives outside of your PATH.
 
 ### Python Dependencies
 ```
@@ -77,10 +77,10 @@ sudo apt-get install git  # Ubuntu/Debian
 # or
 brew install git          # macOS
 
-# Install ocloc (choose one)
-# 1) Using Cargo (recommended)
-cargo install ocloc
-# 2) Or download a release and place the binary on your PATH
+# Install tokei (choose one)
+# 1) Using Cargo (recommended, enables JSON output)
+cargo install tokei --features all
+# 2) Use your OS package manager or download a release and place the binary on your PATH
 
 # Install Python dependencies
 pip3 install flask

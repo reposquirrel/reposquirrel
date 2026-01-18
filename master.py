@@ -8,7 +8,7 @@ import json
 import re
 import logging
 import tempfile
-from contextlib import contextmanager
+import time
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
@@ -30,80 +30,64 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OCLOC_BIN = os.environ.get("OCLOC_BIN", "ocloc")
-_OCLOC_VERSION_CACHE: Optional[str] = None
-_OCLOC_VERSION_FAILED = False
-_OCLOC_NOT_FOUND_LOGGED = False
+TOKEI_BIN = os.environ.get("TOKEI_BIN", "tokei")
+_TOKEI_VERSION_CACHE: Optional[str] = None
+_TOKEI_VERSION_FAILED = False
+_TOKEI_NOT_FOUND_LOGGED = False
 
 
-def _emit_ocloc_missing_message() -> None:
-    global _OCLOC_NOT_FOUND_LOGGED
-    if _OCLOC_NOT_FOUND_LOGGED:
+def _emit_tokei_missing_message() -> None:
+    global _TOKEI_NOT_FOUND_LOGGED
+    if _TOKEI_NOT_FOUND_LOGGED:
         return
-    _OCLOC_NOT_FOUND_LOGGED = True
+    _TOKEI_NOT_FOUND_LOGGED = True
     logger.info(
-        "ocloc binary not found. Install it from https://github.com/adhishthite/ocloc "
-        "or set OCLOC_BIN to the executable path."
+        "tokei binary not found. Install it from https://github.com/XAMPPRocky/tokei "
+        "or set TOKEI_BIN to the executable path."
     )
 
 
-@contextmanager
-def _ocloc_ignore_file() -> Optional[str]:
+def _tokei_exclude_patterns() -> list[str]:
     entries = [entry.strip() for entry in CLOC_EXCLUDE_DIRS.split(",") if entry.strip()]
     if not entries:
-        yield None
-        return
+        return []
 
-    fd, tmp_path = tempfile.mkstemp(prefix="ocloc-ignore-", suffix=".txt")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            tmp_file.write("# Auto-generated ignore file for ocloc\n")
-            seen = set()
-            for entry in entries:
-                normalized = entry.strip().strip("/")
-                if not normalized:
-                    continue
-                patterns = [
-                    f"!{normalized}",
-                    f"!{normalized}/",
-                    f"!{normalized}/**",
-                    f"!**/{normalized}",
-                    f"!**/{normalized}/",
-                    f"!**/{normalized}/**",
-                ]
-                for pattern in patterns:
-                    if pattern in seen:
-                        continue
-                    tmp_file.write(pattern + "\n")
-                    seen.add(pattern)
-        yield tmp_path
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    patterns: set[str] = set()
+    for entry in entries:
+        normalized = entry.strip().strip("/")
+        if not normalized:
+            continue
+        patterns.add(normalized)
+        patterns.add(f"{normalized}/**")
+        patterns.add(f"**/{normalized}")
+        patterns.add(f"**/{normalized}/**")
+    return sorted(patterns)
 
 
-def _run_ocloc_json(target_path: str, ignore_file: Optional[str] = None) -> Optional[dict]:
-    cmd = [OCLOC_BIN, "--json"]
-    if ignore_file:
-        cmd.extend(["--ignore-file", ignore_file])
+def _run_tokei_json(target_path: str, exclude_patterns: Optional[list[str]] = None) -> tuple[Optional[dict], float]:
+    cmd = [TOKEI_BIN, "--output", "json"]
+    if exclude_patterns:
+        for pattern in exclude_patterns:
+            cmd.extend(["--exclude", pattern])
     cmd.append(target_path)
+    start_time = time.perf_counter()
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
-        _emit_ocloc_missing_message()
-        return None
+        _emit_tokei_missing_message()
+        return None, time.perf_counter() - start_time
     except Exception as exc:
-        logger.info(f"Warning: Failed to run {OCLOC_BIN} for {target_path}: {exc}")
-        return None
+        logger.info(f"Warning: Failed to run {TOKEI_BIN} for {target_path}: {exc}")
+        return None, time.perf_counter() - start_time
+
+    elapsed = time.perf_counter() - start_time
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         if stderr:
             logger.info(
                 "Warning: %s returned code %s for %s (stderr: %s)",
-                OCLOC_BIN,
+                TOKEI_BIN,
                 result.returncode,
                 target_path,
                 stderr,
@@ -111,46 +95,63 @@ def _run_ocloc_json(target_path: str, ignore_file: Optional[str] = None) -> Opti
         else:
             logger.info(
                 "Warning: %s returned code %s for %s",
-                OCLOC_BIN,
+                TOKEI_BIN,
                 result.returncode,
                 target_path,
             )
-        return None
+        return None, elapsed
 
     stdout = (result.stdout or "").strip()
     if not stdout:
-        return None
+        return None, elapsed
 
     try:
-        return json.loads(stdout)
+        return json.loads(stdout), elapsed
     except json.JSONDecodeError as exc:
-        logger.info(f"Warning: Failed to parse {OCLOC_BIN} output for {target_path}: {exc}")
-        return None
+        logger.info(f"Warning: Failed to parse {TOKEI_BIN} output for {target_path}: {exc}")
+        return None, elapsed
 
 
-def _get_ocloc_version() -> str:
-    global _OCLOC_VERSION_CACHE, _OCLOC_VERSION_FAILED
-    if _OCLOC_VERSION_CACHE:
-        return _OCLOC_VERSION_CACHE
-    if _OCLOC_VERSION_FAILED:
+def _count_files_from_tokei_total(total_data: dict) -> int:
+    children = total_data.get("children")
+    if not isinstance(children, dict):
+        return 0
+    files = set()
+    for entries in children.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if name:
+                files.add(name)
+    return len(files)
+
+
+def _get_tokei_version() -> str:
+    global _TOKEI_VERSION_CACHE, _TOKEI_VERSION_FAILED
+    if _TOKEI_VERSION_CACHE:
+        return _TOKEI_VERSION_CACHE
+    if _TOKEI_VERSION_FAILED:
         return ""
 
     try:
-        result = subprocess.run([OCLOC_BIN, "--version"], capture_output=True, text=True, check=False)
+        result = subprocess.run([TOKEI_BIN, "--version"], capture_output=True, text=True, check=False)
     except FileNotFoundError:
-        _OCLOC_VERSION_FAILED = True
-        _emit_ocloc_missing_message()
+        _TOKEI_VERSION_FAILED = True
+        _emit_tokei_missing_message()
         return ""
     except Exception:
-        _OCLOC_VERSION_FAILED = True
+        _TOKEI_VERSION_FAILED = True
         return ""
 
     if result.returncode != 0:
-        _OCLOC_VERSION_FAILED = True
+        _TOKEI_VERSION_FAILED = True
         return ""
 
     version = (result.stdout or result.stderr or "").strip() or "unknown"
-    _OCLOC_VERSION_CACHE = version
+    _TOKEI_VERSION_CACHE = version
     return version
 
 
@@ -292,19 +293,18 @@ def run_cloc(paths: list[str]) -> dict:
         return {}
 
     aggregated = defaultdict(int)
-    with _ocloc_ignore_file() as ignore_file:
-        for path in existing:
-            data = _run_ocloc_json(path, ignore_file)
-            if not data:
+    exclude_patterns = _tokei_exclude_patterns()
+    for path in existing:
+        data, _ = _run_tokei_json(path, exclude_patterns)
+        if not data:
+            continue
+        for lang, info in data.items():
+            if lang == "Total" or not isinstance(info, dict):
                 continue
-            per_lang = data.get("languages") or {}
-            for lang, info in per_lang.items():
-                if not isinstance(info, dict):
-                    continue
-                code_lines = info.get("code")
-                if code_lines is None:
-                    continue
-                aggregated[lang] += int(code_lines)
+            code_lines = info.get("code")
+            if code_lines is None:
+                continue
+            aggregated[lang] += int(code_lines)
 
     return dict(aggregated)
 
@@ -337,7 +337,7 @@ def discover_repo_candidates(repos_root: str, output_root: str, services_config:
 
 def generate_cloc_cache(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
     logger.info("\n===========================================")
-    logger.info("Generating repo/service LOC cache via ocloc")
+    logger.info("Generating repo/service LOC cache via tokei")
     logger.info("===========================================")
     services_config = load_services_config_file(services_file)
     stats_dir = os.path.join(output_root, "stats")
@@ -549,8 +549,8 @@ def main() -> None:
     parallel = args.parallel
     cpu_count = args.cpu_count
 
-    if not _get_ocloc_version():
-        logger.info("ERROR: ocloc binary is required but was not found in PATH. Set OCLOC_BIN or install ocloc.")
+    if not _get_tokei_version():
+        logger.info("ERROR: tokei binary is required but was not found in PATH. Set TOKEI_BIN or install tokei.")
         sys.exit(1)
 
     if year < 1:
@@ -1754,7 +1754,7 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
 
 
 def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
-    """Generate language statistics for each subsystem using ocloc."""
+    """Generate language statistics for each subsystem using tokei."""
     
     # Load services configuration
     services_config = {}
@@ -1770,11 +1770,10 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
     stats_root = os.path.join(output_root, "stats")
     subsystems_stats_root = os.path.join(stats_root, "subsystems")
     
-    # Check if ocloc is available
-    version = _get_ocloc_version()
-    if not version:
-        logger.info("ocloc not found. Please install ocloc to generate language statistics.")
-        logger.info("See https://github.com/adhishthite/ocloc for installation instructions or set OCLOC_BIN to the binary path.")
+    # Check if tokei is available
+    if not _get_tokei_version():
+        logger.info("tokei not found. Please install tokei to generate language statistics.")
+        logger.info("See https://github.com/XAMPPRocky/tokei for installation instructions or set TOKEI_BIN to the binary path.")
         return
     
     logger.info("Generating language statistics for subsystems...")
@@ -1893,46 +1892,43 @@ def run_cloc_for_paths(paths: list) -> dict:
         "code_lines": 0,
     }
     elapsed_seconds = 0.0
+    exclude_patterns = _tokei_exclude_patterns()
 
-    with _ocloc_ignore_file() as ignore_file:
-        for path in existing:
-            data = _run_ocloc_json(path, ignore_file)
-            if not data:
+    for path in existing:
+        data, elapsed = _run_tokei_json(path, exclude_patterns)
+        elapsed_seconds += elapsed
+        if not data:
+            continue
+
+        for lang_name, lang_data in data.items():
+            if lang_name == "Total" or not isinstance(lang_data, dict):
                 continue
+            entry = languages.setdefault(
+                lang_name,
+                {
+                    "files": 0,
+                    "blank_lines": 0,
+                    "comment_lines": 0,
+                    "code_lines": 0,
+                },
+            )
+            entry["files"] += len(lang_data.get("reports") or [])
+            entry["blank_lines"] += int(lang_data.get("blanks") or 0)
+            entry["comment_lines"] += int(lang_data.get("comments") or 0)
+            entry["code_lines"] += int(lang_data.get("code") or 0)
 
-            per_lang = data.get("languages") or {}
-            for lang_name, lang_data in per_lang.items():
-                if not isinstance(lang_data, dict):
-                    continue
-                entry = languages.setdefault(
-                    lang_name,
-                    {
-                        "files": 0,
-                        "blank_lines": 0,
-                        "comment_lines": 0,
-                        "code_lines": 0,
-                    },
-                )
-                entry["files"] += int(lang_data.get("files") or 0)
-                entry["blank_lines"] += int(lang_data.get("blank") or 0)
-                entry["comment_lines"] += int(lang_data.get("comment") or 0)
-                entry["code_lines"] += int(lang_data.get("code") or 0)
-
-            totals_data = data.get("totals") or {}
-            totals["files"] += int(totals_data.get("files") or 0)
-            totals["blank_lines"] += int(totals_data.get("blank") or 0)
-            totals["comment_lines"] += int(totals_data.get("comment") or 0)
-            totals["code_lines"] += int(totals_data.get("code") or 0)
-
-            stats = data.get("stats") or {}
-            elapsed_seconds += float(stats.get("elapsed_seconds") or 0)
+        total_data = data.get("Total") or {}
+        totals["files"] += _count_files_from_tokei_total(total_data)
+        totals["blank_lines"] += int(total_data.get("blanks") or 0)
+        totals["comment_lines"] += int(total_data.get("comments") or 0)
+        totals["code_lines"] += int(total_data.get("code") or 0)
 
     if not languages:
         return {}
 
     result_data = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
-        "ocloc_version": _get_ocloc_version() or "unknown",
+        "tokei_version": _get_tokei_version() or "unknown",
         "elapsed_seconds": elapsed_seconds,
         "languages": languages,
         "totals": totals,
@@ -1947,7 +1943,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
 
     It mirrors the logic used in dashboard_server's /loc-evolution endpoint,
     but runs offline for *all* subsystems and never touches the repos on disk
-    (it uses git archive snapshots + ocloc).
+    (it uses git archive snapshots + tokei).
     """
     import subprocess
     import json
@@ -2032,6 +2028,8 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
         }
         for subsystem_name, _, _, _ in prepared_subsystems
     }
+
+    exclude_patterns = _tokei_exclude_patterns()
 
     tasks = []
     for subsystem_name, repo_key, repo_path, filtered_paths in prepared_subsystems:
@@ -2154,27 +2152,25 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 with tarfile.open(tar_path, "r") as tar:
                     tar.extractall(path=tmpdir)
 
-                with _ocloc_ignore_file() as ignore_file:
-                    ocloc_data = _run_ocloc_json(tmpdir, ignore_file)
+                data, _ = _run_tokei_json(tmpdir, exclude_patterns)
 
-                if not ocloc_data:
+                if not data:
                     logger.warning(
-                        "[loc-precompute] ocloc failed for %s %s",
+                        "[loc-precompute] tokei failed for %s %s",
                         subsystem_name,
                         rev,
                     )
                     return subsystem_name, month_label, 0, 0
 
-                totals_info = ocloc_data.get("totals") or {}
-                total_code = int(totals_info.get("code") or 0)
-                total_files = int(totals_info.get("files") or 0)
+                total_data = data.get("Total") or {}
+                total_code = int(total_data.get("code") or 0)
+                total_files = _count_files_from_tokei_total(total_data)
                 if total_code == 0 and total_files == 0:
-                    per_lang = ocloc_data.get("languages") or {}
-                    for lang_info in per_lang.values():
+                    for lang_info in data.values():
                         if not isinstance(lang_info, dict):
                             continue
                         total_code += int(lang_info.get("code") or 0)
-                        total_files += int(lang_info.get("files") or 0)
+                        total_files += len(lang_info.get("reports") or [])
 
                 logger.info(
                     "[loc-precompute] %s %s: code_lines=%s files=%s",
