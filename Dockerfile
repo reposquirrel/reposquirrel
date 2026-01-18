@@ -8,19 +8,19 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install system dependencies required by repo-squirrel
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl ca-certificates tar && \
+    apt-get install -y --no-install-recommends git curl ca-certificates build-essential pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-# Install tokei binary release (JSON support is included in release builds)
-ARG TOKEI_ARCH=x86_64-unknown-linux-musl
+ENV CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:$PATH
+
+# Install tokei with JSON output support using the latest Rust toolchain
 RUN set -eux; \
-    curl -sSL https://github.com/XAMPPRocky/tokei/releases/download/v${TOKEI_VERSION}/tokei-${TOKEI_ARCH}.tar.gz -o /tmp/tokei.tar.gz; \
-    mkdir -p /tmp/tokei-extract; \
-    tar -xzf /tmp/tokei.tar.gz -C /tmp/tokei-extract; \
-    TOKEI_PATH=$(find /tmp/tokei-extract -type f -name tokei -print -quit); \
-    if [ -z "${TOKEI_PATH}" ]; then echo "tokei binary not found in archive" >&2; exit 1; fi; \
-    install -m 0755 "${TOKEI_PATH}" /usr/local/bin/tokei; \
-    rm -rf /tmp/tokei.tar.gz /tmp/tokei-extract
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain nightly; \
+    cargo install tokei --locked --features all --version ${TOKEI_VERSION}; \
+    install -m 0755 /opt/cargo/bin/tokei /usr/local/bin/tokei; \
+    rm -rf /opt/cargo /opt/rustup
 
 WORKDIR /app
 
