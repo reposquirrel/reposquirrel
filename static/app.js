@@ -18,8 +18,22 @@ let state = {
   charts: {}, // to keep references to Chart.js instances
   rendering: false, // flag to prevent concurrent renders
   loadingUsersOverview: false, // flag to prevent concurrent users overview loads
-  loadingTeamsOverview: false // flag to prevent concurrent teams overview loads
+  loadingTeamsOverview: false, // flag to prevent concurrent teams overview loads
+  integrations: {
+    pagerduty: {
+      has_token: false,
+      token_preview: null,
+      updated_at: null
+    }
+  },
+  alerts: {
+    overview: null,
+    loading: false,
+    error: null
+  }
 };
+
+let suppressAlertsModeWarning = false;
 
 function $(id) {
   return document.getElementById(id);
@@ -111,22 +125,15 @@ const progressTracker = {
   
   updateDisplay() {
     if (!this.container) return;
-    
     const total = this.tasks.size;
     const completed = Array.from(this.tasks.values()).filter(t => t.status !== 'loading').length;
-    
-    // Update summary
     this.container.querySelector('.progress-completed').textContent = completed;
     this.container.querySelector('.progress-total').textContent = total;
-    
-    // Update task list
     const list = this.container.querySelector('.progress-list');
     list.innerHTML = '';
-    
-    this.tasks.forEach((task, id) => {
+    this.tasks.forEach((task) => {
       const item = document.createElement('div');
       item.className = `progress-item progress-${task.status}`;
-      
       let icon;
       switch (task.status) {
         case 'loading':
@@ -144,15 +151,11 @@ const progressTracker = {
         default:
           icon = '⏳';
       }
-      
-      const duration = task.endTime ? 
-        ` (${((task.endTime - task.startTime) / 1000).toFixed(1)}s)` : '';
-      
+      const duration = task.endTime ? ` (${((task.endTime - task.startTime) / 1000).toFixed(1)}s)` : '';
       item.innerHTML = `
         <span class="progress-icon">${icon}</span>
         <span class="progress-task-title">${task.title}${duration}</span>
       `;
-      
       list.appendChild(item);
     });
   },
@@ -192,6 +195,52 @@ const progressTracker = {
     return this.abortController ? this.abortController.signal : null;
   }
 };
+
+function isPagerDutyConfigured() {
+  return !!(state.integrations && state.integrations.pagerduty && state.integrations.pagerduty.has_token);
+}
+
+function updateAlertsModeVisibility() {
+  const alertsButton = $("mode-alerts");
+  const alertsSidebar = $("sidebar-alerts");
+  const configured = isPagerDutyConfigured();
+  if (alertsButton) {
+    alertsButton.style.display = configured ? "inline-block" : "none";
+    alertsButton.setAttribute("aria-hidden", configured ? "false" : "true");
+    if (!configured) {
+      alertsButton.classList.remove("active");
+    }
+  }
+  if (alertsSidebar) {
+    alertsSidebar.style.display = configured && state.mode === "alerts" ? "block" : "none";
+  }
+  if (!configured) {
+    state.alerts.overview = null;
+    state.alerts.error = null;
+  }
+  if (!configured && state.mode === "alerts") {
+    suppressAlertsModeWarning = true;
+    setMode("subsystems");
+  }
+}
+
+async function refreshIntegrationsStatus(silent = false) {
+  try {
+    const response = await fetch("/api/settings/integrations");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.integrations = data || state.integrations;
+    updateAlertsModeVisibility();
+    return data;
+  } catch (error) {
+    if (!silent) {
+      console.warn("Failed to refresh integrations status:", error);
+    }
+    return null;
+  }
+}
 
 // Helper function to create enhanced loading indicators
 function createLoadingIndicator(title = "Loading", subtitle = "Please wait while data is being processed...") {
@@ -641,7 +690,7 @@ async function loadUsersAndSubsystems() {
     
     // Clear loading indicator
     if (main) {
-      main.innerHTML = '<div class="empty-state"><p>Use the selector on the left to pick a user/month, team/period, or subsystem/period.</p></div>';
+      main.innerHTML = '<div class="empty-state"><p>Use the selector on the left to pick a user/month, team/period, subsystem/period, or open the Alerts (PD) mode for PagerDuty insights.</p></div>';
     }
     
     console.log("loadUsersAndSubsystems completed successfully");
@@ -865,26 +914,43 @@ function renderSubsystemPeriodList() {
 // --------------------------
 
 function setMode(mode, showOverview = true) {
+  if (mode === "alerts" && !isPagerDutyConfigured()) {
+    if (!suppressAlertsModeWarning) {
+      alert("Configure a PagerDuty API token in Integrations and run Run Update to view alerts.");
+    }
+    suppressAlertsModeWarning = false;
+    mode = "subsystems";
+  } else {
+    suppressAlertsModeWarning = false;
+  }
   state.mode = mode;
   
   // Update button states
   const userBtn = $("mode-users");
   const teamsBtn = $("mode-teams");
   const subsystemBtn = $("mode-subsystems");
+  const alertsBtn = $("mode-alerts");
   
   userBtn.classList.toggle("active", mode === "users");
   teamsBtn.classList.toggle("active", mode === "teams");
   subsystemBtn.classList.toggle("active", mode === "subsystems");
+  if (alertsBtn) {
+    alertsBtn.classList.toggle("active", mode === "alerts");
+  }
   
   // Update sidebar visibility
   const userSidebar = $("sidebar-users");
   const teamsSidebar = $("sidebar-teams");
   const subsystemSidebar = $("sidebar-subsystems");
+  const alertsSidebar = $("sidebar-alerts");
   
   if (userSidebar && teamsSidebar && subsystemSidebar) {
     userSidebar.style.display = mode === "users" ? "block" : "none";
     teamsSidebar.style.display = mode === "teams" ? "block" : "none";
     subsystemSidebar.style.display = mode === "subsystems" ? "block" : "none";
+  }
+  if (alertsSidebar) {
+    alertsSidebar.style.display = mode === "alerts" && isPagerDutyConfigured() ? "block" : "none";
   }
   
   // Clear main content when switching modes
@@ -896,6 +962,8 @@ function setMode(mode, showOverview = true) {
       showUsersOverviewDashboard();
     } else if (mode === "teams") {
       showTeamsOverviewDashboard();
+    } else if (mode === "alerts") {
+      showAlertsOverviewDashboard();
     } else {
       showSubsystemsOverviewDashboard();
     }
@@ -1549,6 +1617,482 @@ async function loadTeamPeriod(team, period) {
     clearMain();
     setViewHeader("Error", "Failed to load team stats: " + err.message, "Error");
   }
+}
+
+// --------------------------
+// PagerDuty Alerts (PD)
+// --------------------------
+
+function updatePagerDutySidebarStatus(status = "idle", payload = null) {
+  const statusEl = $("pagerduty-sidebar-status");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.classList.toggle("status-error", status === "error");
+  if (status === "ready" && payload) {
+    const total = payload.totals?.total || 0;
+    const generated = payload.generated_at ? formatDateTime(payload.generated_at) : "recently";
+    statusEl.textContent = `Last sync ${generated} • ${total.toLocaleString()} incidents`;
+  } else if (status === "loading") {
+    statusEl.textContent = "Loading PagerDuty data…";
+  } else if (status === "error") {
+    const message = payload?.status === 404
+      ? "PagerDuty data not found. Configure a token and run Run Update."
+      : `Unable to load PagerDuty data${payload?.message ? `: ${payload.message}` : ''}`;
+    statusEl.textContent = message;
+  } else {
+    statusEl.textContent = "Configure a PagerDuty token and run Run Update to enable alerts.";
+  }
+}
+
+function formatDurationMinutes(minutes) {
+  if (minutes == null || Number.isNaN(minutes)) {
+    return "--";
+  }
+  const totalMinutes = Math.max(0, Math.round(minutes));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const mins = totalMinutes % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (mins || parts.length === 0) parts.push(`${mins}m`);
+  return parts.join(" ");
+}
+
+function describePagerDutyPeriod(period, fallbackDays = 365) {
+  if (!period || !period.from || !period.to) {
+    return `Last ${fallbackDays} days`;
+  }
+  try {
+    const fromDate = new Date(period.from);
+    const toDate = new Date(period.to);
+    return `${fromDate.toLocaleDateString()} → ${toDate.toLocaleDateString()}`;
+  } catch (error) {
+    return `Last ${fallbackDays} days`;
+  }
+}
+
+async function ensurePagerDutyOverview(forceReload = false) {
+  if (!forceReload && state.alerts.overview) {
+    return state.alerts.overview;
+  }
+  updatePagerDutySidebarStatus("loading");
+  state.alerts.loading = true;
+  try {
+    const response = await fetch("/api/pagerduty/overview", {
+      headers: { Accept: "application/json" }
+    });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (parseError) {
+      if (response.ok) {
+        throw parseError;
+      }
+    }
+    if (!response.ok) {
+      const error = new Error(payload?.error || `Request failed: ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    state.alerts.overview = payload || {};
+    state.alerts.error = null;
+    updatePagerDutySidebarStatus("ready", payload);
+    return state.alerts.overview;
+  } catch (error) {
+    state.alerts.overview = null;
+    state.alerts.error = error;
+    updatePagerDutySidebarStatus("error", error);
+    throw error;
+  } finally {
+    state.alerts.loading = false;
+  }
+}
+
+async function showAlertsOverviewDashboard(forceReload = false) {
+  const main = $("main-content");
+  clearMain();
+  main.innerHTML = createLoadingIndicator(
+    "Loading PagerDuty Alerts",
+    "Fetching incidents and trends from the cache…"
+  );
+  try {
+    const overview = await ensurePagerDutyOverview(forceReload);
+    renderAlertsOverview(overview);
+  } catch (error) {
+    console.error("Failed to load PagerDuty overview:", error);
+    const isNotFound = error?.status === 404;
+    const message = isNotFound
+      ? "No PagerDuty data found. Configure a token under Integrations and run ‘Run Update’."
+      : `Unable to load PagerDuty data: ${error.message || error}`;
+    setViewHeader("Alerts (PagerDuty)", "", "Alerts · PD");
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <h2>PagerDuty Alerts</h2>
+      <p>${message}</p>
+      ${READ_ONLY_MODE ? "" : '<button class="btn btn-primary" id="retry-pagerduty">Retry</button>'}
+    `;
+    main.innerHTML = "";
+    main.appendChild(card);
+    const retryBtn = $("retry-pagerduty");
+    if (retryBtn) {
+      retryBtn.addEventListener("click", () => showAlertsOverviewDashboard(true));
+    }
+  }
+}
+
+function renderAlertsOverview(overview) {
+  const main = $("main-content");
+  main.innerHTML = "";
+  const periodLabel = describePagerDutyPeriod(overview.period, overview.lookback_days || 365);
+  setViewHeader("Alerts (PagerDuty)", periodLabel, "Alerts · PD");
+
+  renderPagerDutyKpis(main, overview);
+  renderPagerDutyCharts(main, overview);
+  renderPagerDutyBreakdowns(main, overview);
+  renderPagerDutyIncidents(main, overview);
+}
+
+function renderPagerDutyKpis(container, overview) {
+  const totals = overview.totals || {};
+  const metrics = overview.metrics || {};
+  const kpis = [
+    {
+      label: "Total incidents",
+      value: totals.total || 0,
+      detail: "Last 12 months"
+    },
+    {
+      label: "Open incidents",
+      value: totals.open || 0,
+      detail: "Currently open"
+    },
+    {
+      label: "Resolved",
+      value: totals.resolved || 0,
+      detail: "Closed in window"
+    },
+    {
+      label: "Avg resolution",
+      value: formatDurationMinutes(metrics.avg_resolution_minutes),
+      detail: "Mean time to resolve"
+    },
+    {
+      label: "Median resolution",
+      value: formatDurationMinutes(metrics.median_resolution_minutes),
+      detail: "Median MTTR"
+    },
+    {
+      label: "Resolved < 24h",
+      value: metrics.resolved_within_24h_percent != null
+        ? `${metrics.resolved_within_24h_percent.toFixed(1)}%`
+        : "--",
+      detail: "Percentage resolved in 24h"
+    }
+  ];
+  const grid = document.createElement("div");
+  grid.className = "kpi-grid pd-kpi-grid";
+  kpis.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "kpi-card";
+    card.innerHTML = `
+      <div class="kpi-label">${item.label}</div>
+      <div class="kpi-value">${item.value}</div>
+      <div class="kpi-detail">${item.detail || ""}</div>
+    `;
+    grid.appendChild(card);
+  });
+  container.appendChild(grid);
+}
+
+function renderPagerDutyCharts(container, overview) {
+  const trend = overview.trend || {};
+  const chartConfigs = [];
+
+  if (Array.isArray(trend.daily_open) && trend.daily_open.length > 0) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = createTitleWithTooltip(
+      "📈 Open incidents",
+      "Snapshot of how many incidents were open at the end of each day.",
+      "h2"
+    ) + '<div class="chart-container"><canvas id="chart-pd-open"></canvas></div>';
+    container.appendChild(card);
+    chartConfigs.push({
+      id: "chart-pd-open",
+      type: "line",
+      labels: trend.daily_open.map((point) => point.date),
+      datasets: [
+        {
+          label: "Open incidents",
+          data: trend.daily_open.map((point) => point.open),
+          borderColor: "#21c55d",
+          backgroundColor: "rgba(33, 197, 93, 0.2)",
+          fill: true,
+          tension: 0.35
+        }
+      ]
+    });
+  }
+
+  if (Array.isArray(trend.daily_open_vs_closed) && trend.daily_open_vs_closed.length > 0) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = createTitleWithTooltip(
+      "📅 Daily opened vs closed",
+      "Compares how many incidents were created and resolved per day.",
+      "h2"
+    ) + '<div class="chart-container"><canvas id="chart-pd-daily"></canvas></div>';
+    container.appendChild(card);
+    chartConfigs.push({
+      id: "chart-pd-daily",
+      type: "line",
+      labels: trend.daily_open_vs_closed.map((point) => point.date),
+      datasets: [
+        {
+          label: "Opened",
+          data: trend.daily_open_vs_closed.map((point) => point.opened),
+          borderColor: "#0ea5e9",
+          backgroundColor: "rgba(14, 165, 233, 0.15)",
+          fill: false,
+          tension: 0.2
+        },
+        {
+          label: "Closed",
+          data: trend.daily_open_vs_closed.map((point) => point.closed),
+          borderColor: "#f97316",
+          backgroundColor: "rgba(249, 115, 22, 0.15)",
+          fill: false,
+          tension: 0.2
+        }
+      ]
+    });
+  }
+
+  if (Array.isArray(trend.weekly_open_vs_closed) && trend.weekly_open_vs_closed.length > 0) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = createTitleWithTooltip(
+      "📊 Weekly trend",
+      "Aggregated opened vs closed incidents per week.",
+      "h2"
+    ) + '<div class="chart-container"><canvas id="chart-pd-weekly"></canvas></div>';
+    container.appendChild(card);
+    chartConfigs.push({
+      id: "chart-pd-weekly",
+      type: "bar",
+      labels: trend.weekly_open_vs_closed.map((point) => point.week_start),
+      datasets: [
+        {
+          label: "Opened",
+          data: trend.weekly_open_vs_closed.map((point) => point.opened),
+          backgroundColor: "rgba(14, 165, 233, 0.7)",
+          borderRadius: 4
+        },
+        {
+          label: "Closed",
+          data: trend.weekly_open_vs_closed.map((point) => point.closed),
+          backgroundColor: "rgba(249, 115, 22, 0.7)",
+          borderRadius: 4
+        }
+      ]
+    });
+  }
+
+  setTimeout(() => {
+    chartConfigs.forEach((config) => {
+      const canvas = document.getElementById(config.id);
+      if (!canvas) return;
+      if (state.charts[config.id]) {
+        state.charts[config.id].destroy();
+      }
+      state.charts[config.id] = new Chart(canvas, {
+        type: config.type,
+        data: {
+          labels: config.labels,
+          datasets: config.datasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          stacked: config.type === "bar",
+          plugins: {
+            legend: { position: "top" },
+            tooltip: { intersect: false }
+          },
+          scales: {
+            x: { ticks: { maxRotation: 45, minRotation: 45 } },
+            y: { beginAtZero: true }
+          }
+        }
+      });
+    });
+  }, 50);
+}
+
+function renderPagerDutyBreakdowns(container, overview) {
+  const grid = document.createElement("div");
+  grid.className = "alerts-breakdown-grid";
+
+  const severityCard = document.createElement("div");
+  severityCard.className = "card";
+  severityCard.innerHTML = createTitleWithTooltip(
+    "Severity mix",
+    "Distribution of severities or priorities for the period.",
+    "h3"
+  );
+  severityCard.appendChild(createPagerDutyBreakdownList(overview.severity_breakdown));
+  grid.appendChild(severityCard);
+
+  const serviceCard = document.createElement("div");
+  serviceCard.className = "card";
+  serviceCard.innerHTML = createTitleWithTooltip(
+    "Top services",
+    "Services with the highest number of incidents in the selected window.",
+    "h3"
+  );
+  serviceCard.appendChild(createPagerDutyServiceTable(overview.service_breakdown));
+  grid.appendChild(serviceCard);
+
+  const teamCard = document.createElement("div");
+  teamCard.className = "card";
+  teamCard.innerHTML = createTitleWithTooltip(
+    "Team mentions",
+    "Counts of how often teams were attached to incidents.",
+    "h3"
+  );
+  teamCard.appendChild(createPagerDutyBreakdownList(overview.team_breakdown));
+  grid.appendChild(teamCard);
+
+  container.appendChild(grid);
+}
+
+function createPagerDutyBreakdownList(items = []) {
+  const list = document.createElement("ul");
+  list.className = "pd-breakdown-list";
+  if (!items || items.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "pd-breakdown-empty";
+    empty.textContent = "No data";
+    list.appendChild(empty);
+    return list;
+  }
+  items.slice(0, 10).forEach((item) => {
+    const li = document.createElement("li");
+    li.className = "pd-breakdown-item";
+    const label = item.label || item.service || item.team || "Unknown";
+    const count = item.count ?? item.total ?? 0;
+    const percent = item.percent != null ? `${item.percent.toFixed(1)}%` : "";
+    li.innerHTML = `
+      <span class="pd-breakdown-label">${label}</span>
+      <span class="pd-breakdown-value">${count.toLocaleString()}</span>
+      <span class="pd-breakdown-percent">${percent}</span>
+    `;
+    list.appendChild(li);
+  });
+  return list;
+}
+
+function createPagerDutyServiceTable(items = []) {
+  const container = document.createElement("div");
+  container.className = "pd-service-table";
+  if (!items || items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "pd-breakdown-empty";
+    empty.textContent = "No data";
+    container.appendChild(empty);
+    return container;
+  }
+  items.slice(0, 8).forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "pd-service-row";
+    row.innerHTML = `
+      <div class="pd-service-name">${item.service}</div>
+      <div class="pd-service-count">${item.total.toLocaleString()} incidents</div>
+      <div class="pd-service-meta">${item.open} open · ${(item.percent || 0).toFixed(1)}%</div>
+    `;
+    container.appendChild(row);
+  });
+  return container;
+}
+
+function renderPagerDutyIncidents(container, overview) {
+  const cardsWrapper = document.createElement("div");
+  cardsWrapper.className = "alerts-breakdown-grid";
+
+  const activeCard = document.createElement("div");
+  activeCard.className = "card";
+  activeCard.innerHTML = createTitleWithTooltip(
+    "Active incidents",
+    "Open incidents pulled from the latest snapshot.",
+    "h3"
+  );
+  const openList = document.createElement("div");
+  openList.className = "pd-incidents-list";
+  const openIncidents = overview.open_incidents || [];
+  if (openIncidents.length === 0) {
+    openList.innerHTML = '<div class="pd-breakdown-empty">No active incidents 🎉</div>';
+  } else {
+    openIncidents.slice(0, 6).forEach((incident) => {
+      openList.appendChild(createPagerDutyIncidentRow(incident, true));
+    });
+  }
+  activeCard.appendChild(openList);
+  cardsWrapper.appendChild(activeCard);
+
+  const recentCard = document.createElement("div");
+  recentCard.className = "card";
+  recentCard.innerHTML = createTitleWithTooltip(
+    "Recent activity",
+    "Latest incidents regardless of status.",
+    "h3"
+  );
+  const recentList = document.createElement("div");
+  recentList.className = "pd-incidents-list";
+  const recentIncidents = overview.recent_incidents || [];
+  if (recentIncidents.length === 0) {
+    recentList.innerHTML = '<div class="pd-breakdown-empty">No incidents recorded.</div>';
+  } else {
+    recentIncidents.slice(0, 10).forEach((incident) => {
+      recentList.appendChild(createPagerDutyIncidentRow(incident, false));
+    });
+  }
+  recentCard.appendChild(recentList);
+  cardsWrapper.appendChild(recentCard);
+
+  container.appendChild(cardsWrapper);
+}
+
+function createPagerDutyIncidentRow(incident, highlightOpen = false) {
+  const row = document.createElement("div");
+  row.className = "pd-incident-row";
+  if (highlightOpen && (incident.status || "").toLowerCase() !== "resolved") {
+    row.classList.add("pd-incident-open");
+  }
+  const title = incident.title || `Incident #${incident.number}`;
+  const service = incident.service || "Unassigned";
+  const severity = incident.severity || "--";
+  const status = (incident.status || "").toUpperCase();
+  const duration = formatDurationMinutes(incident.duration_minutes);
+  const created = incident.created_at ? formatDateTime(incident.created_at) : "--";
+  const resolved = incident.resolved_at ? formatDateTime(incident.resolved_at) : null;
+  const link = incident.html_url ? `<a href="${incident.html_url}" target="_blank" rel="noopener">View</a>` : "";
+  row.innerHTML = `
+    <div class="pd-incident-header">
+      <div class="pd-incident-title">${title}</div>
+      <div class="pd-incident-meta">${service} • Severity: ${severity}</div>
+    </div>
+    <div class="pd-incident-footer">
+      <span class="pd-status-pill">${status}</span>
+      <span class="pd-incident-time">Opened: ${created}${resolved ? ` · Resolved: ${resolved}` : ""}</span>
+      <span class="pd-incident-duration">${duration}</span>
+      ${link}
+    </div>
+  `;
+  return row;
 }
 
 // --------------------------
@@ -7250,6 +7794,10 @@ document.addEventListener("DOMContentLoaded", () => {
     $("mode-users").addEventListener("click", () => setMode("users"));
     $("mode-teams").addEventListener("click", () => setMode("teams"));
     $("mode-subsystems").addEventListener("click", () => setMode("subsystems"));
+    const alertsButton = $("mode-alerts");
+    if (alertsButton) {
+      alertsButton.addEventListener("click", () => setMode("alerts"));
+    }
     
     // Start with subsystems mode
     setMode("subsystems");
@@ -7278,6 +7826,13 @@ document.addEventListener("DOMContentLoaded", () => {
       console.error("Failed to initialize settings:", error);
     }
     
+    try {
+      initializeIntegrations();
+      console.log("Integrations initialized");
+    } catch (error) {
+      console.error("Failed to initialize integrations:", error);
+    }
+    
     refreshLastUpdateBanner();
     scheduleLastUpdateRefresh();
     
@@ -7295,6 +7850,7 @@ function initializeHamburgerMenu() {
   const hamburgerDropdown = $("hamburger-dropdown");
   const runUpdateLink = $("run-update-link");
   const settingsLink = $("settings-link");
+  const integrationsLink = $("integrations-link");
   const aboutLink = $("about-link");
 
   const disableMenuLink = (link, message) => {
@@ -7348,12 +7904,23 @@ function initializeHamburgerMenu() {
   if (READ_ONLY_MODE) {
     const msg = "Disabled in read-only mode";
     disableMenuLink(settingsLink, msg);
-  } else if (settingsLink) {
-    settingsLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      closeHamburgerMenu();
-      openSettingsModal();
-    });
+    disableMenuLink(integrationsLink, msg);
+  } else {
+    if (settingsLink) {
+      settingsLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        closeHamburgerMenu();
+        openSettingsModal();
+      });
+    }
+
+    if (integrationsLink) {
+      integrationsLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        closeHamburgerMenu();
+        openIntegrationsModal();
+      });
+    }
   }
 
   // About link
@@ -7628,6 +8195,207 @@ function switchSettingsTab(tabName) {
     loadCapacityConfig();
   } else if (tabName === "updates") {
     loadUpdateSettings();
+  }
+}
+
+// --------------------------
+// Integrations management
+// --------------------------
+
+function initializeIntegrations() {
+  const modal = $("integrations-modal");
+  if (!modal) return;
+
+  const closeButton = $("integrations-modal-close");
+  if (closeButton) {
+    closeButton.addEventListener("click", closeIntegrationsModal);
+  }
+
+  const saveButton = $("save-pagerduty-token");
+  if (saveButton) {
+    saveButton.addEventListener("click", savePagerDutyToken);
+    if (READ_ONLY_MODE) {
+      saveButton.disabled = true;
+      saveButton.title = "Disabled in read-only mode";
+    }
+  }
+
+  const clearButton = $("clear-pagerduty-token");
+  if (clearButton) {
+    clearButton.addEventListener("click", clearPagerDutyToken);
+    if (READ_ONLY_MODE) {
+      clearButton.disabled = true;
+      clearButton.title = "Disabled in read-only mode";
+    }
+  }
+ 
+  refreshIntegrationsStatus(true);
+}
+
+async function openIntegrationsModal() {
+  if (READ_ONLY_MODE) {
+    alert("Integrations are disabled in read-only mode.");
+    return;
+  }
+
+  const modal = $("integrations-modal");
+  if (!modal) return;
+
+  const input = $("pagerduty-api-token");
+  if (input) {
+    input.value = "";
+  }
+
+  modal.classList.add("show");
+  modal.addEventListener("click", handleModalBackdropClick);
+  await loadIntegrationsSettings();
+}
+
+function closeIntegrationsModal() {
+  const modal = $("integrations-modal");
+  if (!modal) return;
+  modal.classList.remove("show");
+  modal.removeEventListener("click", handleModalBackdropClick);
+}
+
+async function loadIntegrationsSettings() {
+  if (READ_ONLY_MODE) {
+    refreshIntegrationsStatus(true);
+    renderPagerDutyIntegration({ error: "Integrations are disabled in read-only mode." });
+    return;
+  }
+
+  const statusMessage = $("pagerduty-token-message");
+  if (statusMessage) {
+    statusMessage.textContent = "Loading PagerDuty settings…";
+  }
+
+  try {
+    const response = await fetch("/api/settings/integrations");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.integrations = data || state.integrations;
+    renderPagerDutyIntegration(data?.pagerduty || {});
+    updateAlertsModeVisibility();
+  } catch (error) {
+    console.error("Failed to load integration settings:", error);
+    renderPagerDutyIntegration({ error: error.message });
+  }
+}
+
+function renderPagerDutyIntegration(info = {}) {
+  const pill = $("pagerduty-token-pill");
+  const message = $("pagerduty-token-message");
+  const hasToken = !!info.has_token;
+
+  if (pill) {
+    pill.textContent = hasToken ? "Configured" : "Not configured";
+    pill.classList.toggle("active", hasToken);
+    pill.classList.toggle("idle", !hasToken);
+  }
+
+  if (message) {
+    if (info.error) {
+      message.textContent = `Unable to load PagerDuty settings: ${info.error}`;
+    } else if (hasToken) {
+      const preview = info.token_preview ? ` (${info.token_preview})` : "";
+      const updated = info.updated_at ? ` · updated ${formatDateTime(info.updated_at)}` : "";
+      message.textContent = `Token saved${preview}${updated}`;
+    } else {
+      message.textContent = "No token configured yet.";
+    }
+  }
+}
+
+async function savePagerDutyToken() {
+  if (READ_ONLY_MODE) {
+    alert("Integrations are disabled in read-only mode.");
+    return;
+  }
+
+  const input = $("pagerduty-api-token");
+  const token = (input?.value || "").trim();
+  if (!token) {
+    alert("Enter a PagerDuty API token before saving.");
+    input?.focus();
+    return;
+  }
+
+  const saveBtn = $("save-pagerduty-token");
+  setIntegrationButtonState(saveBtn, true, "Saving…");
+
+  try {
+    const response = await fetch("/api/settings/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pagerduty: { api_token: token } })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      throw new Error(data.error || "Failed to save PagerDuty token");
+    }
+
+    if (input) {
+      input.value = "";
+    }
+
+    state.integrations = data || state.integrations;
+    renderPagerDutyIntegration(data?.pagerduty || {});
+    updateAlertsModeVisibility();
+    alert("PagerDuty token saved.");
+  } catch (error) {
+    console.error("Failed to save PagerDuty token:", error);
+    alert(error.message || "Failed to save PagerDuty token.");
+  } finally {
+    setIntegrationButtonState(saveBtn, false, "Save Token");
+  }
+}
+
+async function clearPagerDutyToken() {
+  if (READ_ONLY_MODE) {
+    alert("Integrations are disabled in read-only mode.");
+    return;
+  }
+
+  if (!confirm("Remove the saved PagerDuty token?")) {
+    return;
+  }
+
+  const clearBtn = $("clear-pagerduty-token");
+  setIntegrationButtonState(clearBtn, true, "Clearing…");
+
+  try {
+    const response = await fetch("/api/settings/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pagerduty: { api_token: "" } })
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      throw new Error(data.error || "Failed to remove PagerDuty token");
+    }
+
+    state.integrations = data || state.integrations;
+    renderPagerDutyIntegration(data?.pagerduty || {});
+    state.alerts.overview = null;
+    state.alerts.error = null;
+    updateAlertsModeVisibility();
+    alert("PagerDuty token removed.");
+  } catch (error) {
+    console.error("Failed to clear PagerDuty token:", error);
+    alert(error.message || "Failed to clear PagerDuty token.");
+  } finally {
+    setIntegrationButtonState(clearBtn, false, "Clear Token");
+  }
+}
+
+function setIntegrationButtonState(button, loading, label) {
+  if (!button) return;
+  button.disabled = !!loading;
+  if (label) {
+    button.textContent = label;
   }
 }
 

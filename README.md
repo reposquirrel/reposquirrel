@@ -40,6 +40,11 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 - **Interactive dashboard** - Web-based UI for exploring data
 - **Real-time updates** - Live progress tracking for long-running analyses
 
+### 🚨 PagerDuty Alerts
+- **Alerts mode** - A dedicated dashboard tab that visualizes your PagerDuty incidents alongside repo metrics
+- **Automatic ingestion** - Configure an API token once and every “Run Update” pull grabs the last 12 months of incidents
+- **Ready-made charts** - Open incident history, opened vs closed trends, severity mix, and quick lists of active/recent incidents
+
 ![Linux Kernel Analysis](screenshots/linux_kernel1.png)
 
 ## Requirements

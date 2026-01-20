@@ -16,6 +16,11 @@ from collections import defaultdict
 import importlib
 from typing import Optional
 
+try:
+    from pagerduty_sync import sync_pagerduty_data
+except Exception:  # pragma: no cover - optional dependency
+    sync_pagerduty_data = None  # type: ignore
+
 CLOC_EXCLUDE_DIRS = ".git,node_modules,.venv,__pycache__,vendor,target,build,dist"
 
 # Setup file logging
@@ -240,6 +245,17 @@ def parse_args() -> argparse.Namespace:
         dest="cpu_count",
         type=int,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pagerduty-only",
+        action="store_true",
+        help="Skip repo analyses and only sync PagerDuty data into stats/pagerduty.",
+    )
+    parser.add_argument(
+        "--pagerduty-lookback-days",
+        type=int,
+        default=365,
+        help="When used with --pagerduty-only, number of days of PagerDuty incidents to fetch (default: 365).",
     )
     return parser.parse_args()
 
@@ -548,6 +564,31 @@ def main() -> None:
     skip_blame = args.skip_blame
     parallel = args.parallel
     cpu_count = args.cpu_count
+    pagerduty_only = getattr(args, "pagerduty_only", False)
+    pagerduty_lookback_days = max(1, getattr(args, "pagerduty_lookback_days", 365) or 365)
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if pagerduty_only:
+        if not sync_pagerduty_data:
+            logger.info("PagerDuty integration is unavailable in this build.")
+            sys.exit(1)
+        logger.info("\n===========================================")
+        logger.info("PagerDuty-only mode: syncing alerts")
+        logger.info("Lookback days: %s", pagerduty_lookback_days)
+        logger.info("===========================================")
+        try:
+            sync_pagerduty_data(
+                script_dir,
+                os.path.abspath(output_root),
+                lookback_days=pagerduty_lookback_days,
+                logger=logger,
+            )
+        except Exception as exc:
+            logger.error("PagerDuty sync failed: %s", exc)
+            sys.exit(1)
+        logger.info("PagerDuty-only sync completed successfully")
+        return
 
     if not _get_tokei_version():
         logger.info("ERROR: tokei binary is required but was not found in PATH. Set TOKEI_BIN or install tokei.")
@@ -600,7 +641,6 @@ def main() -> None:
     else:
         logger.info(f"Parallel    : Disabled (sequential processing)")
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     summery_script = os.path.join(script_dir, "summery.py")
     service_script = os.path.join(script_dir, "service.py")
     blame_script = os.path.join(script_dir, "blame.py")
@@ -825,6 +865,27 @@ def main() -> None:
         )
     except Exception as exc:
         logger.info(f"Warning: Failed to precompute subsystem dashboard caches: {exc}")
+
+    if sync_pagerduty_data:
+        if year == current_year:
+            try:
+                logger.info("\n===========================================")
+                logger.info("Syncing PagerDuty alerts (last 12 months)")
+                logger.info("===========================================")
+                sync_pagerduty_data(
+                    script_dir,
+                    os.path.abspath(output_root),
+                    lookback_days=365,
+                    logger=logger,
+                )
+            except Exception as exc:
+                logger.info(f"Warning: PagerDuty sync failed: {exc}")
+        else:
+            logger.info(
+                "Skipping PagerDuty sync for year %s (will run with current year %s)",
+                year,
+                current_year,
+            )
     
     # Note about repos directory: It's kept for blame analysis only (for badges)
     # The actual service/subsystem statistics are now in stats/subsystems/

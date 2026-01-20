@@ -41,6 +41,7 @@
           <button id="mode-users" class="mode-button">Users</button>
           <button id="mode-teams" class="mode-button">Teams</button>
           <button id="mode-subsystems" class="mode-button active">Subsystems</button>
+          <button id="mode-alerts" class="mode-button" style="display: none;">Alerts (PD)</button>
         </div>
       </div>
 
@@ -63,6 +64,18 @@
         <div class="sidebar-list primary" id="subsystem-list"></div>
         <h3>Time Periods</h3>
         <div class="sidebar-list small" id="subsystem-period-list"></div>
+      </div>
+
+      <div class="sidebar-section" id="sidebar-alerts">
+        <h2>PagerDuty Alerts</h2>
+        <div class="sidebar-note" id="pagerduty-sidebar-status">
+          Configure a PagerDuty API token in Integrations and run an update to enable this view.
+        </div>
+        <div class="sidebar-list small">
+          <div class="sidebar-item small">
+            Last 12 months of incidents are cached whenever Run Update completes.
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -98,6 +111,7 @@
   <div class="hamburger-dropdown" id="hamburger-dropdown">
     <a href="#" id="run-update-link">🔄 Run Update</a>
     <a href="#" id="settings-link">⚙️ Settings</a>
+    <a href="#" id="integrations-link">🧩 Integrations</a>
     <a href="#" id="about-link">ℹ️ About</a>
   </div>
 
@@ -491,6 +505,40 @@
 
           </div>
 
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Integrations Modal -->
+  <div id="integrations-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>🧩 Integrations</h2>
+        <button class="modal-close" id="integrations-modal-close">&times;</button>
+      </div>
+      <div class="modal-body integrations-body">
+        <p class="modal-description">Connect repo-squirrel to external tools to unlock richer analytics and incident overlays.</p>
+        <div class="integration-card">
+          <div class="integration-card-header">
+            <div>
+              <h3>PagerDuty</h3>
+              <p>Store a PagerDuty API token to unlock incident-based visualizations.</p>
+            </div>
+          </div>
+          <div class="integration-status" id="pagerduty-token-status">
+            <span class="status-dot idle" id="pagerduty-token-pill">Not configured</span>
+            <span class="integration-status-text" id="pagerduty-token-message">No token configured yet.</span>
+          </div>
+          <div class="form-group">
+            <label for="pagerduty-api-token">API Token</label>
+            <input type="password" id="pagerduty-api-token" placeholder="Enter PagerDuty API token" autocomplete="off" />
+            <small>Use a read-only token scoped to the Events API. Values are stored locally on the server.</small>
+          </div>
+          <div class="integration-actions">
+            <button id="save-pagerduty-token" class="btn btn-primary">Save Token</button>
+            <button id="clear-pagerduty-token" class="btn btn-secondary">Clear Token</button>
+          </div>
         </div>
       </div>
     </div>
