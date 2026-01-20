@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - handled gracefully at runtime
     requests = None  # type: ignore
 
 INCIDENTS_URL = "https://api.pagerduty.com/incidents"
+USERS_URL = "https://api.pagerduty.com/users"
 HEADERS_BASE = {
     "Accept": "application/vnd.pagerduty+json;version=2",
     "Content-Type": "application/json",
@@ -214,6 +215,211 @@ def _fetch_incidents(
         else:
             deduped[str(len(deduped))] = incident
     return list(deduped.values())
+
+
+def _fetch_pagerduty_users(token: str) -> List[Dict[str, Any]]:
+    headers = dict(HEADERS_BASE)
+    headers["Authorization"] = f"Token token={token}"
+    params: Dict[str, Any] = {"limit": 100, "offset": 0}
+    users: List[Dict[str, Any]] = []
+    while True:
+        response = _get_with_retry(USERS_URL, headers, params=params)
+        payload = response.json()
+        batch = payload.get("users") or []
+        if isinstance(batch, list):
+            users.extend(batch)
+        if not payload.get("more"):
+            break
+        params["offset"] = params.get("offset", 0) + params.get("limit", 100)
+    return users
+
+
+def _find_latest_user_summary(user_dir: str) -> Optional[str]:
+    year_dir = os.path.join(user_dir, "year")
+    if os.path.isdir(year_dir):
+        for filename in sorted(os.listdir(year_dir), reverse=True):
+            if not filename.endswith(".json"):
+                continue
+            path = os.path.join(year_dir, filename)
+            if os.path.isfile(path):
+                return path
+    for entry in sorted(os.listdir(user_dir), reverse=True):
+        if entry == "year":
+            continue
+        summary_path = os.path.join(user_dir, entry, "summary.json")
+        if os.path.isfile(summary_path):
+            return summary_path
+    return None
+
+
+def _build_github_user_lookup(stats_root: str) -> Dict[str, List[Dict[str, str]]]:
+    users_root = os.path.join(stats_root, "users")
+    lookup: Dict[str, List[Dict[str, str]]] = {}
+    if not os.path.isdir(users_root):
+        return lookup
+    for slug in sorted(os.listdir(users_root)):
+        user_dir = os.path.join(users_root, slug)
+        if not os.path.isdir(user_dir):
+            continue
+        summary_path = _find_latest_user_summary(user_dir)
+        if not summary_path:
+            continue
+        try:
+            with open(summary_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        email_value: Optional[str] = None
+        raw_email = data.get("author_email")
+        if isinstance(raw_email, str) and raw_email.strip():
+            email_value = raw_email.strip()
+        elif isinstance(data.get("author_emails"), list):
+            for raw in data["author_emails"]:
+                if isinstance(raw, str) and raw.strip():
+                    email_value = raw.strip()
+                    break
+        if not email_value:
+            continue
+        key = email_value.lower()
+        entry = {
+            "slug": slug,
+            "display_name": data.get("author_name") or slug,
+            "email": email_value,
+        }
+        lookup.setdefault(key, []).append(entry)
+    return lookup
+
+
+def _extract_user_id(ref: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(ref, dict):
+        return None
+    user_id = ref.get("id")
+    if not user_id:
+        return None
+    return str(user_id)
+
+
+def _build_responder_leaderboard(
+    incidents: Sequence[Dict[str, Any]],
+    pagerduty_users: Sequence[Dict[str, Any]],
+    github_lookup: Dict[str, List[Dict[str, str]]],
+) -> Optional[Dict[str, Any]]:
+    if not incidents:
+        return None
+    pd_by_id = {str(user.get("id")): user for user in pagerduty_users if user.get("id")}
+    stats: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure(user_id: str) -> Dict[str, Any]:
+        entry = stats.get(user_id)
+        if entry is None:
+            entry = {
+                "resolved": set(),
+                "ack": set(),
+                "assigned": set(),
+                "durations": [],
+                "pd_name": None,
+                "pd_html": None,
+            }
+            stats[user_id] = entry
+        return entry
+
+    def _record(user_id: str, ref: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        entry = _ensure(user_id)
+        if isinstance(ref, dict):
+            display_name = ref.get("summary") or ref.get("name")
+            if display_name and not entry.get("pd_name"):
+                entry["pd_name"] = display_name
+            html_url = ref.get("html_url")
+            if html_url and not entry.get("pd_html"):
+                entry["pd_html"] = html_url
+        return entry
+
+    for incident in incidents:
+        incident_id = str(incident.get("id") or incident.get("incident_number") or len(stats))
+        status = (incident.get("status") or "").lower()
+        created = parse_iso8601(incident.get("created_at"))
+        resolved_dt = parse_iso8601(incident.get("resolved_at")) or parse_iso8601(
+            incident.get("last_status_change_at")
+        )
+        duration_minutes = None
+        if created and resolved_dt:
+            duration_minutes = (resolved_dt - created).total_seconds() / 60.0
+        if status == "resolved":
+            resolver_ref = incident.get("last_status_change_by")
+            resolver_id = _extract_user_id(resolver_ref)
+            if resolver_id:
+                entry = _record(resolver_id, resolver_ref)
+                entry["resolved"].add(incident_id)
+                if duration_minutes is not None:
+                    entry["durations"].append(duration_minutes)
+        for acknowledgement in incident.get("acknowledgements") or []:
+            ack_ref = acknowledgement.get("acknowledger")
+            ack_id = _extract_user_id(ack_ref)
+            if ack_id:
+                entry = _record(ack_id, ack_ref)
+                entry["ack"].add(incident_id)
+        for assignment in incident.get("assignments") or []:
+            assignee_ref = assignment.get("assignee")
+            assignee_id = _extract_user_id(assignee_ref)
+            if assignee_id:
+                entry = _record(assignee_id, assignee_ref)
+                entry["assigned"].add(incident_id)
+
+    entries: List[Dict[str, Any]] = []
+    for user_id, bucket in stats.items():
+        resolved_count = len(bucket["resolved"])
+        if resolved_count == 0:
+            continue
+        ack_count = len(bucket["ack"])
+        assignment_count = len(bucket["assigned"])
+        touch_count = len(bucket["resolved"] | bucket["ack"] | bucket["assigned"])
+        durations = bucket["durations"]
+        avg_minutes = (sum(durations) / len(durations)) if durations else None
+        median_minutes = _percentile(durations, 0.5) if durations else None
+        fastest_minutes = min(durations) if durations else None
+        slowest_minutes = max(durations) if durations else None
+        pd_info = pd_by_id.get(user_id) or {}
+        email = (pd_info.get("email") or "").strip()
+        email_lower = email.lower() if email else None
+        entry = {
+            "pagerduty_user_id": user_id,
+            "pagerduty_name": pd_info.get("name") or pd_info.get("summary") or bucket.get("pd_name"),
+            "pagerduty_email": email or None,
+            "pagerduty_html_url": pd_info.get("html_url") or bucket.get("pd_html"),
+            "resolved_count": resolved_count,
+            "acknowledged_count": ack_count,
+            "assignment_count": assignment_count,
+            "touch_count": touch_count,
+            "avg_resolution_minutes": avg_minutes,
+            "median_resolution_minutes": median_minutes,
+            "fastest_resolution_minutes": fastest_minutes,
+            "slowest_resolution_minutes": slowest_minutes,
+            "github_user": None,
+            "github_match_count": 0,
+        }
+        matches = github_lookup.get(email_lower) if email_lower else None
+        if matches:
+            entry["github_match_count"] = len(matches)
+            entry["github_user"] = matches[0].copy()
+        entries.append(entry)
+
+    if not entries:
+        return None
+
+    entries.sort(
+        key=lambda item: (
+            -item["resolved_count"],
+            -item["acknowledged_count"],
+            item["avg_resolution_minutes"] if item["avg_resolution_minutes"] is not None else float("inf"),
+        )
+    )
+    total = len(entries)
+    matched = sum(1 for item in entries if item.get("github_user"))
+    return {
+        "total_responders": total,
+        "matched_responders": matched,
+        "entries": entries[:25],
+    }
 
 
 def _incident_windows(
@@ -624,6 +830,21 @@ def sync_pagerduty_data(
 
     incidents = list(incidents_by_id.values())
     summary = _summarize_incidents(incidents, since, until, lookback_days)
+    stats_root = os.path.join(os.path.abspath(output_root), "stats")
+    github_lookup = _build_github_user_lookup(stats_root)
+    pagerduty_users: List[Dict[str, Any]] = []
+    try:
+        pagerduty_users = _fetch_pagerduty_users(token)
+    except Exception as exc:  # pragma: no cover - network failure
+        log.info("Warning: failed to fetch PagerDuty users: %s", exc)
+    responder_leaderboard = _build_responder_leaderboard(incidents, pagerduty_users, github_lookup)
+    if responder_leaderboard:
+        summary["responders"] = responder_leaderboard
+        log.info(
+            "PagerDuty responders linked: %s total, %s matched to developers",
+            responder_leaderboard.get("total_responders"),
+            responder_leaderboard.get("matched_responders"),
+        )
     output_dir = os.path.join(os.path.abspath(output_root), "stats", "pagerduty")
     os.makedirs(output_dir, exist_ok=True)
     incidents_path = os.path.join(output_dir, "incidents_last_year.json")

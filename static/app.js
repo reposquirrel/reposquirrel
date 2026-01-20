@@ -1968,6 +1968,134 @@ function renderPagerDutyBreakdowns(container, overview) {
   grid.appendChild(teamCard);
 
   container.appendChild(grid);
+  renderPagerDutyResponders(container, overview);
+}
+
+function renderPagerDutyResponders(container, overview) {
+  const responderData = overview && overview.responders;
+  if (!responderData || !Array.isArray(responderData.entries) || responderData.entries.length === 0) {
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "card pd-responders-card";
+  card.innerHTML = createTitleWithTooltip(
+    "Top responders",
+    "Matches PagerDuty resolvers to RepoSquirrel developers via shared email addresses.",
+    "h3"
+  );
+
+  const meta = document.createElement("div");
+  const totalResponders = responderData.total_responders ?? responderData.entries.length;
+  const matchedResponders = responderData.matched_responders ?? responderData.entries.filter((entry) => entry.github_user).length;
+  meta.className = "pd-responders-meta";
+  meta.textContent = `${matchedResponders}/${totalResponders} responders linked to developer profiles`;
+  card.appendChild(meta);
+
+  const tableWrapper = document.createElement("div");
+  tableWrapper.className = "pd-responders-table-wrapper";
+  const table = document.createElement("div");
+  table.className = "pd-responders-table";
+  table.appendChild(createPagerDutyRespondersHeader());
+  responderData.entries.slice(0, 15).forEach((entry, index) => {
+    table.appendChild(createPagerDutyResponderRow(entry, index));
+  });
+  tableWrapper.appendChild(table);
+  card.appendChild(tableWrapper);
+  container.appendChild(card);
+}
+
+function createPagerDutyRespondersHeader() {
+  const header = document.createElement("div");
+  header.className = "pd-responder-row pd-responder-header";
+  const labels = ["#", "Responder", "Resolved", "Ack'd", "Assignments", "Avg MTTR", "Links"];
+  labels.forEach((label) => {
+    const cell = document.createElement("div");
+    cell.className = "pd-responder-cell";
+    cell.textContent = label;
+    header.appendChild(cell);
+  });
+  return header;
+}
+
+function createPagerDutyResponderRow(entry, index) {
+  const row = document.createElement("div");
+  row.className = "pd-responder-row";
+
+  const rank = document.createElement("div");
+  rank.className = "pd-responder-rank";
+  rank.textContent = `#${index + 1}`;
+  row.appendChild(rank);
+
+  const info = document.createElement("div");
+  info.className = "pd-responder-info";
+  const displayName = (entry.github_user && entry.github_user.display_name) || entry.pagerduty_name || "Unknown responder";
+  if (entry.github_user && typeof navigateToUser === "function") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn-link pd-responder-link";
+    button.textContent = displayName;
+    button.addEventListener("click", () => navigateToUser(entry.github_user.slug));
+    info.appendChild(button);
+  } else {
+    const name = document.createElement("span");
+    name.className = "pd-responder-name";
+    name.textContent = displayName;
+    info.appendChild(name);
+  }
+
+  const badge = document.createElement("span");
+  badge.className = `pd-responder-badge ${entry.github_user ? "linked" : "unlinked"}`;
+  badge.textContent = entry.github_user ? "Linked" : "PagerDuty only";
+  info.appendChild(badge);
+
+  const details = document.createElement("div");
+  details.className = "pd-responder-subline";
+  const detailParts = [];
+  if (entry.pagerduty_name && entry.pagerduty_name !== displayName) {
+    detailParts.push(`PD: ${entry.pagerduty_name}`);
+  }
+  const email = entry.pagerduty_email || (entry.github_user && entry.github_user.email);
+  if (email) {
+    detailParts.push(email);
+  }
+  details.textContent = detailParts.join(" • ") || "No email on record";
+  info.appendChild(details);
+
+  row.appendChild(info);
+
+  row.appendChild(createPagerDutyResponderMetricCell(entry.resolved_count));
+  row.appendChild(createPagerDutyResponderMetricCell(entry.acknowledged_count));
+  row.appendChild(createPagerDutyResponderMetricCell(entry.assignment_count));
+
+  const avgCell = document.createElement("div");
+  avgCell.className = "pd-responder-metric";
+  avgCell.textContent = formatDurationMinutes(entry.avg_resolution_minutes);
+  row.appendChild(avgCell);
+
+  const linksCell = document.createElement("div");
+  linksCell.className = "pd-responder-links";
+  if (entry.pagerduty_html_url) {
+    const link = document.createElement("a");
+    link.href = entry.pagerduty_html_url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "PagerDuty";
+    linksCell.appendChild(link);
+  } else {
+    linksCell.textContent = "—";
+  }
+  row.appendChild(linksCell);
+
+  return row;
+}
+
+function createPagerDutyResponderMetricCell(value) {
+  const cell = document.createElement("div");
+  cell.className = "pd-responder-metric";
+  const safeValue = value ?? 0;
+  cell.textContent = Number(safeValue).toLocaleString();
+  return cell;
 }
 
 function createPagerDutyBreakdownList(items = []) {

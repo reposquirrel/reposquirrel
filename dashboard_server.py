@@ -34,6 +34,9 @@ STATS_ROOT = os.path.join(BASE_DIR, "stats")
 REPO_ROOT = os.path.join(BASE_DIR, "repos")
 CLOC_CACHE_FILE = os.path.join(STATS_ROOT, "cloc_cache.json")
 BADGE_CACHE_FILE = os.path.join(STATS_ROOT, "badges_summary.json")
+PAGERDUTY_STATS_DIR = os.path.join(STATS_ROOT, "pagerduty")
+PAGERDUTY_OVERVIEW_FILE = os.path.join(PAGERDUTY_STATS_DIR, "overview.json")
+PAGERDUTY_INCIDENTS_FILE = os.path.join(PAGERDUTY_STATS_DIR, "incidents_last_year.json")
 
 MONTH_ABBREVIATIONS = [
     "Jan",
@@ -73,6 +76,7 @@ update_process_active = False
 
 # Update log file
 UPDATE_LOG_FILE = os.path.join(BASE_DIR, "update_logs.txt")
+INTEGRATIONS_FILE = os.path.join(BASE_DIR, "configuration", "integrations.json")
 
 def log_update_message(message_dict):
     """Log update messages to both queue and persistent file."""
@@ -2972,6 +2976,78 @@ def api_users_overview():
         return jsonify({"error": str(e)})
 
 
+def _read_integrations_config() -> Dict[str, Any]:
+    if not os.path.exists(INTEGRATIONS_FILE):
+        return {}
+    try:
+        with open(INTEGRATIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid integrations configuration: %s", exc)
+    except OSError as exc:
+        logger.error("Unable to read integrations configuration: %s", exc)
+    return {}
+
+
+def _mask_integration_secret(secret: Optional[str]) -> Optional[str]:
+    if not secret:
+        return None
+    visible = secret[-4:]
+    hidden_length = max(len(secret) - len(visible), 4)
+    return f"{'•' * hidden_length}{visible}"
+
+
+def _serialize_integrations_response(config: Dict[str, Any]) -> Dict[str, Any]:
+    pagerduty = config.get("pagerduty") or {}
+    token_value = pagerduty.get("api_token")
+    return {
+        "pagerduty": {
+            "has_token": bool(token_value),
+            "token_preview": _mask_integration_secret(token_value),
+            "updated_at": pagerduty.get("updated_at")
+        }
+    }
+
+
+@app.route("/api/pagerduty/overview")
+def api_pagerduty_overview():
+    if not os.path.exists(PAGERDUTY_OVERVIEW_FILE):
+        return (
+            jsonify({"error": "PagerDuty data is not available. Configure a token and run an update."}),
+            404,
+        )
+    try:
+        data = load_json(PAGERDUTY_OVERVIEW_FILE)
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        logger.error("Failed to load PagerDuty overview: %s", exc)
+        return jsonify({"error": "Failed to read PagerDuty overview."}), 500
+    return jsonify(data)
+
+
+@app.route("/api/pagerduty/incidents")
+def api_pagerduty_incidents():
+    limit = request.args.get("limit", default=200, type=int) or 200
+    limit = max(1, min(limit, 1000))
+    if not os.path.exists(PAGERDUTY_INCIDENTS_FILE):
+        return (
+            jsonify({"incidents": [], "total": 0, "error": "PagerDuty data unavailable."}),
+            404,
+        )
+    try:
+        incidents = load_json(PAGERDUTY_INCIDENTS_FILE)
+    except Exception as exc:  # pragma: no cover - filesystem errors
+        logger.error("Failed to load PagerDuty incidents: %s", exc)
+        return jsonify({"incidents": [], "total": 0, "error": "Unable to read PagerDuty incidents."}), 500
+    if not isinstance(incidents, list):
+        incidents = []
+    sorted_incidents = sorted(
+        incidents,
+        key=lambda item: item.get("created_at") or item.get("updated_at") or "",
+        reverse=True,
+    )
+    return jsonify({"incidents": sorted_incidents[:limit], "total": len(sorted_incidents)})
+
+
 @app.route("/api/settings/ignore-users", methods=["GET", "POST"])
 def api_settings_ignore_users():
     """Get or update the configuration/ignore_user.txt file."""
@@ -3478,6 +3554,51 @@ def api_settings_repositories():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+
+
+@app.route("/api/settings/integrations", methods=["GET", "POST"])
+def api_settings_integrations():
+    if app.config.get("READ_ONLY_MODE"):
+        return jsonify({"error": "Integrations are disabled in read-only mode"}), 403
+
+    if request.method == "GET":
+        config = _read_integrations_config()
+        return jsonify(_serialize_integrations_response(config))
+
+    payload = request.get_json(silent=True) or {}
+    pagerduty_payload = payload.get("pagerduty")
+
+    if pagerduty_payload is None or not isinstance(pagerduty_payload, dict):
+        return jsonify({"error": "pagerduty payload is required"}), 400
+
+    config = _read_integrations_config()
+    token_value = pagerduty_payload.get("api_token")
+    if token_value is not None and not isinstance(token_value, str):
+        token_value = str(token_value)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if token_value and token_value.strip():
+        config["pagerduty"] = {
+            "api_token": token_value.strip(),
+            "updated_at": timestamp,
+        }
+    else:
+        existing = config.get("pagerduty", {})
+        existing.pop("api_token", None)
+        existing["updated_at"] = timestamp
+        config["pagerduty"] = existing
+
+    try:
+        os.makedirs(os.path.dirname(INTEGRATIONS_FILE), exist_ok=True)
+        with open(INTEGRATIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except OSError as exc:
+        logger.error("Failed to write integrations configuration: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    response_payload = _serialize_integrations_response(config)
+    response_payload["success"] = True
+    return jsonify(response_payload)
 
 
 @app.route("/api/settings/update-config", methods=["GET", "POST"])
