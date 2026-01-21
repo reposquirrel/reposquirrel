@@ -4284,6 +4284,67 @@ body {
   color: #94a3b8;
 }
 
+.pd-severity-stats {
+  margin-top: 12px;
+}
+
+.pd-severity-stats-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pd-severity-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid #1f2937;
+  font-size: 13px;
+}
+
+.pd-severity-row:last-child {
+  border-bottom: none;
+}
+
+.pd-severity-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.pd-severity-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.pd-severity-metrics {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.pd-severity-count {
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.pd-severity-frequency {
+  font-weight: 600;
+  color: #fcd34d;
+}
+
+.pd-severity-share {
+  font-weight: 600;
+  color: #60a5fa;
+}
+
 .pd-service-table {
   display: flex;
   flex-direction: column;

@@ -2050,6 +2050,22 @@ function renderPagerDutyBreakdowns(container, overview) {
   severityCard.appendChild(createPagerDutyBreakdownList(overview.severity_breakdown));
   grid.appendChild(severityCard);
 
+  const severityCadenceCard = document.createElement("div");
+  severityCadenceCard.className = "card";
+  severityCadenceCard.innerHTML = createTitleWithTooltip(
+    "Severity cadence",
+    "How frequently each severity fires plus its share of the window.",
+    "h3"
+  );
+  severityCadenceCard.appendChild(
+    createPagerDutySeverityStatsTable(
+      overview.severity_breakdown,
+      overview.lookback_days || 365,
+      overview.totals?.total
+    )
+  );
+  grid.appendChild(severityCadenceCard);
+
   const serviceCard = document.createElement("div");
   serviceCard.className = "card";
   serviceCard.innerHTML = createTitleWithTooltip(
@@ -3171,6 +3187,48 @@ function createPagerDutyBreakdownList(items = []) {
     list.appendChild(li);
   });
   return list;
+}
+
+function createPagerDutySeverityStatsTable(items = [], lookbackDays = 365, totalCount = null) {
+  const container = document.createElement("div");
+  container.className = "pd-severity-stats";
+  if (!items || items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "pd-breakdown-empty";
+    empty.textContent = "No data";
+    container.appendChild(empty);
+    return container;
+  }
+  const days = Math.max(1, Number(lookbackDays) || 365);
+  const weeks = Math.max(1, days / 7);
+  const table = document.createElement("div");
+  table.className = "pd-severity-stats-table";
+  items.forEach((item) => {
+    const count = Number(item?.count) || 0;
+    const normalized = normalizePagerDutySeverity(item?.label);
+    const color = PAGERDUTY_SEVERITY_COLORS[normalized] || PAGERDUTY_SEVERITY_COLORS.unknown;
+    const percentSource = item?.percent;
+    const fallbackPercent = totalCount ? (count / totalCount) * 100 : null;
+    const percent = percentSource != null ? percentSource : fallbackPercent;
+    const perWeek = count / weeks;
+    const frequencyLabel = perWeek >= 10 ? perWeek.toFixed(0) : perWeek.toFixed(1);
+    const row = document.createElement("div");
+    row.className = "pd-severity-row";
+    row.innerHTML = `
+      <div class="pd-severity-label">
+        <span class="pd-severity-dot" style="background:${color}"></span>
+        ${item?.label || "Unknown"}
+      </div>
+      <div class="pd-severity-metrics">
+        <span class="pd-severity-count">${count.toLocaleString()} total</span>
+        <span class="pd-severity-frequency">${frequencyLabel}/wk</span>
+        ${percent != null ? `<span class="pd-severity-share">${percent.toFixed(1)}%</span>` : ""}
+      </div>
+    `;
+    table.appendChild(row);
+  });
+  container.appendChild(table);
+  return container;
 }
 
 function createPagerDutyServiceTable(items = []) {
