@@ -35,6 +35,26 @@ let state = {
   }
 };
 
+const PAGERDUTY_SEVERITY_ORDER = ["p-down", "critical", "high", "medium", "low", "info", "unknown"];
+const PAGERDUTY_SEVERITY_COLORS = {
+  "p-down": "rgba(127, 29, 29, 0.95)",
+  critical: "rgba(220, 38, 38, 0.9)",
+  high: "rgba(249, 115, 22, 0.9)",
+  medium: "rgba(250, 204, 21, 0.85)",
+  low: "rgba(34, 197, 94, 0.85)",
+  info: "rgba(14, 165, 233, 0.85)",
+  unknown: "rgba(148, 163, 184, 0.85)"
+};
+const PAGERDUTY_SEVERITY_BORDER_COLORS = {
+  "p-down": "rgba(127, 29, 29, 1)",
+  critical: "rgba(220, 38, 38, 1)",
+  high: "rgba(249, 115, 22, 1)",
+  medium: "rgba(250, 204, 21, 1)",
+  low: "rgba(34, 197, 94, 1)",
+  info: "rgba(14, 165, 233, 1)",
+  unknown: "rgba(148, 163, 184, 1)"
+};
+
 let suppressAlertsModeWarning = false;
 
 function $(id) {
@@ -2258,6 +2278,10 @@ function buildPagerDutyResponderDashboard(main, responder, incidentsData) {
   if (timelineCard) {
     container.appendChild(timelineCard);
   }
+  const severityCard = buildResponderSeverityCard(responder, incidents);
+  if (severityCard) {
+    container.appendChild(severityCard);
+  }
   const openIncidentsCard = buildResponderOpenIncidentsCard(responder, incidents);
   if (openIncidentsCard) {
     container.appendChild(openIncidentsCard);
@@ -2503,6 +2527,89 @@ function buildResponderTimelineCard(responder, incidents = []) {
   return card;
 }
 
+function buildResponderSeverityCard(responder, incidents = []) {
+  const card = document.createElement("div");
+  card.className = "card pd-responder-severity-card";
+  card.innerHTML = createTitleWithTooltip(
+    "Severity timeline",
+    "Stacked weekly counts of incidents touched by this responder, grouped by PagerDuty severity.",
+    "h3"
+  );
+  const timeline = computeResponderSeverityTimeline(incidents);
+  if (!timeline) {
+    const empty = document.createElement("div");
+    empty.className = "pd-responder-empty";
+    empty.textContent = incidents.length
+      ? "We couldn't find severity history for this responder yet."
+      : "No PagerDuty incidents recorded for this responder in the cached window.";
+    card.appendChild(empty);
+    return card;
+  }
+
+  const note = document.createElement("p");
+  note.className = "pd-responder-chart-note";
+  note.textContent = "Stacked bars show weekly incident counts grouped by PagerDuty severity.";
+  card.appendChild(note);
+
+  const chartWrapper = document.createElement("div");
+  chartWrapper.className = "pd-responder-chart";
+  const canvas = document.createElement("canvas");
+  const responderId = responder?.pagerduty_user_id || Date.now();
+  const chartId = `pd-responder-severity-${responderId}`;
+  canvas.id = chartId;
+  chartWrapper.appendChild(canvas);
+  card.appendChild(chartWrapper);
+
+  if (state.charts[chartId]) {
+    state.charts[chartId].destroy();
+    delete state.charts[chartId];
+  }
+
+  const datasets = timeline.severityOrder.map((severity) => ({
+    label: severity.toUpperCase(),
+    data: timeline.series[severity],
+    backgroundColor: PAGERDUTY_SEVERITY_COLORS[severity] || PAGERDUTY_SEVERITY_COLORS.unknown,
+    borderColor: PAGERDUTY_SEVERITY_BORDER_COLORS[severity] || PAGERDUTY_SEVERITY_BORDER_COLORS.unknown,
+    borderWidth: 1,
+    stack: "severity"
+  }));
+
+  const ctx = canvas.getContext("2d");
+  const tooltipWeeks = timeline.rawKeys;
+  state.charts[chartId] = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: timeline.labels,
+      datasets
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom" },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              if (!items || !items.length) {
+                return "";
+              }
+              const index = items[0].dataIndex;
+              return `Week of ${formatPagerDutyWeekLabel(tooltipWeeks[index], true)}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { stacked: true },
+        y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
+      }
+    }
+  });
+
+  return card;
+}
+
 function buildResponderOpenIncidentsCard(responder, incidents = []) {
   const card = document.createElement("div");
   card.className = "card pd-responder-open-incidents";
@@ -2628,6 +2735,102 @@ function computeResponderTimeline(responder, incidents = []) {
   const resolvedSeries = allKeys.map((key) => resolvedBuckets.get(key) || 0);
 
   return { labels, assignedSeries, acknowledgedSeries, resolvedSeries, rawKeys: allKeys };
+}
+
+function computeResponderSeverityTimeline(incidents = []) {
+  if (!Array.isArray(incidents) || incidents.length === 0) {
+    return null;
+  }
+  const severityBuckets = new Map();
+  incidents.forEach((incident) => {
+    const severity = normalizePagerDutySeverity(incident?.severity);
+    const timestamps = [
+      incident?.created_at,
+      incident?.first_trigger_log_entry?.created_at,
+      incident?.last_status_change_at,
+      incident?.updated_at
+    ];
+    const eventDate = timestamps
+      .map((value) => parsePagerDutyDate(value))
+      .find((value) => value instanceof Date && !Number.isNaN(value.getTime()));
+    if (!eventDate) {
+      return;
+    }
+    const weekKey = getWeekStartKey(eventDate);
+    if (!weekKey) {
+      return;
+    }
+    if (!severityBuckets.has(severity)) {
+      severityBuckets.set(severity, new Map());
+    }
+    const bucket = severityBuckets.get(severity);
+    bucket.set(weekKey, (bucket.get(weekKey) || 0) + 1);
+  });
+  if (!severityBuckets.size) {
+    return null;
+  }
+  const weekKeys = new Set();
+  severityBuckets.forEach((bucket) => {
+    bucket.forEach((_, key) => weekKeys.add(key));
+  });
+  if (!weekKeys.size) {
+    return null;
+  }
+  const sortedWeeks = Array.from(weekKeys).sort();
+  const order = [
+    ...PAGERDUTY_SEVERITY_ORDER,
+    ...Array.from(severityBuckets.keys()).filter((severity) => !PAGERDUTY_SEVERITY_ORDER.includes(severity))
+  ];
+  const activeOrder = order.filter((severity) => {
+    const bucket = severityBuckets.get(severity);
+    if (!bucket) {
+      return false;
+    }
+    return Array.from(bucket.values()).some((count) => count > 0);
+  });
+  if (!activeOrder.length) {
+    return null;
+  }
+  const series = {};
+  activeOrder.forEach((severity) => {
+    const bucket = severityBuckets.get(severity) || new Map();
+    series[severity] = sortedWeeks.map((week) => bucket.get(week) || 0);
+  });
+  const labels = sortedWeeks.map((key) => formatPagerDutyWeekLabel(key));
+  return { labels, rawKeys: sortedWeeks, severityOrder: activeOrder, series };
+}
+
+function normalizePagerDutySeverity(value) {
+  if (value == null) {
+    return "unknown";
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) {
+    return "unknown";
+  }
+  const alias = {
+    sev1: "critical",
+    sev2: "high",
+    sev3: "medium",
+    sev4: "low",
+    sev5: "info",
+    p1: "critical",
+    p2: "high",
+    p3: "medium",
+    p4: "low",
+    p5: "info",
+    informational: "info",
+    information: "info",
+    warn: "medium",
+    warning: "medium"
+  };
+  if (alias[normalized]) {
+    return alias[normalized];
+  }
+  if (PAGERDUTY_SEVERITY_ORDER.includes(normalized)) {
+    return normalized;
+  }
+  return normalized || "unknown";
 }
 
 function parsePagerDutyDate(value) {
