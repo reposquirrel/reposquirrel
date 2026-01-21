@@ -1945,6 +1945,13 @@ function renderPagerDutyCharts(container, overview) {
       });
       return counts;
     });
+    const weeklyTotals = normalizedCounts.map((counts) =>
+      Object.values(counts || {}).reduce((sum, value) => sum + (Number(value) || 0), 0)
+    );
+    const averageWeeklyIncidents =
+      weeklyTotals.length > 0
+        ? weeklyTotals.reduce((sum, total) => sum + total, 0) / weeklyTotals.length
+        : 0;
     const severitySet = new Set();
     normalizedCounts.forEach((counts) => {
       Object.keys(counts).forEach((severity) => severitySet.add(severity));
@@ -1963,6 +1970,22 @@ function renderPagerDutyCharts(container, overview) {
         borderWidth: 1,
         stack: "severity"
       }));
+      if (averageWeeklyIncidents > 0) {
+        const averagePerWeek = Number(averageWeeklyIncidents.toFixed(2));
+        datasets.push({
+          type: "line",
+          label: "Average incidents/week",
+          data: weekKeys.map(() => averagePerWeek),
+          borderColor: "#1f2937",
+          borderWidth: 2,
+          borderDash: [6, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0.25,
+          yAxisID: "y",
+          order: 0
+        });
+      }
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML = createTitleWithTooltip(
