@@ -1930,12 +1930,81 @@ function renderPagerDutyCharts(container, overview) {
     });
   }
 
+  if (Array.isArray(trend.weekly_severity) && trend.weekly_severity.length > 0) {
+    const weeklySeverityPoints = trend.weekly_severity.map((point) => point || {});
+    const normalizedCounts = weeklySeverityPoints.map((point) => {
+      const counts = {};
+      const entries = point && typeof point.severities === "object" ? point.severities : {};
+      Object.entries(entries).forEach(([severity, rawValue]) => {
+        const normalized = normalizePagerDutySeverity(severity);
+        const numericValue = Number(rawValue) || 0;
+        if (!Number.isFinite(numericValue) || numericValue <= 0) {
+          return;
+        }
+        counts[normalized] = (counts[normalized] || 0) + numericValue;
+      });
+      return counts;
+    });
+    const severitySet = new Set();
+    normalizedCounts.forEach((counts) => {
+      Object.keys(counts).forEach((severity) => severitySet.add(severity));
+    });
+    if (severitySet.size > 0) {
+      const weekKeys = weeklySeverityPoints.map((point) => point.week_start || "");
+      const severityOrder = [
+        ...PAGERDUTY_SEVERITY_ORDER,
+        ...Array.from(severitySet).filter((severity) => !PAGERDUTY_SEVERITY_ORDER.includes(severity))
+      ].filter((severity) => severitySet.has(severity));
+      const datasets = severityOrder.map((severity) => ({
+        label: severity.toUpperCase(),
+        data: normalizedCounts.map((counts) => counts[severity] || 0),
+        backgroundColor: PAGERDUTY_SEVERITY_COLORS[severity] || PAGERDUTY_SEVERITY_COLORS.unknown,
+        borderColor: PAGERDUTY_SEVERITY_BORDER_COLORS[severity] || PAGERDUTY_SEVERITY_BORDER_COLORS.unknown,
+        borderWidth: 1,
+        stack: "severity"
+      }));
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = createTitleWithTooltip(
+        "Severity over time",
+        "Weekly PagerDuty incidents grouped by severity level.",
+        "h2"
+      ) + '<div class="chart-container"><canvas id="chart-pd-weekly-severity"></canvas></div>';
+      container.appendChild(card);
+      chartConfigs.push({
+        id: "chart-pd-weekly-severity",
+        type: "bar",
+        labels: weekKeys.map((key) => formatPagerDutyWeekLabel(key)),
+        datasets,
+        stackAxes: true,
+        tooltipFormatter(index) {
+          if (typeof index !== "number" || index < 0 || index >= weekKeys.length) {
+            return "";
+          }
+          return `Week of ${formatPagerDutyWeekLabel(weekKeys[index], true)}`;
+        }
+      });
+    }
+  }
+
   setTimeout(() => {
     chartConfigs.forEach((config) => {
       const canvas = document.getElementById(config.id);
       if (!canvas) return;
       if (state.charts[config.id]) {
         state.charts[config.id].destroy();
+      }
+      const tooltipOptions = { intersect: false };
+      if (typeof config.tooltipFormatter === "function") {
+        tooltipOptions.callbacks = {
+          title(items) {
+            if (!items || !items.length) {
+              return "";
+            }
+            const idx = items[0].dataIndex;
+            return config.tooltipFormatter(idx, items);
+          }
+        };
       }
       state.charts[config.id] = new Chart(canvas, {
         type: config.type,
@@ -1947,14 +2016,19 @@ function renderPagerDutyCharts(container, overview) {
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: "index", intersect: false },
-          stacked: config.type === "bar",
           plugins: {
             legend: { position: "top" },
-            tooltip: { intersect: false }
+            tooltip: tooltipOptions
           },
           scales: {
-            x: { ticks: { maxRotation: 45, minRotation: 45 } },
-            y: { beginAtZero: true }
+            x: {
+              ticks: { maxRotation: 45, minRotation: 45 },
+              stacked: !!config.stackAxes
+            },
+            y: {
+              beginAtZero: true,
+              stacked: !!config.stackAxes
+            }
           }
         }
       });

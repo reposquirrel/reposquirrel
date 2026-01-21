@@ -671,6 +671,66 @@ def _build_weekly_open_closed_counts(
     return counts
 
 
+def _normalize_severity_label(value: Optional[str]) -> str:
+    if value is None:
+        return "unknown"
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return "unknown"
+    aliases = {
+        "sev1": "critical",
+        "sev2": "high",
+        "sev3": "medium",
+        "sev4": "low",
+        "sev5": "info",
+        "p1": "critical",
+        "p2": "high",
+        "p3": "medium",
+        "p4": "low",
+        "p5": "info",
+        "informational": "info",
+        "information": "info",
+        "warn": "medium",
+        "warning": "medium",
+        "pdown": "p-down",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _build_weekly_severity_timeline(
+    incidents: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if not incidents:
+        return []
+    buckets: Dict[datetime, Counter[str]] = {}
+    for incident in incidents:
+        timestamp = (
+            parse_iso8601(incident.get("created_at"))
+            or parse_iso8601(incident.get("last_status_change_at"))
+            or parse_iso8601(incident.get("updated_at"))
+            or parse_iso8601(incident.get("resolved_at"))
+        )
+        if not timestamp:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            timestamp = timestamp.astimezone(timezone.utc)
+        week_start = _week_start(timestamp)
+        severity = _normalize_severity_label(_extract_severity(incident))
+        bucket = buckets.setdefault(week_start, Counter())
+        bucket[severity] += 1
+    timeline: List[Dict[str, Any]] = []
+    for week in sorted(buckets):
+        timeline.append(
+            {
+                "week_start": week.strftime("%Y-%m-%d"),
+                "severities": dict(buckets[week]),
+            }
+        )
+    return timeline
+
+
 def _serialize_daily_counts(counts: Sequence[Tuple[datetime, int]]) -> List[Dict[str, Any]]:
     return [
         {"date": day.strftime("%Y-%m-%d"), "open": value}
@@ -787,6 +847,7 @@ def _summarize_incidents(
     daily_open_counts = _build_daily_counts(windows)
     daily_open_vs_closed = _build_daily_open_closed_counts(windows)
     weekly_open_vs_closed = _build_weekly_open_closed_counts(windows)
+    weekly_severity = _build_weekly_severity_timeline(incidents)
     current_open = daily_open_counts[-1][1] if daily_open_counts else status_counts.get("triggered", 0)
     peak_open = max((count for _, count in daily_open_counts), default=current_open)
     peak_date = None
@@ -847,6 +908,7 @@ def _summarize_incidents(
         "daily_open": _serialize_daily_counts(daily_open_counts),
         "daily_open_vs_closed": _serialize_open_closed_counts(daily_open_vs_closed, "date"),
         "weekly_open_vs_closed": _serialize_open_closed_counts(weekly_open_vs_closed, "week_start"),
+        "weekly_severity": weekly_severity,
         "snapshot": {
             "current_open": current_open,
             "open_30_days_ago": open_thirty_days_ago,
