@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - handled gracefully at runtime
     requests = None  # type: ignore
 
 INCIDENTS_URL = "https://api.pagerduty.com/incidents"
+INCIDENT_LOG_ENTRIES_URL = "https://api.pagerduty.com/incidents/{incident_id}/log_entries"
 USERS_URL = "https://api.pagerduty.com/users"
 HEADERS_BASE = {
     "Accept": "application/vnd.pagerduty+json;version=2",
@@ -73,6 +74,26 @@ def _load_pagerduty_token(base_dir: str) -> Optional[str]:
     if isinstance(token, str) and token.strip():
         return token.strip()
     return None
+
+
+def _load_existing_incident_events(path: str) -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    cache: Dict[str, Dict[str, Any]] = {}
+    for entry in existing:
+        incident_id = entry.get("id") or entry.get("incident_number")
+        if incident_id is None:
+            continue
+        cache[str(incident_id)] = {
+            "updated_at": entry.get("updated_at"),
+            "responder_events": entry.get("responder_events"),
+        }
+    return cache
 
 
 class _SimpleResponse:
@@ -161,6 +182,102 @@ def _get_with_retry(
         if resp.status_code >= 400:
             _raise_for_status(resp)
         return resp
+
+
+def _fetch_incident_log_entries(token: str, incident_id: str) -> List[Dict[str, Any]]:
+    headers = dict(HEADERS_BASE)
+    headers["Authorization"] = f"Token token={token}"
+    url = INCIDENT_LOG_ENTRIES_URL.format(incident_id=urllib_parse.quote(str(incident_id)))
+    params: Dict[str, Any] = {"limit": 100, "offset": 0, "time_zone": "UTC"}
+    entries: List[Dict[str, Any]] = []
+    while True:
+        response = _get_with_retry(url, headers, params)
+        payload = response.json()
+        entries.extend(payload.get("log_entries") or [])
+        if not payload.get("more"):
+            break
+        params["offset"] = params.get("offset", 0) + params.get("limit", 100)
+    return entries
+
+
+def _append_responder_event(
+    events: List[Dict[str, Any]],
+    user_ref: Optional[Dict[str, Any]],
+    role: str,
+    timestamp: Optional[str],
+) -> None:
+    if not timestamp:
+        return
+    user_id = _extract_user_id(user_ref)
+    if not user_id:
+        return
+    event: Dict[str, Any] = {"user_id": user_id, "role": role, "at": timestamp}
+    if isinstance(user_ref, dict):
+        summary = user_ref.get("summary") or user_ref.get("name")
+        if isinstance(summary, str) and summary.strip():
+            event["user_summary"] = summary.strip()
+        html_url = user_ref.get("html_url")
+        if isinstance(html_url, str) and html_url.strip():
+            event["user_html_url"] = html_url.strip()
+    events.append(event)
+
+
+def _extract_responder_events_from_logs(log_entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not log_entries:
+        return []
+    events: List[Dict[str, Any]] = []
+    for entry in log_entries:
+        entry_type = (entry.get("type") or "").lower()
+        timestamp = entry.get("created_at") or entry.get("timestamp") or entry.get("occurred_at")
+        if "acknowledge" in entry_type:
+            _append_responder_event(events, entry.get("agent"), "acknowledged", timestamp)
+        elif "resolve" in entry_type:
+            _append_responder_event(events, entry.get("agent"), "resolved", timestamp)
+        elif "assign" in entry_type or "delegate" in entry_type:
+            assignments = entry.get("assignments") or []
+            if assignments:
+                for assignment in assignments:
+                    _append_responder_event(events, assignment.get("assignee"), "assigned", timestamp)
+            else:
+                _append_responder_event(events, entry.get("agent"), "assigned", timestamp)
+    events.sort(key=lambda item: item.get("at") or "")
+    return events
+
+
+def _augment_incidents_with_logs(
+    token: str,
+    incidents: Sequence[Dict[str, Any]],
+    cache: Dict[str, Dict[str, Any]],
+    logger: logging.Logger,
+) -> None:
+    if not incidents:
+        return
+    remaining: List[Dict[str, Any]] = []
+    for incident in incidents:
+        incident_id = incident.get("id") or incident.get("incident_number")
+        if incident_id is None:
+            continue
+        key = str(incident_id)
+        cached = cache.get(key)
+        if cached and cached.get("updated_at") == incident.get("updated_at") and "responder_events" in cached:
+            incident["responder_events"] = cached.get("responder_events") or []
+            continue
+        remaining.append(incident)
+    if not remaining:
+        return
+    logger.info("Fetching PagerDuty log entries for %s incidents", len(remaining))
+    for idx, incident in enumerate(remaining, start=1):
+        incident_id = incident.get("id") or incident.get("incident_number")
+        if not incident_id:
+            continue
+        try:
+            logs = _fetch_incident_log_entries(token, str(incident_id))
+        except Exception as exc:  # pragma: no cover - network errors handled upstream
+            logger.info("Warning: failed to fetch log entries for incident %s: %s", incident_id, exc)
+            continue
+        incident["responder_events"] = _extract_responder_events_from_logs(logs)
+        if idx % 25 == 0:
+            logger.info("Processed %s/%s incidents for log entries", idx, len(remaining))
 
 
 def _month_range_iter(start: datetime, end: datetime) -> List[Tuple[datetime, datetime]]:
@@ -344,6 +461,29 @@ def _build_responder_leaderboard(
         duration_minutes = None
         if created and resolved_dt:
             duration_minutes = (resolved_dt - created).total_seconds() / 60.0
+
+        events_handled = False
+        responder_events = incident.get("responder_events")
+        if isinstance(responder_events, list) and responder_events:
+            events_handled = True
+            for event in responder_events:
+                user_id = event.get("user_id")
+                if not user_id:
+                    continue
+                role = (event.get("role") or "").lower()
+                entry = _record(user_id, None)
+                if role == "resolved":
+                    if incident_id not in entry["resolved"]:
+                        entry["resolved"].add(incident_id)
+                        if duration_minutes is not None:
+                            entry["durations"].append(duration_minutes)
+                elif role == "acknowledged":
+                    entry["ack"].add(incident_id)
+                elif role == "assigned":
+                    entry["assigned"].add(incident_id)
+        if events_handled:
+            continue
+
         if status == "resolved":
             resolver_ref = incident.get("last_status_change_by")
             resolver_id = _extract_user_id(resolver_ref)
@@ -829,6 +969,13 @@ def sync_pagerduty_data(
             incidents_by_id[key] = incident
 
     incidents = list(incidents_by_id.values())
+    output_dir = os.path.join(os.path.abspath(output_root), "stats", "pagerduty")
+    incidents_path = os.path.join(output_dir, "incidents_last_year.json")
+    existing_incident_cache = _load_existing_incident_events(incidents_path)
+    _augment_incidents_with_logs(token, incidents, existing_incident_cache, log)
+    for incident in incidents:
+        incident["severity"] = _extract_severity(incident)
+
     summary = _summarize_incidents(incidents, since, until, lookback_days)
     stats_root = os.path.join(os.path.abspath(output_root), "stats")
     github_lookup = _build_github_user_lookup(stats_root)
@@ -845,9 +992,7 @@ def sync_pagerduty_data(
             responder_leaderboard.get("total_responders"),
             responder_leaderboard.get("matched_responders"),
         )
-    output_dir = os.path.join(os.path.abspath(output_root), "stats", "pagerduty")
     os.makedirs(output_dir, exist_ok=True)
-    incidents_path = os.path.join(output_dir, "incidents_last_year.json")
     overview_path = os.path.join(output_dir, "overview.json")
 
     with open(incidents_path, "w", encoding="utf-8") as handle:

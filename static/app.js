@@ -29,7 +29,9 @@ let state = {
   alerts: {
     overview: null,
     loading: false,
-    error: null
+    error: null,
+    selectedResponder: null,
+    responderIncidents: {}
   }
 };
 
@@ -217,6 +219,9 @@ function updateAlertsModeVisibility() {
   if (!configured) {
     state.alerts.overview = null;
     state.alerts.error = null;
+    state.alerts.selectedResponder = null;
+    state.alerts.responderIncidents = {};
+    renderPagerDutyResponderList();
   }
   if (!configured && state.mode === "alerts") {
     suppressAlertsModeWarning = true;
@@ -1698,6 +1703,7 @@ async function ensurePagerDutyOverview(forceReload = false) {
     }
     state.alerts.overview = payload || {};
     state.alerts.error = null;
+    state.alerts.responderIncidents = {};
     updatePagerDutySidebarStatus("ready", payload);
     return state.alerts.overview;
   } catch (error) {
@@ -1711,6 +1717,8 @@ async function ensurePagerDutyOverview(forceReload = false) {
 }
 
 async function showAlertsOverviewDashboard(forceReload = false) {
+  state.alerts.selectedResponder = null;
+  renderPagerDutyResponderList();
   const main = $("main-content");
   clearMain();
   main.innerHTML = createLoadingIndicator(
@@ -1748,6 +1756,7 @@ function renderAlertsOverview(overview) {
   main.innerHTML = "";
   const periodLabel = describePagerDutyPeriod(overview.period, overview.lookback_days || 365);
   setViewHeader("Alerts (PagerDuty)", periodLabel, "Alerts · PD");
+  renderPagerDutyResponderList();
 
   renderPagerDutyKpis(main, overview);
   renderPagerDutyCharts(main, overview);
@@ -2098,6 +2107,769 @@ function createPagerDutyResponderMetricCell(value) {
   return cell;
 }
 
+function renderPagerDutyResponderList() {
+  const container = $("pagerduty-responder-list");
+  if (!container) {
+    return;
+  }
+  container.innerHTML = "";
+  const overview = state.alerts.overview;
+  const responderData = overview?.responders;
+  const entries = Array.isArray(responderData?.entries) ? responderData.entries : [];
+
+  const overviewItem = document.createElement("div");
+  overviewItem.className = "sidebar-item";
+  if (!state.alerts.selectedResponder) {
+    overviewItem.classList.add("active");
+  }
+  overviewItem.textContent = "All responder overview";
+  overviewItem.addEventListener("click", () => {
+    if (state.alerts.selectedResponder) {
+      showAlertsOverviewDashboard(false);
+    }
+  });
+  container.appendChild(overviewItem);
+
+  if (!overview) {
+    const note = document.createElement("div");
+    note.className = "sidebar-item small";
+    note.textContent = "Run ‘Run Update’ to load PagerDuty responders.";
+    container.appendChild(note);
+    return;
+  }
+
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "sidebar-item small";
+    empty.textContent = "No responder data captured yet.";
+    container.appendChild(empty);
+    return;
+  }
+
+  entries.forEach((entry) => {
+    const item = document.createElement("div");
+    item.className = "sidebar-item";
+    if (
+      state.alerts.selectedResponder &&
+      state.alerts.selectedResponder.pagerduty_user_id === entry.pagerduty_user_id
+    ) {
+      item.classList.add("active");
+    }
+    const label = getResponderDisplayName(entry);
+    const content = document.createElement("div");
+    content.className = "sidebar-item-content";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const meta = document.createElement("span");
+    meta.className = "sidebar-item-meta";
+    const resolvedCount = entry.resolved_count ?? 0;
+    meta.textContent = `${resolvedCount.toLocaleString()} resolved`;
+    content.appendChild(name);
+    content.appendChild(meta);
+    item.appendChild(content);
+    item.addEventListener("click", () => selectPagerDutyResponder(entry));
+    container.appendChild(item);
+  });
+}
+
+function getResponderDisplayName(entry) {
+  if (!entry) {
+    return "Responder";
+  }
+  if (entry.github_user && entry.github_user.display_name) {
+    return entry.github_user.display_name;
+  }
+  if (entry.pagerduty_name) {
+    return entry.pagerduty_name;
+  }
+  if (entry.pagerduty_email) {
+    return entry.pagerduty_email;
+  }
+  return entry.pagerduty_user_id ? `Responder ${entry.pagerduty_user_id}` : "Responder";
+}
+
+function selectPagerDutyResponder(entry) {
+  if (!entry) {
+    showAlertsOverviewDashboard(false);
+    return;
+  }
+  state.alerts.selectedResponder = entry;
+  renderPagerDutyResponderList();
+  if (state.mode !== "alerts") {
+    setMode("alerts", false);
+  }
+  showAlertsResponderDashboard(entry);
+}
+
+async function showAlertsResponderDashboard(responder) {
+  if (!responder) {
+    showAlertsOverviewDashboard(false);
+    return;
+  }
+  const main = $("main-content");
+  clearMain();
+  const responderName = getResponderDisplayName(responder);
+  setViewHeader(
+    `Alerts · ${responderName}`,
+    "Responder-level PagerDuty activity",
+    "Alerts · PD"
+  );
+  main.innerHTML = createLoadingIndicator(
+    `Loading ${responderName}`,
+    "Gathering incidents and responder statistics…"
+  );
+  try {
+    const data = await fetchPagerDutyIncidentsForResponder(responder.pagerduty_user_id);
+    if (
+      !state.alerts.selectedResponder ||
+      state.alerts.selectedResponder.pagerduty_user_id !== responder.pagerduty_user_id
+    ) {
+      return;
+    }
+    buildPagerDutyResponderDashboard(main, responder, data);
+  } catch (error) {
+    console.error("Failed to load responder incidents:", error);
+    if (
+      !state.alerts.selectedResponder ||
+      state.alerts.selectedResponder.pagerduty_user_id !== responder.pagerduty_user_id
+    ) {
+      return;
+    }
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <h2>Unable to load responder data</h2>
+      <p>${error.message || error}</p>
+    `;
+    main.innerHTML = "";
+    main.appendChild(card);
+  }
+}
+
+function buildPagerDutyResponderDashboard(main, responder, incidentsData) {
+  const container = document.createElement("div");
+  container.className = "pd-responder-dashboard";
+  const incidents = Array.isArray(incidentsData?.incidents) ? incidentsData.incidents : [];
+  const totalCount = typeof incidentsData?.total === "number" ? incidentsData.total : incidents.length;
+  destroyPagerDutyResponderCharts();
+  container.appendChild(buildResponderSummaryCard(responder));
+  container.appendChild(buildResponderKpiGrid(responder));
+  const timelineCard = buildResponderTimelineCard(responder, incidents);
+  if (timelineCard) {
+    container.appendChild(timelineCard);
+  }
+  const openIncidentsCard = buildResponderOpenIncidentsCard(responder, incidents);
+  if (openIncidentsCard) {
+    container.appendChild(openIncidentsCard);
+  }
+  container.appendChild(buildResponderIncidentsCard(incidents, totalCount));
+  main.innerHTML = "";
+  main.appendChild(container);
+}
+
+function buildResponderSummaryCard(responder) {
+  const card = document.createElement("div");
+  card.className = "card pd-responder-summary";
+  const name = getResponderDisplayName(responder);
+  const lookbackDays = state.alerts.overview?.lookback_days || 365;
+  card.innerHTML = `
+    <h2>${name}</h2>
+    <p>Responder metrics aggregated across the last ${lookbackDays} days.</p>
+  `;
+
+  const meta = document.createElement("ul");
+  meta.className = "pd-responder-meta";
+  const pdLine = document.createElement("li");
+  pdLine.innerHTML = `<span>PagerDuty:</span> ${responder.pagerduty_name || "Unknown"}${responder.pagerduty_email ? ` · ${responder.pagerduty_email}` : ""}`;
+  meta.appendChild(pdLine);
+  const githubLine = document.createElement("li");
+  githubLine.innerHTML = `<span>Matched developer:</span> ${responder.github_user ? responder.github_user.display_name : "No linked RepoSquirrel user"}`;
+  meta.appendChild(githubLine);
+  card.appendChild(meta);
+
+  const actions = document.createElement("div");
+  actions.className = "pd-responder-actions";
+  let hasAction = false;
+  if (responder.github_user && typeof navigateToUser === "function") {
+    const btn = document.createElement("button");
+    btn.className = "btn btn-secondary";
+    btn.textContent = "Open developer view";
+    btn.addEventListener("click", () => navigateToUser(responder.github_user.slug));
+    actions.appendChild(btn);
+    hasAction = true;
+  }
+  if (responder.pagerduty_html_url) {
+    const link = document.createElement("a");
+    link.className = "btn btn-secondary";
+    link.href = responder.pagerduty_html_url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "View in PagerDuty";
+    actions.appendChild(link);
+    hasAction = true;
+  }
+  if (hasAction) {
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function buildResponderKpiGrid(responder) {
+  const touchCount = responder.touch_count ?? (
+    (responder.resolved_count || 0) +
+    (responder.acknowledged_count || 0) +
+    (responder.assignment_count || 0)
+  );
+  const kpis = [
+    {
+      label: "Resolved incidents",
+      value: responder.resolved_count || 0,
+      detail: "Closed by this responder"
+    },
+    {
+      label: "Acknowledged",
+      value: responder.acknowledged_count || 0,
+      detail: "Times acknowledged"
+    },
+    {
+      label: "Assignments",
+      value: responder.assignment_count || 0,
+      detail: "Direct assignments"
+    },
+    {
+      label: "Unique touches",
+      value: touchCount,
+      detail: "Incidents touched"
+    },
+    {
+      label: "Avg MTTR",
+      value: formatDurationMinutes(responder.avg_resolution_minutes),
+      detail: "Average resolution"
+    },
+    {
+      label: "Median MTTR",
+      value: formatDurationMinutes(responder.median_resolution_minutes),
+      detail: "Median resolution"
+    },
+    {
+      label: "Fastest fix",
+      value: formatDurationMinutes(responder.fastest_resolution_minutes),
+      detail: "Fastest resolution"
+    },
+    {
+      label: "Slowest fix",
+      value: formatDurationMinutes(responder.slowest_resolution_minutes),
+      detail: "Longest resolution"
+    }
+  ];
+  const grid = document.createElement("div");
+  grid.className = "kpi-grid pd-kpi-grid";
+  kpis.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "kpi-card";
+    card.innerHTML = `
+      <div class="kpi-label">${item.label}</div>
+      <div class="kpi-value">${item.value ?? "--"}</div>
+      <div class="kpi-detail">${item.detail || ""}</div>
+    `;
+    grid.appendChild(card);
+  });
+  return grid;
+}
+
+function buildResponderTimelineCard(responder, incidents = []) {
+  const card = document.createElement("div");
+  card.className = "card pd-responder-timeline-card";
+  card.innerHTML = createTitleWithTooltip(
+    "Assignments vs. acknowledgements vs. resolutions",
+    "Weekly counts showing when this responder was assigned incidents, acknowledged pages, and resolved work.",
+    "h3"
+  );
+  const timeline = computeResponderTimeline(responder, incidents);
+  if (!timeline) {
+    const empty = document.createElement("div");
+    empty.className = "pd-responder-empty";
+    empty.textContent = incidents.length
+      ? "We couldn't find assignment or resolution timestamps for this responder yet."
+      : "No PagerDuty incidents recorded for this responder in the cached window.";
+    card.appendChild(empty);
+    return card;
+  }
+
+  const note = document.createElement("p");
+  note.className = "pd-responder-chart-note";
+  note.textContent = "Points represent weekly assignment, acknowledgement, and resolution counts across the cached period.";
+  card.appendChild(note);
+
+  const chartWrapper = document.createElement("div");
+  chartWrapper.className = "pd-responder-chart";
+  const canvas = document.createElement("canvas");
+  const responderId = responder?.pagerduty_user_id || Date.now();
+  const chartId = `pd-responder-timeline-${responderId}`;
+  canvas.id = chartId;
+  chartWrapper.appendChild(canvas);
+  card.appendChild(chartWrapper);
+
+  if (state.charts[chartId]) {
+    state.charts[chartId].destroy();
+    delete state.charts[chartId];
+  }
+
+  const ctx = canvas.getContext("2d");
+  const tooltipDates = timeline.rawKeys;
+  state.charts[chartId] = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: timeline.labels,
+      datasets: [
+        {
+          label: "Assigned",
+          data: timeline.assignedSeries,
+          borderColor: "rgba(56, 189, 248, 1)",
+          backgroundColor: "rgba(56, 189, 248, 0.2)",
+          pointRadius: 2,
+          tension: 0.3,
+          fill: false
+        },
+        {
+          label: "Acknowledged",
+          data: timeline.acknowledgedSeries,
+          borderColor: "rgba(249, 115, 22, 1)",
+          backgroundColor: "rgba(249, 115, 22, 0.2)",
+          pointRadius: 2,
+          tension: 0.3,
+          fill: false
+        },
+        {
+          label: "Resolved",
+          data: timeline.resolvedSeries,
+          borderColor: "rgba(52, 211, 153, 1)",
+          backgroundColor: "rgba(52, 211, 153, 0.2)",
+          pointRadius: 2,
+          tension: 0.3,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: "index",
+        intersect: false
+      },
+      plugins: {
+        legend: { position: "bottom" },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              if (!items || !items.length) {
+                return "";
+              }
+              const idx = items[0].dataIndex;
+              const key = tooltipDates[idx];
+              return formatPagerDutyWeekLabel(key, true);
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: {
+            maxTicksLimit: 10
+          },
+          title: {
+            display: true,
+            text: "Date"
+          }
+        },
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: "Incidents"
+          },
+          ticks: {
+            precision: 0,
+            callback(value) {
+              return typeof value === "number" ? value.toLocaleString() : value;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  return card;
+}
+
+function buildResponderOpenIncidentsCard(responder, incidents = []) {
+  const card = document.createElement("div");
+  card.className = "card pd-responder-open-incidents";
+  card.innerHTML = createTitleWithTooltip(
+    "Active incidents",
+    "Open PagerDuty incidents this responder is currently involved in.",
+    "h3"
+  );
+
+  const list = document.createElement("div");
+  list.className = "pd-incidents-list";
+  const openIncidents = Array.isArray(incidents)
+    ? incidents.filter((incident) => isIncidentAssignedToResponder(incident, responder))
+    : [];
+
+  if (openIncidents.length === 0) {
+    list.innerHTML = '<div class="pd-responder-empty">No active assignments for this responder.</div>';
+  } else {
+    openIncidents
+      .sort((a, b) => {
+        const left = a.created_at || a.updated_at || "";
+        const right = b.created_at || b.updated_at || "";
+        return right.localeCompare(left);
+      })
+      .slice(0, 10)
+      .forEach((incident) => {
+        const roleSummary = formatResponderRoles(incident.matched_roles);
+        list.appendChild(createPagerDutyIncidentRow(incident, true, roleSummary));
+      });
+  }
+
+  card.appendChild(list);
+  return card;
+}
+
+function isIncidentAssignedToResponder(incident, responder) {
+  if (!incident || !responder) {
+    return false;
+  }
+  const responderId = responder.pagerduty_user_id || responder.id || responder.user_id;
+  if (!responderId) {
+    return false;
+  }
+  const status = (incident.status || "").toLowerCase();
+  if (status === "resolved") {
+    return false;
+  }
+  const assignments = Array.isArray(incident.assignments) ? incident.assignments : [];
+  const matchesAssignment = assignments.some((assignment) => {
+    const assignee = assignment?.assignee || assignment?.user || assignment;
+    if (!assignee) {
+      return false;
+    }
+    const assigneeId = assignee.id || assignee.user_id || assignee.pagerduty_user_id;
+    return assigneeId && String(assigneeId) === String(responderId);
+  });
+  if (assignments.length > 0) {
+    return matchesAssignment;
+  }
+  if (matchesAssignment) {
+    return true;
+  }
+  const matchedEvents = Array.isArray(incident.matched_events) ? incident.matched_events : [];
+  if (!matchedEvents.length) {
+    return false;
+  }
+  const lastRoleEvent = [...matchedEvents]
+    .filter((event) => event && event.role)
+    .reverse()
+    .find((event) => ["assigned", "acknowledged", "resolved"].includes(event.role));
+  if (!lastRoleEvent) {
+    return false;
+  }
+  return lastRoleEvent.role !== "resolved";
+}
+
+function computeResponderTimeline(responder, incidents = []) {
+  if (!responder || !Array.isArray(incidents) || incidents.length === 0) {
+    return null;
+  }
+  const assignedBuckets = new Map();
+  const acknowledgedBuckets = new Map();
+  const resolvedBuckets = new Map();
+
+  incidents.forEach((incident) => {
+    const matchedEvents = Array.isArray(incident.matched_events) ? incident.matched_events : [];
+    matchedEvents.forEach((event) => {
+      const role = (event.role || "").toLowerCase();
+      if (!["assigned", "acknowledged", "resolved"].includes(role)) {
+        return;
+      }
+      const fallbackTimestamps = [event.at, incident.resolved_at, incident.created_at, incident.updated_at];
+      const eventDate = fallbackTimestamps
+        .map((value) => parsePagerDutyDate(value))
+        .find((value) => value instanceof Date && !Number.isNaN(value.getTime()));
+      if (!eventDate) {
+        return;
+      }
+      const weekKey = getWeekStartKey(eventDate);
+      if (!weekKey) {
+        return;
+      }
+      const targetMap =
+        role === "assigned"
+          ? assignedBuckets
+          : role === "acknowledged"
+            ? acknowledgedBuckets
+            : resolvedBuckets;
+      targetMap.set(weekKey, (targetMap.get(weekKey) || 0) + 1);
+    });
+  });
+
+  if (!assignedBuckets.size && !acknowledgedBuckets.size && !resolvedBuckets.size) {
+    return null;
+  }
+
+  const allKeys = Array.from(
+    new Set([...assignedBuckets.keys(), ...acknowledgedBuckets.keys(), ...resolvedBuckets.keys()])
+  ).sort();
+  const labels = allKeys.map((key) => formatPagerDutyWeekLabel(key));
+  const assignedSeries = allKeys.map((key) => assignedBuckets.get(key) || 0);
+  const acknowledgedSeries = allKeys.map((key) => acknowledgedBuckets.get(key) || 0);
+  const resolvedSeries = allKeys.map((key) => resolvedBuckets.get(key) || 0);
+
+  return { labels, assignedSeries, acknowledgedSeries, resolvedSeries, rawKeys: allKeys };
+}
+
+function parsePagerDutyDate(value) {
+  if (!value) {
+    return null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getWeekStartKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const copy = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const weekday = copy.getUTCDay();
+  const diff = (weekday + 6) % 7; // Convert Sunday(0) to 6, Monday(1) to 0
+  copy.setUTCDate(copy.getUTCDate() - diff);
+  return copy.toISOString().slice(0, 10);
+}
+
+function formatPagerDutyWeekLabel(dateKey, includeYear = false) {
+  if (!dateKey) {
+    return "";
+  }
+  const parts = dateKey.split("-").map((part) => parseInt(part, 10));
+  if (parts.length < 3 || parts.some((value) => Number.isNaN(value))) {
+    return dateKey;
+  }
+  const [year, month, day] = parts;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const options = includeYear
+    ? { month: "short", day: "numeric", year: "numeric" }
+    : { month: "short", day: "numeric" };
+  const formatted = date.toLocaleDateString(undefined, options);
+  return includeYear ? `Week of ${formatted}` : formatted;
+}
+
+function destroyPagerDutyResponderCharts() {
+  Object.keys(state.charts || {}).forEach((chartId) => {
+    if (chartId.startsWith("pd-responder-")) {
+      try {
+        state.charts[chartId].destroy();
+      } catch (error) {
+        console.warn("Failed to destroy PagerDuty chart", chartId, error);
+      }
+      delete state.charts[chartId];
+    }
+  });
+}
+
+function ensureResponderIncidentFilters() {
+  if (!state.alerts.responderIncidentFilters) {
+    state.alerts.responderIncidentFilters = {
+      severity: "",
+      status: "",
+      query: ""
+    };
+  }
+  return state.alerts.responderIncidentFilters;
+}
+
+function applyResponderIncidentFilters(incidents = [], filters = ensureResponderIncidentFilters()) {
+  if (!Array.isArray(incidents) || incidents.length === 0) {
+    return [];
+  }
+  const severityFilter = (filters.severity || "").toLowerCase();
+  const statusFilter = (filters.status || "").toLowerCase();
+  const query = (filters.query || "").trim().toLowerCase();
+  return incidents.filter((incident) => {
+    if (severityFilter && (incident.severity || "").toLowerCase() !== severityFilter) {
+      return false;
+    }
+    if (statusFilter && (incident.status || "").toLowerCase() !== statusFilter) {
+      return false;
+    }
+    if (query) {
+      const haystack = [incident.title, incident.summary, incident.service]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(query)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function buildResponderIncidentsCard(incidents = [], total = incidents.length) {
+  const card = document.createElement("div");
+  card.className = "card pd-responder-incidents-card";
+  card.innerHTML = createTitleWithTooltip(
+    "Incidents touched",
+    "Incidents this responder acknowledged, was assigned, or resolved.",
+    "h3"
+  );
+
+  const filters = ensureResponderIncidentFilters();
+  const controls = document.createElement("div");
+  controls.className = "pd-responder-filters";
+
+  const severitySelect = document.createElement("select");
+  severitySelect.className = "pd-filter-select";
+  severitySelect.innerHTML = '<option value="">All severities</option>';
+  const severities = Array.from(
+    new Set(
+      incidents
+        .map((incident) => (incident.severity || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  severities.forEach((severity) => {
+    const option = document.createElement("option");
+    option.value = severity;
+    option.textContent = severity.toUpperCase();
+    if (filters.severity === severity) {
+      option.selected = true;
+    }
+    severitySelect.appendChild(option);
+  });
+  severitySelect.addEventListener("change", () => {
+    filters.severity = severitySelect.value;
+    renderIncidents();
+  });
+
+  const statusSelect = document.createElement("select");
+  statusSelect.className = "pd-filter-select";
+  statusSelect.innerHTML = '<option value="">All statuses</option>';
+  const statuses = Array.from(
+    new Set(
+      incidents
+        .map((incident) => (incident.status || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  statuses.forEach((status) => {
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = status.toUpperCase();
+    if (filters.status === status) {
+      option.selected = true;
+    }
+    statusSelect.appendChild(option);
+  });
+  statusSelect.addEventListener("change", () => {
+    filters.status = statusSelect.value;
+    renderIncidents();
+  });
+
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.placeholder = "Search title or service";
+  searchInput.value = filters.query;
+  searchInput.className = "pd-filter-search";
+  searchInput.addEventListener("input", (event) => {
+    filters.query = event.target.value;
+    renderIncidents();
+  });
+
+  controls.appendChild(severitySelect);
+  controls.appendChild(statusSelect);
+  controls.appendChild(searchInput);
+  card.appendChild(controls);
+
+  const meta = document.createElement("div");
+  meta.className = "pd-responders-meta";
+  card.appendChild(meta);
+
+  const list = document.createElement("div");
+  list.className = "pd-incidents-list";
+  card.appendChild(list);
+
+  const emptyMessage = () => {
+    list.innerHTML = '<div class="pd-responder-empty">No incidents match the selected filters.</div>';
+    meta.textContent = "Showing 0 incidents";
+  };
+
+  function renderIncidents() {
+    list.innerHTML = "";
+    const filtered = applyResponderIncidentFilters(incidents, filters);
+    if (!filtered.length) {
+      emptyMessage();
+      return;
+    }
+    const limited = filtered
+      .sort((a, b) => {
+        const left = a.created_at || a.updated_at || "";
+        const right = b.created_at || b.updated_at || "";
+        return right.localeCompare(left);
+      })
+      .slice(0, 50);
+
+    meta.textContent = `Showing ${limited.length} of ${filtered.length} incidents (filtered from ${total})`;
+
+    limited.forEach((incident) => {
+      const roles = formatResponderRoles(incident.matched_roles);
+      list.appendChild(createPagerDutyIncidentRow(incident, false, roles));
+    });
+  }
+
+  if (!incidents.length) {
+    emptyMessage();
+  } else {
+    renderIncidents();
+  }
+
+  return card;
+}
+
+function formatResponderRoles(roles = []) {
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return null;
+  }
+  const labels = {
+    resolved: "Resolved",
+    acknowledged: "Acknowledged",
+    assigned: "Assigned"
+  };
+  return roles.map((role) => labels[role] || role).join(", ");
+}
+
+async function fetchPagerDutyIncidentsForResponder(responderId, forceReload = false) {
+  if (!responderId) {
+    throw new Error("Responder ID missing");
+  }
+  state.alerts.responderIncidents = state.alerts.responderIncidents || {};
+  if (!forceReload && state.alerts.responderIncidents[responderId]) {
+    return state.alerts.responderIncidents[responderId];
+  }
+  const response = await fetch(`/api/pagerduty/incidents?responder_id=${encodeURIComponent(responderId)}&limit=500`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) {
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  state.alerts.responderIncidents[responderId] = data;
+  return data;
+}
+
 function createPagerDutyBreakdownList(items = []) {
   const list = document.createElement("ul");
   list.className = "pd-breakdown-list";
@@ -2194,7 +2966,7 @@ function renderPagerDutyIncidents(container, overview) {
   container.appendChild(cardsWrapper);
 }
 
-function createPagerDutyIncidentRow(incident, highlightOpen = false) {
+function createPagerDutyIncidentRow(incident, highlightOpen = false, roleSummary = null) {
   const row = document.createElement("div");
   row.className = "pd-incident-row";
   if (highlightOpen && (incident.status || "").toLowerCase() !== "resolved") {
@@ -2208,6 +2980,7 @@ function createPagerDutyIncidentRow(incident, highlightOpen = false) {
   const created = incident.created_at ? formatDateTime(incident.created_at) : "--";
   const resolved = incident.resolved_at ? formatDateTime(incident.resolved_at) : null;
   const link = incident.html_url ? `<a href="${incident.html_url}" target="_blank" rel="noopener">View</a>` : "";
+  const roleChip = roleSummary ? `<span class="pd-role-chip">${roleSummary}</span>` : "";
   row.innerHTML = `
     <div class="pd-incident-header">
       <div class="pd-incident-title">${title}</div>
@@ -2215,6 +2988,7 @@ function createPagerDutyIncidentRow(incident, highlightOpen = false) {
     </div>
     <div class="pd-incident-footer">
       <span class="pd-status-pill">${status}</span>
+      ${roleChip}
       <span class="pd-incident-time">Opened: ${created}${resolved ? ` · Resolved: ${resolved}` : ""}</span>
       <span class="pd-incident-duration">${duration}</span>
       ${link}

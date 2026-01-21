@@ -3028,6 +3028,9 @@ def api_pagerduty_overview():
 def api_pagerduty_incidents():
     limit = request.args.get("limit", default=200, type=int) or 200
     limit = max(1, min(limit, 1000))
+    responder_id = request.args.get("responder_id", type=str)
+    if responder_id:
+        responder_id = responder_id.strip()
     if not os.path.exists(PAGERDUTY_INCIDENTS_FILE):
         return (
             jsonify({"incidents": [], "total": 0, "error": "PagerDuty data unavailable."}),
@@ -3040,6 +3043,63 @@ def api_pagerduty_incidents():
         return jsonify({"incidents": [], "total": 0, "error": "Unable to read PagerDuty incidents."}), 500
     if not isinstance(incidents, list):
         incidents = []
+
+    if responder_id:
+        def _matches_user(ref: Optional[Dict[str, Any]]) -> bool:
+            return bool(ref and str(ref.get("id")) == responder_id)
+
+        def _legacy_matched_events(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+            events: List[Dict[str, Any]] = []
+            status = (incident.get("status") or "").lower()
+            if status == "resolved" and _matches_user(incident.get("last_status_change_by")):
+                events.append(
+                    {
+                        "role": "resolved",
+                        "at": incident.get("resolved_at")
+                        or incident.get("last_status_change_at")
+                        or incident.get("updated_at"),
+                    }
+                )
+            for acknowledgement in incident.get("acknowledgements") or []:
+                if _matches_user(acknowledgement.get("acknowledger")):
+                    events.append({"role": "acknowledged", "at": acknowledgement.get("at") or acknowledgement.get("created_at")})
+                    break
+            for assignment in incident.get("assignments") or []:
+                if _matches_user(assignment.get("assignee")):
+                    events.append({"role": "assigned", "at": assignment.get("at") or assignment.get("created_at")})
+                    break
+            events = [event for event in events if event.get("role")]
+            events.sort(key=lambda item: item.get("at") or "")
+            return events
+
+        def _extract_matched_events(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+            events: List[Dict[str, Any]] = []
+            for event in incident.get("responder_events") or []:
+                if str(event.get("user_id")) != responder_id:
+                    continue
+                role = (event.get("role") or "").lower()
+                if role not in {"assigned", "acknowledged", "resolved"}:
+                    continue
+                item = {"role": role}
+                if event.get("at"):
+                    item["at"] = event["at"]
+                events.append(item)
+            if events:
+                events.sort(key=lambda item: item.get("at") or "")
+                return events
+            return _legacy_matched_events(incident)
+
+        filtered: List[Dict[str, Any]] = []
+        for incident in incidents:
+            matched_events = _extract_matched_events(incident)
+            if matched_events:
+                incident_copy = dict(incident)
+                incident_copy.pop("responder_events", None)
+                incident_copy["matched_events"] = matched_events
+                incident_copy["matched_roles"] = sorted({event["role"] for event in matched_events if event.get("role")})
+                filtered.append(incident_copy)
+        incidents = filtered
+
     sorted_incidents = sorted(
         incidents,
         key=lambda item: item.get("created_at") or item.get("updated_at") or "",
@@ -4202,6 +4262,9 @@ def run_full_update_async(force_update=False):
     
     update_process_active = True
     overall_success = False
+    stats_dir = os.path.join(BASE_DIR, "stats")
+    pagerduty_backup_root: Optional[str] = None
+    pagerduty_backup_path: Optional[str] = None
     
     # Start a new log section
     start_new_update_log()
@@ -4253,10 +4316,27 @@ def run_full_update_async(force_update=False):
             'progress': 2
         })
         
-        stats_dir = os.path.join(BASE_DIR, "stats")
+        pagerduty_dir = os.path.join(stats_dir, "pagerduty")
         if os.path.exists(stats_dir):
             try:
-                import shutil
+                if os.path.exists(pagerduty_dir):
+                    try:
+                        pagerduty_backup_root = tempfile.mkdtemp(prefix="pagerduty-backup-", dir=BASE_DIR)
+                        pagerduty_backup_path = os.path.join(pagerduty_backup_root, "pagerduty")
+                        shutil.move(pagerduty_dir, pagerduty_backup_path)
+                        log_update_message({
+                            'type': 'info',
+                            'message': f'🛟 Preserving existing PagerDuty cache before cleanup [{datetime.now().strftime("%H:%M:%S")}]',
+                            'progress': 2
+                        })
+                    except Exception as backup_exc:
+                        pagerduty_backup_root = None
+                        pagerduty_backup_path = None
+                        log_update_message({
+                            'type': 'warning',
+                            'message': f'⚠️ Could not preserve PagerDuty cache: {backup_exc}',
+                            'progress': 2
+                        })
                 shutil.rmtree(stats_dir)
                 log_update_message({
                     'type': 'info',
@@ -4740,6 +4820,35 @@ def run_full_update_async(force_update=False):
             'progress': 100
         })
     finally:
+        if pagerduty_backup_root and pagerduty_backup_path:
+            try:
+                new_pagerduty_dir = os.path.join(stats_dir, "pagerduty")
+                new_overview_file = os.path.join(new_pagerduty_dir, "overview.json")
+                if not os.path.exists(new_overview_file):
+                    os.makedirs(stats_dir, exist_ok=True)
+                    if os.path.exists(new_pagerduty_dir):
+                        shutil.rmtree(new_pagerduty_dir)
+                    shutil.move(pagerduty_backup_path, new_pagerduty_dir)
+                    log_update_message({
+                        'type': 'warning',
+                        'message': '⚠️ Restored previous PagerDuty cache because latest sync failed.',
+                        'progress': 98
+                    })
+                else:
+                    log_update_message({
+                        'type': 'info',
+                        'message': '✅ PagerDuty cache refreshed; removing preserved backup.',
+                        'progress': 98
+                    })
+            except Exception as restore_exc:
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'⚠️ Failed to restore PagerDuty cache backup: {restore_exc}',
+                    'progress': 98
+                })
+            finally:
+                if pagerduty_backup_root and os.path.isdir(pagerduty_backup_root):
+                    shutil.rmtree(pagerduty_backup_root, ignore_errors=True)
         update_process_active = False
         record_last_update('success' if overall_success else 'failed', 'manual')
 

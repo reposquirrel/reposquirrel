@@ -44,7 +44,7 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 - **Alerts mode** - A dedicated dashboard tab that visualizes your PagerDuty incidents alongside repo metrics
 - **Automatic ingestion** - Configure an API token once and every “Run Update” pull grabs the last 12 months of incidents
 - **Ready-made charts** - Open incident history, opened vs closed trends, severity mix, and quick lists of active/recent incidents
-- **Responder leaderboard** - Match PagerDuty resolvers to developer profiles, rank who closes the most incidents, and jump straight into their RepoSquirrel user page
+- **Responder leaderboard & dashboards** - Match PagerDuty resolvers to developer profiles, jump to their RepoSquirrel user page, and drill into per-responder PagerDuty timelines
 
 ![Linux Kernel Analysis](screenshots/linux_kernel1.png)
 
