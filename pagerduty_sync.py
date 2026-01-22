@@ -731,6 +731,32 @@ def _build_weekly_severity_timeline(
     return timeline
 
 
+def _build_hourly_incident_histogram(
+    incidents: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    if not incidents:
+        return []
+    hourly_counts: Counter[int] = Counter()
+    for incident in incidents:
+        timestamp = (
+            parse_iso8601(incident.get("created_at"))
+            or parse_iso8601(incident.get("last_status_change_at"))
+            or parse_iso8601(incident.get("updated_at"))
+            or parse_iso8601(incident.get("resolved_at"))
+        )
+        if not timestamp:
+            continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        else:
+            timestamp = timestamp.astimezone(timezone.utc)
+        hourly_counts[timestamp.hour] += 1
+    return [
+        {"hour": hour, "count": int(hourly_counts.get(hour, 0))}
+        for hour in range(24)
+    ]
+
+
 def _serialize_daily_counts(counts: Sequence[Tuple[datetime, int]]) -> List[Dict[str, Any]]:
     return [
         {"date": day.strftime("%Y-%m-%d"), "open": value}
@@ -909,6 +935,7 @@ def _summarize_incidents(
         "daily_open_vs_closed": _serialize_open_closed_counts(daily_open_vs_closed, "date"),
         "weekly_open_vs_closed": _serialize_open_closed_counts(weekly_open_vs_closed, "week_start"),
         "weekly_severity": weekly_severity,
+        "hourly_arrivals": _build_hourly_incident_histogram(incidents),
         "snapshot": {
             "current_open": current_open,
             "open_30_days_ago": open_thirty_days_ago,

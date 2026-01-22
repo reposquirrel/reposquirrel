@@ -1932,6 +1932,41 @@ function renderPagerDutyCharts(container, overview) {
     });
   }
 
+  if (Array.isArray(trend.hourly_arrivals) && trend.hourly_arrivals.length > 0) {
+    const normalized = trend.hourly_arrivals
+      .map((point, index) => ({
+        hour: Number(point?.hour ?? index),
+        count: Number(point?.count) || 0
+      }))
+      .sort((a, b) => a.hour - b.hour);
+    const labels = normalized.map((entry) => {
+      const hour = Number.isFinite(entry.hour) ? entry.hour : 0;
+      return `${hour.toString().padStart(2, "0")}:00`;
+    });
+    const values = normalized.map((entry) => entry.count);
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = createTitleWithTooltip(
+      "🕒 Incidents by hour",
+      "When PagerDuty incidents are created throughout the day (UTC).",
+      "h2"
+    ) + '<div class="chart-container"><canvas id="chart-pd-hourly"></canvas></div>';
+    container.appendChild(card);
+    chartConfigs.push({
+      id: "chart-pd-hourly",
+      type: "bar",
+      labels,
+      datasets: [
+        {
+          label: "Incidents created",
+          data: values,
+          backgroundColor: "rgba(99, 102, 241, 0.8)",
+          borderRadius: 4
+        }
+      ]
+    });
+  }
+
   if (Array.isArray(trend.weekly_severity) && trend.weekly_severity.length > 0) {
     const weeklySeverityPoints = trend.weekly_severity.map((point) => point || {});
     const normalizedCounts = weeklySeverityPoints.map((point) => {
