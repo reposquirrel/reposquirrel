@@ -1863,6 +1863,35 @@ function renderAllIncidentsExplorer(payload) {
     : `Showing ${cachedCount.toLocaleString()} cached incidents from the last ${lookbackDays} days.`;
   card.appendChild(note);
 
+  const timelineChartId = "chart-pd-all-incidents-trend";
+  if (state.charts && state.charts[timelineChartId]) {
+    try {
+      state.charts[timelineChartId].destroy();
+    } catch (error) {
+      console.warn("Failed to destroy PagerDuty chart", timelineChartId, error);
+    }
+    delete state.charts[timelineChartId];
+  }
+  const timelineSection = document.createElement("div");
+  timelineSection.className = "pd-all-incidents-timeline";
+  timelineSection.innerHTML = createTitleWithTooltip(
+    "Incidents over time",
+    "Weekly incident counts that react to the filters below.",
+    "h3"
+  );
+  const timelineChartWrapper = document.createElement("div");
+  timelineChartWrapper.className = "chart-container";
+  const timelineCanvas = document.createElement("canvas");
+  timelineCanvas.id = timelineChartId;
+  timelineChartWrapper.appendChild(timelineCanvas);
+  timelineSection.appendChild(timelineChartWrapper);
+  const timelineEmptyMessage = document.createElement("div");
+  timelineEmptyMessage.className = "pd-breakdown-empty";
+  timelineEmptyMessage.textContent = "No incidents match the selected filters.";
+  timelineEmptyMessage.style.display = "none";
+  timelineSection.appendChild(timelineEmptyMessage);
+  card.appendChild(timelineSection);
+
   const filters = ensureAllIncidentsFilters();
   const controls = document.createElement("div");
   controls.className = "pd-responder-filters";
@@ -1938,6 +1967,83 @@ function renderAllIncidentsExplorer(payload) {
   list.className = "pd-incidents-list";
   card.appendChild(list);
 
+  function updateTimeline(filteredIncidents = []) {
+    if (!timelineCanvas) {
+      return;
+    }
+    state.charts = state.charts || {};
+    const existingChart = state.charts[timelineChartId];
+    if (existingChart) {
+      try {
+        existingChart.destroy();
+      } catch (error) {
+        console.warn("Failed to destroy PagerDuty chart", timelineChartId, error);
+      }
+      delete state.charts[timelineChartId];
+    }
+    const timelineData = buildAllIncidentsTimelineData(filteredIncidents);
+    if (!timelineData || !timelineData.labels.length) {
+      timelineChartWrapper.style.display = "none";
+      timelineEmptyMessage.style.display = "block";
+      return;
+    }
+    timelineChartWrapper.style.display = "";
+    timelineEmptyMessage.style.display = "none";
+    const ctx = timelineCanvas.getContext("2d");
+    const tooltipWeeks = timelineData.rawKeys || [];
+    const datasets = timelineData.severityOrder.map((severity) => ({
+      label: severity.toUpperCase(),
+      data: timelineData.series[severity],
+      backgroundColor: PAGERDUTY_SEVERITY_COLORS[severity] || PAGERDUTY_SEVERITY_COLORS.unknown,
+      borderColor: PAGERDUTY_SEVERITY_BORDER_COLORS[severity] || PAGERDUTY_SEVERITY_BORDER_COLORS.unknown,
+      borderWidth: 1,
+      stack: "all-incidents"
+    }));
+    state.charts[timelineChartId] = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: timelineData.labels,
+        datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "bottom" },
+          tooltip: {
+            callbacks: {
+              title(items) {
+                if (!items || !items.length) {
+                  return "";
+                }
+                const index = items[0].dataIndex;
+                if (typeof index === "number" && tooltipWeeks[index]) {
+                  return `Week of ${formatPagerDutyWeekLabel(tooltipWeeks[index], true)}`;
+                }
+                return items[0].label || "";
+              },
+              footer(items) {
+                if (!items || !items.length || !Array.isArray(timelineData.totals)) {
+                  return "";
+                }
+                const index = items[0].dataIndex;
+                const total = timelineData.totals[index];
+                return typeof total === "number"
+                  ? `Total: ${total.toLocaleString()} incidents`
+                  : "";
+              }
+            }
+          }
+        },
+        scales: {
+          x: { stacked: true, ticks: { maxRotation: 45, minRotation: 45 } },
+          y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
+        }
+      }
+    });
+  }
+
   const totalLabel = hasMoreThanCached
     ? `${cachedCount.toLocaleString()} cached of ${totalCount.toLocaleString()} total`
     : `${totalCount.toLocaleString()} cached incidents`;
@@ -1946,6 +2052,7 @@ function renderAllIncidentsExplorer(payload) {
   function renderIncidents() {
     list.innerHTML = "";
     const filtered = applyResponderIncidentFilters(incidents, filters);
+    updateTimeline(filtered);
     if (!filtered.length) {
       list.innerHTML = '<div class="pd-breakdown-empty">No incidents match the selected filters.</div>';
       meta.textContent = `Showing 0 incidents (${totalLabel})`;
@@ -3249,6 +3356,49 @@ function buildSeverityTimelineFromBuckets(severityBuckets) {
   });
   const labels = sortedWeeks.map((key) => formatPagerDutyWeekLabel(key));
   return { labels, rawKeys: sortedWeeks, severityOrder: activeOrder, series };
+}
+
+function buildAllIncidentsTimelineData(incidents = []) {
+  if (!Array.isArray(incidents) || incidents.length === 0) {
+    return null;
+  }
+  const severityBuckets = new Map();
+  incidents.forEach((incident) => {
+    const severity = normalizePagerDutySeverity(incident?.severity);
+    const timestamps = [
+      incident?.created_at,
+      incident?.first_trigger_log_entry?.created_at,
+      incident?.last_status_change_at,
+      incident?.updated_at,
+      incident?.resolved_at
+    ];
+    const eventDate = timestamps
+      .map((value) => parsePagerDutyDate(value))
+      .find((value) => value instanceof Date && !Number.isNaN(value.getTime()));
+    if (!eventDate) {
+      return;
+    }
+    const weekKey = getWeekStartKey(eventDate);
+    if (!weekKey) {
+      return;
+    }
+    if (!severityBuckets.has(severity)) {
+      severityBuckets.set(severity, new Map());
+    }
+    const bucket = severityBuckets.get(severity);
+    bucket.set(weekKey, (bucket.get(weekKey) || 0) + 1);
+  });
+  const timeline = buildSeverityTimelineFromBuckets(severityBuckets);
+  if (!timeline) {
+    return null;
+  }
+  const totals = timeline.labels.map((_, index) =>
+    timeline.severityOrder.reduce((sum, severity) => sum + (timeline.series[severity][index] || 0), 0)
+  );
+  return {
+    ...timeline,
+    totals
+  };
 }
 
 function normalizePagerDutySeverity(value) {
