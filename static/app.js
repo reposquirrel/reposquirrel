@@ -31,7 +31,9 @@ let state = {
     loading: false,
     error: null,
     selectedResponder: null,
-    responderIncidents: {}
+    responderIncidents: {},
+    responderIncidentFilters: null,
+    overviewOpenFilters: null
   }
 };
 
@@ -2998,6 +3000,17 @@ function destroyPagerDutyResponderCharts() {
   });
 }
 
+function ensureOverviewOpenIncidentFilters() {
+  if (!state.alerts.overviewOpenFilters) {
+    state.alerts.overviewOpenFilters = {
+      severity: "",
+      status: "",
+      query: ""
+    };
+  }
+  return state.alerts.overviewOpenFilters;
+}
+
 function ensureResponderIncidentFilters() {
   if (!state.alerts.responderIncidentFilters) {
     state.alerts.responderIncidentFilters = {
@@ -3281,25 +3294,9 @@ function renderPagerDutyIncidents(container, overview) {
   const cardsWrapper = document.createElement("div");
   cardsWrapper.className = "alerts-breakdown-grid";
 
-  const activeCard = document.createElement("div");
-  activeCard.className = "card";
-  activeCard.innerHTML = createTitleWithTooltip(
-    "Active incidents",
-    "Open incidents pulled from the latest snapshot.",
-    "h3"
-  );
-  const openList = document.createElement("div");
-  openList.className = "pd-incidents-list";
-  const openIncidents = overview.open_incidents || [];
-  if (openIncidents.length === 0) {
-    openList.innerHTML = '<div class="pd-breakdown-empty">No active incidents 🎉</div>';
-  } else {
-    openIncidents.slice(0, 6).forEach((incident) => {
-      openList.appendChild(createPagerDutyIncidentRow(incident, true));
-    });
-  }
-  activeCard.appendChild(openList);
-  cardsWrapper.appendChild(activeCard);
+  const openIncidents = Array.isArray(overview.open_incidents) ? overview.open_incidents : [];
+  const totalOpen = overview?.totals?.open ?? null;
+  cardsWrapper.appendChild(buildOverviewOpenIncidentsCard(openIncidents, totalOpen));
 
   const recentCard = document.createElement("div");
   recentCard.className = "card";
@@ -3322,6 +3319,135 @@ function renderPagerDutyIncidents(container, overview) {
   cardsWrapper.appendChild(recentCard);
 
   container.appendChild(cardsWrapper);
+}
+
+function buildOverviewOpenIncidentsCard(openIncidents = [], totalOpen = null) {
+  const card = document.createElement("div");
+  card.className = "card pd-overview-open-incidents";
+  card.innerHTML = createTitleWithTooltip(
+    "Active incidents",
+    "Open incidents pulled from the latest snapshot. Filter by severity, status, or keywords to focus the list.",
+    "h3"
+  );
+
+  const filters = ensureOverviewOpenIncidentFilters();
+  const controls = document.createElement("div");
+  controls.className = "pd-responder-filters";
+
+  const severitySelect = document.createElement("select");
+  severitySelect.className = "pd-filter-select";
+  severitySelect.innerHTML = '<option value="">All severities</option>';
+  const severities = Array.from(
+    new Set(
+      openIncidents
+        .map((incident) => (incident.severity || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  severities.forEach((severity) => {
+    const option = document.createElement("option");
+    option.value = severity;
+    option.textContent = severity.toUpperCase();
+    if (filters.severity === severity) {
+      option.selected = true;
+    }
+    severitySelect.appendChild(option);
+  });
+  severitySelect.addEventListener("change", () => {
+    filters.severity = severitySelect.value;
+    renderIncidents();
+  });
+
+  const statusSelect = document.createElement("select");
+  statusSelect.className = "pd-filter-select";
+  statusSelect.innerHTML = '<option value="">All statuses</option>';
+  const statuses = Array.from(
+    new Set(
+      openIncidents
+        .map((incident) => (incident.status || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  statuses.forEach((status) => {
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = status.toUpperCase();
+    if (filters.status === status) {
+      option.selected = true;
+    }
+    statusSelect.appendChild(option);
+  });
+  statusSelect.addEventListener("change", () => {
+    filters.status = statusSelect.value;
+    renderIncidents();
+  });
+
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.placeholder = "Search title or service";
+  searchInput.value = filters.query || "";
+  searchInput.className = "pd-filter-search";
+  searchInput.addEventListener("input", (event) => {
+    filters.query = event.target.value;
+    renderIncidents();
+  });
+
+  controls.appendChild(severitySelect);
+  controls.appendChild(statusSelect);
+  controls.appendChild(searchInput);
+  card.appendChild(controls);
+
+  const meta = document.createElement("div");
+  meta.className = "pd-responders-meta";
+  card.appendChild(meta);
+
+  const list = document.createElement("div");
+  list.className = "pd-incidents-list";
+  card.appendChild(list);
+
+  const cachedCount = openIncidents.length;
+  const describeTotals = () => {
+    if (totalOpen != null && totalOpen > cachedCount) {
+      return `${cachedCount.toLocaleString()} cached · ${totalOpen.toLocaleString()} open overall`;
+    }
+    if (totalOpen != null) {
+      return `${cachedCount.toLocaleString()} of ${totalOpen.toLocaleString()} open overall`;
+    }
+    return `${cachedCount.toLocaleString()} tracked`;
+  };
+
+  const renderEmpty = (message) => {
+    list.innerHTML = `<div class="pd-breakdown-empty">${message}</div>`;
+    meta.textContent = `Showing 0 incidents (${describeTotals()})`;
+  };
+
+  function renderIncidents() {
+    if (!openIncidents.length) {
+      renderEmpty("No active incidents 🎉");
+      return;
+    }
+    const filtered = applyResponderIncidentFilters(openIncidents, filters);
+    if (!filtered.length) {
+      renderEmpty("No open incidents match the selected filters.");
+      return;
+    }
+    const limited = filtered
+      .slice()
+      .sort((a, b) => {
+        const left = a.created_at || a.updated_at || "";
+        const right = b.created_at || b.updated_at || "";
+        return right.localeCompare(left);
+      })
+      .slice(0, 50);
+    list.innerHTML = "";
+    limited.forEach((incident) => {
+      list.appendChild(createPagerDutyIncidentRow(incident, true));
+    });
+    meta.textContent = `Showing ${limited.length} of ${filtered.length} incidents (${describeTotals()})`;
+  }
+
+  renderIncidents();
+  return card;
 }
 
 function createPagerDutyIncidentRow(incident, highlightOpen = false, roleSummary = null) {
