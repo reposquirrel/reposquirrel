@@ -34,3 +34,5 @@ Clicking a responder loads an individual workspace featuring:
 The **All incidents** entry in the left navigation surfaces a searchable, filterable list of every incident (open or resolved). A stacked-bar timeline at the top reacts to the current filters so you can instantly see how incident volume changes by severity as you refine the dataset.
 
 All in all, a convinent way of having a helicopter view of the alerts, in many ways from my own opinion better dashboard then the one in the tool.
+
+Would love some additional screenshots here, from live systems
