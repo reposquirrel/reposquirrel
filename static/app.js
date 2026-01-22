@@ -33,7 +33,10 @@ let state = {
     selectedResponder: null,
     responderIncidents: {},
     responderIncidentFilters: null,
-    overviewOpenFilters: null
+    overviewOpenFilters: null,
+    allIncidentsFilters: null,
+    allIncidentsData: null,
+    currentView: "overview"
   }
 };
 
@@ -243,6 +246,11 @@ function updateAlertsModeVisibility() {
     state.alerts.error = null;
     state.alerts.selectedResponder = null;
     state.alerts.responderIncidents = {};
+    state.alerts.responderIncidentFilters = null;
+    state.alerts.overviewOpenFilters = null;
+    state.alerts.allIncidentsFilters = null;
+    state.alerts.allIncidentsData = null;
+    state.alerts.currentView = "overview";
     renderPagerDutyResponderList();
   }
   if (!configured && state.mode === "alerts") {
@@ -1726,6 +1734,7 @@ async function ensurePagerDutyOverview(forceReload = false) {
     state.alerts.overview = payload || {};
     state.alerts.error = null;
     state.alerts.responderIncidents = {};
+    state.alerts.allIncidentsData = null;
     updatePagerDutySidebarStatus("ready", payload);
     return state.alerts.overview;
   } catch (error) {
@@ -1739,6 +1748,7 @@ async function ensurePagerDutyOverview(forceReload = false) {
 }
 
 async function showAlertsOverviewDashboard(forceReload = false) {
+  state.alerts.currentView = "overview";
   state.alerts.selectedResponder = null;
   renderPagerDutyResponderList();
   const main = $("main-content");
@@ -1771,6 +1781,193 @@ async function showAlertsOverviewDashboard(forceReload = false) {
       retryBtn.addEventListener("click", () => showAlertsOverviewDashboard(true));
     }
   }
+}
+
+async function showAllPagerDutyIncidentsView(forceReload = false) {
+  if (state.mode !== "alerts") {
+    setMode("alerts", false);
+  }
+  state.alerts.currentView = "all-incidents";
+  state.alerts.selectedResponder = null;
+  renderPagerDutyResponderList();
+  const main = $("main-content");
+  clearMain();
+  setViewHeader("Alerts · All incidents", "Loading incident history…", "Alerts · PD");
+  main.innerHTML = createLoadingIndicator(
+    "Loading incidents",
+    "Fetching the cached PagerDuty incident history…"
+  );
+  try {
+    const payload = await fetchAllPagerDutyIncidents(forceReload);
+    renderAllIncidentsExplorer(payload);
+  } catch (error) {
+    console.error("Failed to load PagerDuty incidents:", error);
+    const isNotFound = error?.status === 404;
+    const message = isNotFound
+      ? "No PagerDuty incident history found. Configure a token under Integrations and run ‘Run Update’."
+      : `Unable to load incidents: ${error.message || error}`;
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <h2>All incidents</h2>
+      <p>${message}</p>
+      ${READ_ONLY_MODE ? "" : '<button class="btn btn-primary" id="retry-all-incidents">Retry</button>'}
+    `;
+    main.innerHTML = "";
+    main.appendChild(card);
+    const retryBtn = $("retry-all-incidents");
+    if (retryBtn) {
+      retryBtn.addEventListener("click", () => showAllPagerDutyIncidentsView(true));
+    }
+  }
+}
+
+function renderAllIncidentsExplorer(payload) {
+  const main = $("main-content");
+  if (!main) {
+    return;
+  }
+  const incidents = Array.isArray(payload?.incidents) ? payload.incidents : [];
+  const totalCount = typeof payload?.total === "number" ? payload.total : incidents.length;
+  const lookbackDays = state.alerts.overview?.lookback_days || 365;
+  const subtitle = incidents.length
+    ? `Filter ${totalCount.toLocaleString()} incidents captured over the last ${lookbackDays} days.`
+    : "No PagerDuty incidents captured yet. Run ‘Run Update’ after configuring the integration.";
+  setViewHeader("Alerts · All incidents", subtitle, "Alerts · PD");
+  main.innerHTML = "";
+  if (!incidents.length) {
+    const emptyCard = document.createElement("div");
+    emptyCard.className = "card";
+    emptyCard.innerHTML = `
+      <h2>No incidents available</h2>
+      <p>Run ‘Run Update’ after configuring PagerDuty to populate incident history.</p>
+    `;
+    main.appendChild(emptyCard);
+    return;
+  }
+
+  const cachedCount = incidents.length;
+  const hasMoreThanCached = totalCount > cachedCount;
+  const card = document.createElement("div");
+  card.className = "card pd-all-incidents-card";
+  card.innerHTML = createTitleWithTooltip(
+    "Incident explorer",
+    "Search and filter the cached PagerDuty incidents.",
+    "h2"
+  );
+
+  const note = document.createElement("p");
+  note.className = "pd-responder-chart-note";
+  note.textContent = hasMoreThanCached
+    ? `Showing up to ${cachedCount.toLocaleString()} of ${totalCount.toLocaleString()} most recent incidents.`
+    : `Showing ${cachedCount.toLocaleString()} cached incidents from the last ${lookbackDays} days.`;
+  card.appendChild(note);
+
+  const filters = ensureAllIncidentsFilters();
+  const controls = document.createElement("div");
+  controls.className = "pd-responder-filters";
+
+  const severitySelect = document.createElement("select");
+  severitySelect.className = "pd-filter-select";
+  severitySelect.innerHTML = '<option value="">All severities</option>';
+  const severities = Array.from(
+    new Set(
+      incidents
+        .map((incident) => (incident.severity || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  severities.forEach((severity) => {
+    const option = document.createElement("option");
+    option.value = severity;
+    option.textContent = severity.toUpperCase();
+    if (filters.severity === severity) {
+      option.selected = true;
+    }
+    severitySelect.appendChild(option);
+  });
+  severitySelect.addEventListener("change", () => {
+    filters.severity = severitySelect.value;
+    renderIncidents();
+  });
+
+  const statusSelect = document.createElement("select");
+  statusSelect.className = "pd-filter-select";
+  statusSelect.innerHTML = '<option value="">All statuses</option>';
+  const statuses = Array.from(
+    new Set(
+      incidents
+        .map((incident) => (incident.status || "").toLowerCase())
+        .filter((value) => value)
+    )
+  ).sort();
+  statuses.forEach((status) => {
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = status.toUpperCase();
+    if (filters.status === status) {
+      option.selected = true;
+    }
+    statusSelect.appendChild(option);
+  });
+  statusSelect.addEventListener("change", () => {
+    filters.status = statusSelect.value;
+    renderIncidents();
+  });
+
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.placeholder = "Search title or service";
+  searchInput.value = filters.query || "";
+  searchInput.className = "pd-filter-search";
+  searchInput.addEventListener("input", (event) => {
+    filters.query = event.target.value;
+    renderIncidents();
+  });
+
+  controls.appendChild(severitySelect);
+  controls.appendChild(statusSelect);
+  controls.appendChild(searchInput);
+  card.appendChild(controls);
+
+  const meta = document.createElement("div");
+  meta.className = "pd-responders-meta";
+  card.appendChild(meta);
+
+  const list = document.createElement("div");
+  list.className = "pd-incidents-list";
+  card.appendChild(list);
+
+  const totalLabel = hasMoreThanCached
+    ? `${cachedCount.toLocaleString()} cached of ${totalCount.toLocaleString()} total`
+    : `${totalCount.toLocaleString()} cached incidents`;
+  const listLimit = 200;
+
+  function renderIncidents() {
+    list.innerHTML = "";
+    const filtered = applyResponderIncidentFilters(incidents, filters);
+    if (!filtered.length) {
+      list.innerHTML = '<div class="pd-breakdown-empty">No incidents match the selected filters.</div>';
+      meta.textContent = `Showing 0 incidents (${totalLabel})`;
+      return;
+    }
+    const limited = filtered
+      .slice()
+      .sort((a, b) => {
+        const left = a.created_at || a.updated_at || "";
+        const right = b.created_at || b.updated_at || "";
+        return right.localeCompare(left);
+      })
+      .slice(0, listLimit);
+    limited.forEach((incident) => {
+      list.appendChild(createPagerDutyIncidentRow(incident, true));
+    });
+    const limitNote = filtered.length > listLimit ? " · Limited to 200 most recent matches" : "";
+    meta.textContent = `Showing ${limited.length} of ${filtered.length} incidents (${totalLabel})${limitNote}`;
+  }
+
+  renderIncidents();
+  main.appendChild(card);
 }
 
 function renderAlertsOverview(overview) {
@@ -2187,7 +2384,16 @@ function renderPagerDutyResponders(container, overview) {
 function createPagerDutyRespondersHeader() {
   const header = document.createElement("div");
   header.className = "pd-responder-row pd-responder-header";
-  const labels = ["#", "Responder", "Resolved", "Ack'd", "Assignments", "Avg MTTR", "Links"];
+  const labels = [
+    "#",
+    "Responder",
+    "Resolved",
+    "Ack'd",
+    "Assignments",
+    "Avg MTTR",
+    "Details",
+    "PagerDuty"
+  ];
   labels.forEach((label) => {
     const cell = document.createElement("div");
     cell.className = "pd-responder-cell";
@@ -2234,11 +2440,8 @@ function createPagerDutyResponderRow(entry, index) {
   if (entry.pagerduty_name && entry.pagerduty_name !== displayName) {
     detailParts.push(`PD: ${entry.pagerduty_name}`);
   }
-  const email = entry.pagerduty_email || (entry.github_user && entry.github_user.email);
-  if (email) {
-    detailParts.push(email);
-  }
-  details.textContent = detailParts.join(" • ") || "No email on record";
+  const fallbackText = entry.github_user ? "Linked to GitHub profile" : "PagerDuty only";
+  details.textContent = detailParts.length ? detailParts.join(" • ") : fallbackText;
   info.appendChild(details);
 
   row.appendChild(info);
@@ -2252,19 +2455,29 @@ function createPagerDutyResponderRow(entry, index) {
   avgCell.textContent = formatDurationMinutes(entry.avg_resolution_minutes);
   row.appendChild(avgCell);
 
-  const linksCell = document.createElement("div");
-  linksCell.className = "pd-responder-links";
+  const detailsCell = document.createElement("div");
+  detailsCell.className = "pd-responder-link-cell";
+  const detailsButton = document.createElement("button");
+  detailsButton.type = "button";
+  detailsButton.className = "btn-link pd-responder-detail-link";
+  detailsButton.textContent = "Details";
+  detailsButton.addEventListener("click", () => selectPagerDutyResponder(entry));
+  detailsCell.appendChild(detailsButton);
+  row.appendChild(detailsCell);
+
+  const pagerDutyCell = document.createElement("div");
+  pagerDutyCell.className = "pd-responder-link-cell";
   if (entry.pagerduty_html_url) {
     const link = document.createElement("a");
     link.href = entry.pagerduty_html_url;
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = "PagerDuty";
-    linksCell.appendChild(link);
+    pagerDutyCell.appendChild(link);
   } else {
-    linksCell.textContent = "—";
+    pagerDutyCell.textContent = "—";
   }
-  row.appendChild(linksCell);
+  row.appendChild(pagerDutyCell);
 
   return row;
 }
@@ -2286,19 +2499,36 @@ function renderPagerDutyResponderList() {
   const overview = state.alerts.overview;
   const responderData = overview?.responders;
   const entries = Array.isArray(responderData?.entries) ? responderData.entries : [];
+  const currentView = state.alerts.currentView || (state.alerts.selectedResponder ? "responder" : "overview");
 
-  const overviewItem = document.createElement("div");
-  overviewItem.className = "sidebar-item";
-  if (!state.alerts.selectedResponder) {
-    overviewItem.classList.add("active");
-  }
-  overviewItem.textContent = "All responder overview";
-  overviewItem.addEventListener("click", () => {
-    if (state.alerts.selectedResponder) {
-      showAlertsOverviewDashboard(false);
+  const navItems = [
+    {
+      view: "all-incidents",
+      label: "All incidents",
+      handler: () => showAllPagerDutyIncidentsView(false)
+    },
+    {
+      view: "overview",
+      label: "All responder overview",
+      handler: () => showAlertsOverviewDashboard(false)
     }
+  ];
+
+  navItems.forEach((nav) => {
+    const item = document.createElement("div");
+    item.className = "sidebar-item";
+    if (currentView === nav.view) {
+      item.classList.add("active");
+    }
+    item.textContent = nav.label;
+    item.addEventListener("click", () => {
+      if (state.alerts.currentView === nav.view) {
+        return;
+      }
+      nav.handler();
+    });
+    container.appendChild(item);
   });
-  container.appendChild(overviewItem);
 
   if (!overview) {
     const note = document.createElement("div");
@@ -2363,6 +2593,7 @@ function selectPagerDutyResponder(entry) {
     showAlertsOverviewDashboard(false);
     return;
   }
+  state.alerts.currentView = "responder";
   state.alerts.selectedResponder = entry;
   renderPagerDutyResponderList();
   if (state.mode !== "alerts") {
@@ -2428,9 +2659,27 @@ function buildPagerDutyResponderDashboard(main, responder, incidentsData) {
   if (timelineCard) {
     container.appendChild(timelineCard);
   }
-  const severityCard = buildResponderSeverityCard(responder, incidents);
-  if (severityCard) {
-    container.appendChild(severityCard);
+  const acknowledgementSeverityCard = buildResponderSeverityCard(responder, incidents, {
+    title: "Acknowledgement severity timeline",
+    tooltip: "Stacked weekly counts of incidents this responder acknowledged, grouped by PagerDuty severity.",
+    noteText: "Stacked bars show weekly acknowledgement counts grouped by PagerDuty severity.",
+    timeline: computeResponderRoleSeverityTimeline(incidents, "acknowledged"),
+    chartSuffix: "ack-severity",
+    emptyMessageWhenIncidents: "We couldn't find acknowledgement severity history for this responder yet.",
+  });
+  if (acknowledgementSeverityCard) {
+    container.appendChild(acknowledgementSeverityCard);
+  }
+  const resolutionSeverityCard = buildResponderSeverityCard(responder, incidents, {
+    title: "Resolution severity timeline",
+    tooltip: "Stacked weekly counts of incidents this responder resolved, grouped by PagerDuty severity.",
+    noteText: "Stacked bars show weekly resolution counts grouped by PagerDuty severity.",
+    timeline: computeResponderRoleSeverityTimeline(incidents, "resolved"),
+    chartSuffix: "resolved-severity",
+    emptyMessageWhenIncidents: "We couldn't find resolution severity history for this responder yet.",
+  });
+  if (resolutionSeverityCard) {
+    container.appendChild(resolutionSeverityCard);
   }
   const openIncidentsCard = buildResponderOpenIncidentsCard(responder, incidents);
   if (openIncidentsCard) {
@@ -2677,35 +2926,39 @@ function buildResponderTimelineCard(responder, incidents = []) {
   return card;
 }
 
-function buildResponderSeverityCard(responder, incidents = []) {
+function buildResponderSeverityCard(responder, incidents = [], options = {}) {
+  const {
+    title = "Severity timeline",
+    tooltip = "Stacked weekly counts of incidents touched by this responder, grouped by PagerDuty severity.",
+    noteText = "Stacked bars show weekly incident counts grouped by PagerDuty severity.",
+    timeline = computeResponderSeverityTimeline(incidents),
+    chartSuffix = "severity",
+    emptyMessageWhenIncidents = "We couldn't find severity history for this responder yet.",
+    emptyMessageWhenNoIncidents = "No PagerDuty incidents recorded for this responder in the cached window."
+  } = options || {};
+
   const card = document.createElement("div");
   card.className = "card pd-responder-severity-card";
-  card.innerHTML = createTitleWithTooltip(
-    "Severity timeline",
-    "Stacked weekly counts of incidents touched by this responder, grouped by PagerDuty severity.",
-    "h3"
-  );
-  const timeline = computeResponderSeverityTimeline(incidents);
-  if (!timeline) {
+  card.innerHTML = createTitleWithTooltip(title, tooltip, "h3");
+  const timelineData = timeline;
+  if (!timelineData) {
     const empty = document.createElement("div");
     empty.className = "pd-responder-empty";
-    empty.textContent = incidents.length
-      ? "We couldn't find severity history for this responder yet."
-      : "No PagerDuty incidents recorded for this responder in the cached window.";
+    empty.textContent = incidents.length ? emptyMessageWhenIncidents : emptyMessageWhenNoIncidents;
     card.appendChild(empty);
     return card;
   }
 
   const note = document.createElement("p");
   note.className = "pd-responder-chart-note";
-  note.textContent = "Stacked bars show weekly incident counts grouped by PagerDuty severity.";
+  note.textContent = noteText;
   card.appendChild(note);
 
   const chartWrapper = document.createElement("div");
   chartWrapper.className = "pd-responder-chart";
   const canvas = document.createElement("canvas");
   const responderId = responder?.pagerduty_user_id || Date.now();
-  const chartId = `pd-responder-severity-${responderId}`;
+  const chartId = `pd-responder-${chartSuffix}-${responderId}`;
   canvas.id = chartId;
   chartWrapper.appendChild(canvas);
   card.appendChild(chartWrapper);
@@ -2715,21 +2968,21 @@ function buildResponderSeverityCard(responder, incidents = []) {
     delete state.charts[chartId];
   }
 
-  const datasets = timeline.severityOrder.map((severity) => ({
+  const datasets = timelineData.severityOrder.map((severity) => ({
     label: severity.toUpperCase(),
-    data: timeline.series[severity],
+    data: timelineData.series[severity],
     backgroundColor: PAGERDUTY_SEVERITY_COLORS[severity] || PAGERDUTY_SEVERITY_COLORS.unknown,
     borderColor: PAGERDUTY_SEVERITY_BORDER_COLORS[severity] || PAGERDUTY_SEVERITY_BORDER_COLORS.unknown,
     borderWidth: 1,
-    stack: "severity"
+    stack: chartSuffix
   }));
 
   const ctx = canvas.getContext("2d");
-  const tooltipWeeks = timeline.rawKeys;
+  const tooltipWeeks = timelineData.rawKeys;
   state.charts[chartId] = new Chart(ctx, {
     type: "bar",
     data: {
-      labels: timeline.labels,
+      labels: timelineData.labels,
       datasets
     },
     options: {
@@ -2916,11 +3169,59 @@ function computeResponderSeverityTimeline(incidents = []) {
     const bucket = severityBuckets.get(severity);
     bucket.set(weekKey, (bucket.get(weekKey) || 0) + 1);
   });
-  if (!severityBuckets.size) {
+  return buildSeverityTimelineFromBuckets(severityBuckets);
+}
+
+function computeResponderRoleSeverityTimeline(incidents = [], role = "") {
+  if (!Array.isArray(incidents) || incidents.length === 0) {
+    return null;
+  }
+  const normalizedRole = String(role || "").toLowerCase();
+  if (!normalizedRole) {
+    return null;
+  }
+  const severityBuckets = new Map();
+  incidents.forEach((incident) => {
+    const matchedEvents = Array.isArray(incident.matched_events) ? incident.matched_events : [];
+    if (!matchedEvents.length) {
+      return;
+    }
+    const severity = normalizePagerDutySeverity(incident?.severity);
+    matchedEvents.forEach((event) => {
+      if ((event?.role || "").toLowerCase() !== normalizedRole) {
+        return;
+      }
+      const eventDate =
+        parsePagerDutyDate(event.at) ||
+        parsePagerDutyDate(incident.last_status_change_at) ||
+        parsePagerDutyDate(incident.updated_at) ||
+        parsePagerDutyDate(incident.created_at);
+      if (!eventDate) {
+        return;
+      }
+      const weekKey = getWeekStartKey(eventDate);
+      if (!weekKey) {
+        return;
+      }
+      if (!severityBuckets.has(severity)) {
+        severityBuckets.set(severity, new Map());
+      }
+      const bucket = severityBuckets.get(severity);
+      bucket.set(weekKey, (bucket.get(weekKey) || 0) + 1);
+    });
+  });
+  return buildSeverityTimelineFromBuckets(severityBuckets);
+}
+
+function buildSeverityTimelineFromBuckets(severityBuckets) {
+  if (!(severityBuckets instanceof Map) || severityBuckets.size === 0) {
     return null;
   }
   const weekKeys = new Set();
   severityBuckets.forEach((bucket) => {
+    if (!(bucket instanceof Map)) {
+      return;
+    }
     bucket.forEach((_, key) => weekKeys.add(key));
   });
   if (!weekKeys.size) {
@@ -2933,7 +3234,7 @@ function computeResponderSeverityTimeline(incidents = []) {
   ];
   const activeOrder = order.filter((severity) => {
     const bucket = severityBuckets.get(severity);
-    if (!bucket) {
+    if (!(bucket instanceof Map)) {
       return false;
     }
     return Array.from(bucket.values()).some((count) => count > 0);
@@ -3055,6 +3356,17 @@ function ensureResponderIncidentFilters() {
     };
   }
   return state.alerts.responderIncidentFilters;
+}
+
+function ensureAllIncidentsFilters() {
+  if (!state.alerts.allIncidentsFilters) {
+    state.alerts.allIncidentsFilters = {
+      severity: "",
+      status: "",
+      query: ""
+    };
+  }
+  return state.alerts.allIncidentsFilters;
 }
 
 function applyResponderIncidentFilters(incidents = [], filters = ensureResponderIncidentFilters()) {
@@ -3231,6 +3543,21 @@ async function fetchPagerDutyIncidentsForResponder(responderId, forceReload = fa
     throw new Error(data.error || `HTTP ${response.status}`);
   }
   state.alerts.responderIncidents[responderId] = data;
+  return data;
+}
+
+async function fetchAllPagerDutyIncidents(forceReload = false) {
+  if (!forceReload && state.alerts.allIncidentsData) {
+    return state.alerts.allIncidentsData;
+  }
+  const response = await fetch("/api/pagerduty/incidents?limit=1000");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  state.alerts.allIncidentsData = data;
   return data;
 }
 

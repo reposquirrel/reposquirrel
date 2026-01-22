@@ -4462,7 +4462,7 @@ body {
 
 .pd-responder-row {
   display: grid;
-  grid-template-columns: 60px minmax(220px, 2fr) 110px 110px 130px 130px 120px;
+  grid-template-columns: 60px minmax(220px, 2fr) 110px 110px 130px 130px 110px 110px;
   gap: 12px;
   align-items: center;
   padding: 12px 16px;
@@ -4543,18 +4543,22 @@ body {
   color: #e5e7eb;
 }
 
-.pd-responder-links {
+.pd-responder-link-cell {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  justify-content: flex-start;
   font-size: 13px;
 }
 
-.pd-responder-links a {
+.pd-responder-link-cell .btn-link {
+  padding: 0;
+}
+
+.pd-responder-link-cell a {
   color: #38bdf8;
 }
 
-.pd-responder-links a:hover {
+.pd-responder-link-cell a:hover {
   text-decoration: underline;
 }
 
