@@ -9,10 +9,11 @@
   <script>
     window.APP_CONFIG = window.APP_CONFIG || {};
     window.APP_CONFIG.readOnly = {{ read_only | tojson }};
+    window.APP_CONFIG.kioskMode = {{ kiosk_mode | default(false) | tojson }};
   </script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body class="{{ 'kiosk-mode' if kiosk_mode else '' }}">
   <div id="app">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -137,6 +138,7 @@
           <button class="settings-tab" data-tab="subsystems">Subsystems</button>
           <button class="settings-tab" data-tab="team-responsibilities">Team Responsibilities</button>
           <button class="settings-tab" data-tab="capacity">Capacity Config</button>
+          <button class="settings-tab" data-tab="kiosk">Kiosk Mode</button>
         </div>
         
         <div class="settings-content">
@@ -510,6 +512,33 @@
 
           </div>
 
+          <div id="kiosk-tab" class="settings-tab-content">
+            <h3>Kiosk Mode</h3>
+            <p>Pick the visualizations to loop on large hallway displays. Configure them here and open <code>/kiosk</code> or run <code>kioskmode.py</code> on a Raspberry&nbsp;Pi for full-screen playback.</p>
+            <div class="kiosk-settings-grid">
+              <div class="form-group">
+                <label for="kiosk-rotation-seconds">Slide duration (seconds)</label>
+                <input type="number" id="kiosk-rotation-seconds" min="5" max="600" value="30">
+              </div>
+              <div class="form-group">
+                <label for="kiosk-refresh-minutes">Auto-refresh cadence (minutes)</label>
+                <input type="number" id="kiosk-refresh-minutes" min="1" max="720" value="15">
+              </div>
+            </div>
+            <div class="kiosk-items-header">
+              <h4>Selected visualizations</h4>
+              <button id="add-kiosk-item" class="btn btn-secondary">+ Add visualization</button>
+            </div>
+            <div id="kiosk-settings-alert" class="kiosk-alert" role="alert" aria-live="polite"></div>
+            <div id="kiosk-items-container" class="kiosk-items-container">
+              <div class="empty-state">No kiosk slides configured yet.</div>
+            </div>
+            <div class="settings-actions">
+              <button id="save-kiosk-settings" class="btn btn-primary">Save Changes</button>
+              <button id="reset-kiosk-settings" class="btn btn-secondary">Reset</button>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -613,6 +642,12 @@
           <button id="first-update-confirm" class="btn btn-primary">Yes, Run Update</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="kiosk-stage" class="kiosk-stage" aria-live="polite">
+    <div class="kiosk-message" id="kiosk-placeholder">
+      <p>Loading kiosk mode…</p>
     </div>
   </div>
 

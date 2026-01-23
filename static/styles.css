@@ -4753,3 +4753,180 @@ body {
     grid-template-columns: 50px minmax(200px, 2fr) 90px 90px 110px 110px 100px;
   }
 }
+/* Kiosk settings UI */
+.kiosk-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.kiosk-items-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.kiosk-items-header h4 {
+  margin: 0;
+  color: #f9fafb;
+}
+
+.kiosk-alert {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #e5e7eb;
+  display: none;
+}
+
+.kiosk-alert.show {
+  display: block;
+}
+
+.kiosk-items-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.kiosk-item-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kiosk-item-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.kiosk-item-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kiosk-item-actions .btn-link {
+  background: none;
+  border: none;
+  color: #f87171;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.kiosk-period-select {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+body.kiosk-mode {
+  background: #020617;
+  color: #f1f5f9;
+  overflow: hidden;
+}
+
+body.kiosk-mode #app {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.kiosk-stage {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(circle at top, rgba(30, 64, 175, 0.2), #020617 65%);
+  padding: 40px;
+  box-sizing: border-box;
+}
+
+body.kiosk-mode #kiosk-stage {
+  display: flex;
+  flex-direction: column;
+}
+
+.kiosk-slide-container {
+  flex: 1;
+  position: relative;
+}
+
+.kiosk-slide {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: scale(0.98);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.kiosk-slide.active {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.kiosk-slide .card,
+.kiosk-slide .dashboard-section,
+.kiosk-slide .kpi-grid {
+  flex: 1;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.kiosk-overlay {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  color: #e0f2fe;
+}
+
+.kiosk-overlay h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.kiosk-overlay p {
+  margin: 0;
+  color: #bae6fd;
+}
+
+.kiosk-time {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 18px;
+}
+
+.kiosk-message {
+  margin: auto;
+  text-align: center;
+  color: #cbd5f5;
+}
+
+.kiosk-message p {
+  font-size: 24px;
+}
+
+.kiosk-controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 10px;
+}
+
+.kiosk-controls button {
+  background: rgba(15, 118, 110, 0.2);
+  border: 1px solid rgba(45, 212, 191, 0.5);
+  color: #ccfbf1;
+}

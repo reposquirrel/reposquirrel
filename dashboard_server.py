@@ -77,6 +77,7 @@ update_process_active = False
 # Update log file
 UPDATE_LOG_FILE = os.path.join(BASE_DIR, "update_logs.txt")
 INTEGRATIONS_FILE = os.path.join(BASE_DIR, "configuration", "integrations.json")
+KIOSK_CONFIG_FILE = os.path.join(BASE_DIR, "configuration", "kiosk_config.json")
 
 def log_update_message(message_dict):
     """Log update messages to both queue and persistent file."""
@@ -108,6 +109,13 @@ DEFAULT_UPDATE_SETTINGS = {
     "last_background_completed_at": None,
     "last_manual_completed_at": None,
 }
+
+DEFAULT_KIOSK_CONFIG = {
+    "rotation_seconds": 30,
+    "refresh_minutes": 15,
+    "items": []
+}
+
 update_settings_lock = threading.Lock()
 background_scheduler_event = threading.Event()
 background_scheduler_stop_event = threading.Event()
@@ -249,6 +257,61 @@ def save_update_settings(settings: Dict[str, Any]) -> None:
     with update_settings_lock:
         with open(UPDATE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=2)
+
+
+def ensure_kiosk_config_file() -> None:
+    os.makedirs(os.path.dirname(KIOSK_CONFIG_FILE), exist_ok=True)
+    if not os.path.exists(KIOSK_CONFIG_FILE):
+        with open(KIOSK_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_KIOSK_CONFIG, f, indent=2)
+
+
+def load_kiosk_config() -> Dict[str, Any]:
+    ensure_kiosk_config_file()
+    try:
+        with open(KIOSK_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        data = {}
+    merged = copy.deepcopy(DEFAULT_KIOSK_CONFIG)
+    merged.update(data or {})
+    merged['rotation_seconds'] = max(5, int(merged.get('rotation_seconds', 30) or 30))
+    merged['refresh_minutes'] = max(1, int(merged.get('refresh_minutes', 15) or 15))
+    merged['items'] = [item for item in merged.get('items', []) if isinstance(item, dict)]
+    return merged
+
+
+def save_kiosk_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_kiosk_config_file()
+    sanitized = load_kiosk_config()
+    sanitized.update({
+        'rotation_seconds': max(5, int(config.get('rotation_seconds', sanitized['rotation_seconds']))),
+        'refresh_minutes': max(1, int(config.get('refresh_minutes', sanitized['refresh_minutes'])))
+    })
+    raw_items = config.get('items', [])
+    sanitized_items: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        entry = {
+            'id': item.get('id') or f"item-{len(sanitized_items)+1}",
+            'visualization_id': item.get('visualization_id'),
+            'scope': item.get('scope'),
+            'entity_id': item.get('entity_id'),
+            'entity_label': item.get('entity_label'),
+            'period_mode': item.get('period_mode') or 'latest-year',
+            'period': item.get('period'),
+            'custom_title': item.get('custom_title'),
+            'options': item.get('options') or {},
+            'notes': item.get('notes') or ''
+        }
+        if not entry['visualization_id']:
+            continue
+        sanitized_items.append(entry)
+    sanitized['items'] = sanitized_items
+    with open(KIOSK_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(sanitized, f, indent=2)
+    return sanitized
 
 
 def parse_timestamp(value: Optional[str]) -> Optional[datetime]:
@@ -1879,7 +1942,20 @@ def test_simple():
 
 @app.route("/")
 def index():
-    return render_template("index.html", read_only=app.config.get("READ_ONLY_MODE", False))
+    return render_template(
+        "index.html",
+        read_only=app.config.get("READ_ONLY_MODE", False),
+        kiosk_mode=False,
+    )
+
+
+@app.route("/kiosk")
+def kiosk_view():
+    return render_template(
+        "index.html",
+        read_only=True,
+        kiosk_mode=True,
+    )
 
 
 @app.route("/api/stats/check")
@@ -3106,6 +3182,27 @@ def api_pagerduty_incidents():
         reverse=True,
     )
     return jsonify({"incidents": sorted_incidents[:limit], "total": len(sorted_incidents)})
+
+
+@app.route("/api/settings/kiosk", methods=["GET", "POST"])
+def api_settings_kiosk():
+    if request.method == "GET":
+        return jsonify(load_kiosk_config())
+
+    if app.config.get("READ_ONLY_MODE"):
+        return jsonify({"error": "Settings are disabled in read-only mode."}), 403
+
+    try:
+        payload = request.get_json(force=True) or {}
+    except Exception:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    try:
+        config = save_kiosk_config(payload)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify({"status": "ok", "config": config})
 
 
 @app.route("/api/settings/ignore-users", methods=["GET", "POST"])

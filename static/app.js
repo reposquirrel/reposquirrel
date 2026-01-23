@@ -40,6 +40,241 @@ let state = {
   }
 };
 
+
+const VISUALIZATION_DEFINITIONS = [
+  {
+    id: "user-kpis",
+    scope: "user",
+    label: "User · KPI Summary",
+    description: "Total commits plus lines added/deleted for a single developer.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "manual" }
+  },
+  {
+    id: "user-contribution-heatmap",
+    scope: "user",
+    label: "User · Contribution Heatmap",
+    description: "Calendar view of daily commits for the chosen user.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Contribution activity" }
+  },
+  {
+    id: "user-daily-activity",
+    scope: "user",
+    label: "User · Daily Activity",
+    description: "Lines added and deleted per day for the most recent month of work.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Daily Activity" }
+  },
+  {
+    id: "user-language-breakdown",
+    scope: "user",
+    label: "User · Languages",
+    description: "Per-language breakdown of changed lines for the selected user.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Lines changed per language" }
+  },
+  {
+    id: "user-weekday-commits",
+    scope: "user",
+    label: "User · Commits by Weekday",
+    description: "Histogram showing which days of the week the user commits code.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Commits by weekday" }
+  },
+  {
+    id: "user-hourly-commits",
+    scope: "user",
+    label: "User · Commits by Hour",
+    description: "Hourly commit distribution for the selected developer.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Commits by hour" }
+  },
+  {
+    id: "user-monthly-lines",
+    scope: "user",
+    label: "User · Monthly Lines Trend",
+    description: "Lines added and deleted per month for the chosen year.",
+    supportedPeriods: ["yearly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Monthly Lines" }
+  },
+  {
+    id: "team-kpis",
+    scope: "team",
+    label: "Team · KPI Summary",
+    description: "Team commits and line deltas over the selected period.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "manual" }
+  },
+  {
+    id: "team-contribution-heatmap",
+    scope: "team",
+    label: "Team · Contribution Heatmap",
+    description: "Calendar heatmap aggregating all team member commits.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Contribution Activity" }
+  },
+  {
+    id: "team-daily-activity",
+    scope: "team",
+    label: "Team · Daily Activity",
+    description: "Lines added/deleted each day aggregated across the team.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Daily Activity" }
+  },
+  {
+    id: "subsystem-kpis",
+    scope: "subsystem",
+    label: "Subsystem · KPI Summary",
+    description: "Key commit and line statistics for a subsystem or repository.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "manual" }
+  },
+  {
+    id: "subsystem-heatmap",
+    scope: "subsystem",
+    label: "Subsystem · Contribution Heatmap",
+    description: "Daily subsystem activity derived from contributing developers.",
+    supportedPeriods: ["yearly", "monthly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Contribution Activity" }
+  },
+  {
+    id: "subsystem-line-timeline",
+    scope: "subsystem",
+    label: "Subsystem · Line Change Timeline",
+    description: "Bar/line visualization of monthly additions, deletions, and net lines.",
+    supportedPeriods: ["yearly"],
+    requiresEntity: true,
+    match: { mode: "includes", text: "Line Change Timeline" }
+  }
+];
+
+const VISUALIZATION_REGISTRY = {};
+VISUALIZATION_DEFINITIONS.forEach((definition) => {
+  VISUALIZATION_REGISTRY[definition.id] = definition;
+});
+
+function normalizeHeadingText(text) {
+  if (!text) return "";
+  return text.replace(/^[^A-Za-z0-9]+/, "").trim().toLowerCase();
+}
+
+function buildPeriodKey(period) {
+  if (!period) return "latest";
+  if (period.is_yearly) {
+    return `year:${period.label || period.from || ''}`;
+  }
+  return `range:${period.from || ''}:${period.to || ''}`;
+}
+
+function tagVisualization(element, vizId, context = {}) {
+  if (!element || !vizId) {
+    return element;
+  }
+  element.dataset.visualizationId = vizId;
+  const def = VISUALIZATION_REGISTRY[vizId];
+  const scope = context.scope || def?.scope;
+  if (scope) {
+    element.dataset.visualizationScope = scope;
+  }
+  if (context.entityId) {
+    element.dataset.visualizationEntity = context.entityId;
+  }
+  if (context.entityLabel) {
+    element.dataset.visualizationEntityLabel = context.entityLabel;
+  }
+  if (context.periodKey) {
+    element.dataset.visualizationPeriod = context.periodKey;
+  } else if (context.period) {
+    element.dataset.visualizationPeriod = buildPeriodKey(context.period);
+  }
+  if (context.periodLabel) {
+    element.dataset.visualizationPeriodLabel = context.periodLabel;
+  }
+  return element;
+}
+
+function autoTagVisualizations(scope, context = {}) {
+  const container = $("main-content");
+  if (!container) return;
+  const defs = VISUALIZATION_DEFINITIONS.filter((def) => def.scope === scope && def.match?.mode !== "manual");
+  defs.forEach((def) => {
+    if (container.querySelector(`[data-visualization-id="${def.id}"]`)) {
+      return;
+    }
+    const el = findVisualizationElement(def, container);
+    if (el) {
+      tagVisualization(el, def.id, context);
+    }
+  });
+}
+
+function findVisualizationElement(definition, container) {
+  if (!definition || !container) return null;
+  if (definition.match?.selector) {
+    const el = container.querySelector(definition.match.selector);
+    if (el && !el.dataset.visualizationId) {
+      return el;
+    }
+    return null;
+  }
+  const candidates = container.querySelectorAll('.card, .dashboard-section, .kpi-grid');
+  for (const candidate of candidates) {
+    if (candidate.dataset.visualizationId) {
+      continue;
+    }
+    const heading = candidate.querySelector('h1, h2, h3, h4');
+    const headingText = normalizeHeadingText(heading?.textContent || "");
+    if (!headingText) continue;
+    const matchText = (definition.match?.text || '').toLowerCase();
+    if (!matchText) continue;
+    if (definition.match.mode === 'includes' && headingText.includes(matchText.toLowerCase())) {
+      return candidate;
+    }
+    if (definition.match.mode === 'equals' && headingText === matchText.toLowerCase()) {
+      return candidate;
+    }
+    if (definition.match.mode === 'startsWith' && headingText.startsWith(matchText.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+
+const kioskState = {
+  initialized: false,
+  slides: [],
+  currentIndex: -1,
+  rotationSeconds: 30,
+  refreshMinutes: 15,
+  rotationTimer: null,
+  refreshTimer: null,
+  clockTimer: null,
+  stage: null,
+  placeholder: null,
+  slideContainer: null,
+  overlayTitle: null,
+  overlayMeta: null,
+  overlayClock: null
+};
+
+function isKioskMode() {
+  return !!(APP_CONFIG && APP_CONFIG.kioskMode);
+}
+
 const PAGERDUTY_SEVERITY_ORDER = ["p-down", "critical", "high", "medium", "low", "info", "unknown"];
 const PAGERDUTY_SEVERITY_COLORS = {
   "p-down": "rgba(127, 29, 29, 0.95)",
@@ -4675,6 +4910,15 @@ async function renderUserDashboard(user, month, summary) {
 
   const main = $("main-content");
 
+  const vizContext = {
+    scope: "user",
+    entityId: user.slug,
+    entityLabel: summary.author_name || user.slug,
+    period: month,
+    periodKey: buildPeriodKey(month),
+    periodLabel
+  };
+
   let subsystemTimelineAnchor = null;
   if (month.is_yearly) {
     subsystemTimelineAnchor = document.createElement("div");
@@ -4703,6 +4947,7 @@ async function renderUserDashboard(user, month, summary) {
   });
 
   main.appendChild(kpiContainer);
+  tagVisualization(kpiContainer, "user-kpis", vizContext);
 
   // Show monthly view info card
   if (!month.is_yearly) {
@@ -4985,6 +5230,7 @@ async function renderUserDashboard(user, month, summary) {
     "h2"
   ) + '<div style="height: 300px;"><canvas id="chart-monthly"></canvas></div>';
     main.appendChild(monthlyChartCard);
+    tagVisualization(monthlyChartCard, "user-monthly-lines", vizContext);
     
     // Create the monthly chart asynchronously
     const year = parseInt(month.label);
@@ -5206,6 +5452,8 @@ async function renderUserDashboard(user, month, summary) {
   } catch (error) {
     console.error("Error creating hour chart:", error);
   }
+
+  autoTagVisualizations("user", vizContext);
 }
 
 async function renderSubsystemDashboard(subsystem, period, summary) {
@@ -5231,6 +5479,15 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
     );
 
     const main = $("main-content");
+
+    const vizContext = {
+      scope: "subsystem",
+      entityId: subsystem.name,
+      entityLabel: summary.service || subsystem.name,
+      period,
+      periodKey: buildPeriodKey(period),
+      periodLabel
+    };
 
     // Show dead subsystem warning if applicable
     if (summary.dead_status && summary.dead_status.is_dead) {
@@ -5280,6 +5537,7 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
     });
 
     main.appendChild(kpiContainer);
+    tagVisualization(kpiContainer, "subsystem-kpis", vizContext);
 
     // Top developer
     const topDev = summary.top_developer;
@@ -5399,6 +5657,8 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
       main.appendChild(devCard);
     }
 
+    autoTagVisualizations("subsystem", vizContext);
+
     state.rendering = false;
     console.log("Subsystem dashboard render completed successfully");
 
@@ -5426,6 +5686,15 @@ async function renderTeamDashboard(team, period, summary) {
   );
 
   const main = $("main-content");
+
+  const vizContext = {
+    scope: "team",
+    entityId: team.id || team.name,
+    entityLabel: team.name || team.id,
+    period,
+    periodKey: buildPeriodKey(period),
+    periodLabel
+  };
 
   // Team description
   if (summary.description) {
@@ -5741,6 +6010,7 @@ async function renderTeamDashboard(team, period, summary) {
   });
 
   main.appendChild(kpiContainer);
+  tagVisualization(kpiContainer, "team-kpis", vizContext);
 
   if (period.is_yearly) {
     const parsedLabelYear = parseInt(period.label, 10);
@@ -6185,6 +6455,8 @@ async function renderTeamDashboard(team, period, summary) {
   
   // Create the daily chart asynchronously
   setTimeout(() => createDailyChart("chart-team-daily-activity", team.id, chartYear, chartMonth, true), 100);
+
+  autoTagVisualizations("team", vizContext);
 }
 
 async function addSignificantOwnershipSection(container, subsystemName) {
@@ -9835,6 +10107,10 @@ document.addEventListener("DOMContentLoaded", () => {
   console.log("DOM loaded, starting initialization");
   
   try {
+    if (isKioskMode()) {
+      initializeKioskMode();
+      return;
+    }
     // Set up mode buttons
     $("mode-users").addEventListener("click", () => setMode("users"));
     $("mode-teams").addEventListener("click", () => setMode("teams"));
@@ -10097,6 +10373,8 @@ function initializeSettings() {
   window.subsystemsData = {};
   window.teamResponsibilitiesData = {};
   window.capacityConfig = { default_lines_per_dev: 20000, languages: {}, yellow_threshold: 90, red_threshold: 110 };
+
+  initializeKioskSettingsHandlers();
 }
 
 function openSettings(defaultTab = "ignore-users") {
@@ -10240,7 +10518,742 @@ function switchSettingsTab(tabName) {
     loadCapacityConfig();
   } else if (tabName === "updates") {
     loadUpdateSettings();
+  } else if (tabName === "kiosk") {
+    loadKioskSettingsUI();
   }
+}
+
+
+// --------------------------
+// Kiosk mode runtime & settings
+// --------------------------
+
+async function initializeKioskMode() {
+  try {
+    const stage = $("kiosk-stage");
+    if (!stage) {
+      console.error("kiosk-stage element not found");
+      return;
+    }
+    kioskState.stage = stage;
+    kioskState.placeholder = $("kiosk-placeholder");
+    setupKioskStage();
+    startKioskClock();
+    kioskState.initialized = true;
+    await loadUsersAndSubsystems();
+    await refreshKioskSlides();
+    document.addEventListener("keydown", handleKioskHotkeys);
+  } catch (error) {
+    console.error("Failed to initialize kiosk mode:", error);
+    showKioskPlaceholder(error?.message || "Unable to start kiosk mode.");
+  }
+}
+
+function setupKioskStage() {
+  if (!kioskState.stage) return;
+  kioskState.stage.innerHTML = "";
+  const overlay = document.createElement("div");
+  overlay.className = "kiosk-overlay";
+  const titleBlock = document.createElement("div");
+  const titleEl = document.createElement("h1");
+  titleEl.id = "kiosk-slide-title";
+  titleEl.textContent = "Kiosk Mode";
+  const subtitleEl = document.createElement("p");
+  subtitleEl.id = "kiosk-slide-meta";
+  subtitleEl.textContent = "Preparing visualizations";
+  titleBlock.appendChild(titleEl);
+  titleBlock.appendChild(subtitleEl);
+  const clockEl = document.createElement("div");
+  clockEl.className = "kiosk-time";
+  clockEl.id = "kiosk-clock";
+  overlay.appendChild(titleBlock);
+  overlay.appendChild(clockEl);
+  const container = document.createElement("div");
+  container.className = "kiosk-slide-container";
+  kioskState.stage.appendChild(overlay);
+  kioskState.stage.appendChild(container);
+  kioskState.overlayTitle = titleEl;
+  kioskState.overlayMeta = subtitleEl;
+  kioskState.overlayClock = clockEl;
+  kioskState.slideContainer = container;
+  if (kioskState.placeholder) {
+    kioskState.placeholder.classList.add("kiosk-message");
+    kioskState.stage.appendChild(kioskState.placeholder);
+  }
+}
+
+function startKioskClock() {
+  const updateClock = () => {
+    if (!kioskState.overlayClock) return;
+    const now = new Date();
+    kioskState.overlayClock.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  updateClock();
+  if (kioskState.clockTimer) {
+    clearInterval(kioskState.clockTimer);
+  }
+  kioskState.clockTimer = setInterval(updateClock, 1000);
+}
+
+async function refreshKioskSlides() {
+  try {
+    const config = await fetchKioskConfig();
+    await buildKioskSlides(config);
+  } catch (error) {
+    console.error("Unable to load kiosk settings:", error);
+    showKioskPlaceholder(error?.message || "Unable to load kiosk configuration.");
+  }
+}
+
+async function fetchKioskConfig() {
+  const response = await fetch("/api/settings/kiosk");
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return await response.json();
+}
+
+async function buildKioskSlides(config) {
+  const items = Array.isArray(config?.items) ? config.items : [];
+  kioskState.rotationSeconds = Math.max(5, config?.rotation_seconds || 30);
+  kioskState.refreshMinutes = Math.max(1, config?.refresh_minutes || 15);
+  clearKioskTimers();
+  kioskState.slides = [];
+  kioskState.currentIndex = -1;
+  const container = ensureKioskSlideContainer();
+  container.innerHTML = "";
+  if (!items.length) {
+    showKioskPlaceholder("No kiosk slides configured yet. Open Settings → Kiosk Mode to add some.");
+    return;
+  }
+  hideKioskPlaceholder();
+  for (const item of items) {
+    try {
+      const slide = await createKioskSlide(item);
+      if (slide) {
+        kioskState.slides.push(slide);
+        container.appendChild(slide.element);
+      }
+    } catch (error) {
+      console.warn("Slide failed", error);
+      const fallback = createKioskMessageSlide(error?.message || "Unable to render slide.");
+      kioskState.slides.push(fallback);
+      container.appendChild(fallback.element);
+    }
+  }
+  if (!kioskState.slides.length) {
+    showKioskPlaceholder("Unable to render the selected visualizations.");
+    return;
+  }
+  advanceKioskSlide(1);
+  scheduleKioskRotation();
+  scheduleKioskRefresh();
+}
+
+function ensureKioskSlideContainer() {
+  if (kioskState.slideContainer) {
+    return kioskState.slideContainer;
+  }
+  if (kioskState.stage) {
+    let container = kioskState.stage.querySelector('.kiosk-slide-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'kiosk-slide-container';
+      kioskState.stage.appendChild(container);
+    }
+    kioskState.slideContainer = container;
+    return container;
+  }
+  throw new Error('Missing kiosk stage container.');
+}
+
+function createKioskMessageSlide(message) {
+  const slideEl = document.createElement("div");
+  slideEl.className = "kiosk-slide";
+  const msgEl = document.createElement("div");
+  msgEl.className = "kiosk-message";
+  msgEl.innerHTML = `<p>${message || 'Slide unavailable'}</p>`;
+  slideEl.appendChild(msgEl);
+  return { element: slideEl, definition: null, item: null };
+}
+
+async function createKioskSlide(item) {
+  const def = VISUALIZATION_REGISTRY[item.visualization_id];
+  if (!def) {
+    return createKioskMessageSlide(`Visualization "${item.visualization_id}" is not supported.`);
+  }
+  if (def.requiresEntity && !item.entity_id) {
+    return createKioskMessageSlide("No entity configured for this slide.");
+  }
+  const entity = resolveEntityForScope(def.scope, item.entity_id);
+  if (!entity) {
+    return createKioskMessageSlide(`Unable to find ${def.scope} "${item.entity_id}".`);
+  }
+  const period = resolvePeriodForEntity(def.scope, entity, item.period_mode || "latest-year");
+  if (!period) {
+    return createKioskMessageSlide(`No ${item.period_mode || 'latest'} period exists for ${item.entity_id}.`);
+  }
+  await renderSourceForKiosk(def.scope, entity, period);
+  const entityKey = getEntityKey(def.scope, entity);
+  const element = await waitForVisualizationElementBySelector(item.visualization_id, entityKey, 9000);
+  if (!element) {
+    return createKioskMessageSlide(`Could not render ${def.label} for ${entityKey}.`);
+  }
+  if (element.parentElement) {
+    element.parentElement.removeChild(element);
+  }
+  detachChartsForElement(element);
+  element.style.height = "100%";
+  const slideEl = document.createElement("div");
+  slideEl.className = "kiosk-slide";
+  const entityLabel = item.entity_label || getEntityLabel(def.scope, entity, entityKey);
+  slideEl.dataset.title = item.custom_title || def.label;
+  slideEl.dataset.subtitle = buildSlideSubtitle(entityLabel, period, item.period_mode || "latest-year");
+  slideEl.appendChild(element);
+  return { element: slideEl, definition: def, item, entity, period };
+}
+
+function getEntityKey(scope, entity) {
+  if (!entity) return "";
+  if (scope === "user") return entity.slug;
+  if (scope === "team") return entity.id || entity.name;
+  if (scope === "subsystem") return entity.name;
+  return entity.id || entity.name || entity.slug || "";
+}
+
+function getEntityLabel(scope, entity, fallback) {
+  if (!entity) return fallback;
+  if (scope === "user") return entity.display_name || entity.slug || fallback;
+  if (scope === "team") return entity.name || entity.id || fallback;
+  if (scope === "subsystem") return entity.name || fallback;
+  return fallback;
+}
+
+function buildSlideSubtitle(entityLabel, period, periodMode) {
+  const label = entityLabel || "";
+  const periodText = formatPeriodLabel(period, periodMode);
+  if (label && periodText) {
+    return `${label} • ${periodText}`;
+  }
+  return label || periodText || "";
+}
+
+function formatPeriodLabel(period, mode) {
+  if (!period) return mode === "latest-month" ? "Latest month" : "Latest year";
+  if (period.label) {
+    return period.label;
+  }
+  if (period.from && period.to) {
+    return `${period.from} → ${period.to}`;
+  }
+  return buildPeriodKey(period);
+}
+
+function resolveEntityForScope(scope, entityId) {
+  if (scope === "user") {
+    return (state.users || []).find((user) => user.slug === entityId);
+  }
+  if (scope === "team") {
+    return (state.teams || []).find((team) => (team.id || team.name) === entityId);
+  }
+  if (scope === "subsystem") {
+    return (state.subsystems || []).find((subsystem) => subsystem.name === entityId);
+  }
+  return null;
+}
+
+function resolvePeriodForEntity(scope, entity, mode) {
+  if (!entity) return null;
+  const periodList = scope === "user" ? (entity.months || []) : (entity.periods || []);
+  if (!periodList.length) {
+    return null;
+  }
+  const targetIsYearly = mode !== "latest-month";
+  const filtered = periodList.filter((p) => !!p && !!p.is_yearly === targetIsYearly);
+  if (!filtered.length) {
+    return null;
+  }
+  const sorted = [...filtered].sort((a, b) => (b.from || "").localeCompare(a.from || ""));
+  return sorted[0];
+}
+
+async function renderSourceForKiosk(scope, entity, period) {
+  if (scope === "user") {
+    state.selectedUser = entity;
+    state.selectedUserMonth = period;
+    await loadUserMonth(entity, period);
+    return;
+  }
+  if (scope === "team") {
+    state.selectedTeam = entity;
+    state.selectedTeamPeriod = period;
+    await loadTeamPeriod(entity, period);
+    return;
+  }
+  if (scope === "subsystem") {
+    state.selectedSubsystem = entity;
+    state.selectedSubsystemPeriod = period;
+    await loadSubsystemPeriod(entity, period);
+    return;
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForVisualizationElementBySelector(vizId, entityKey, timeoutMs = 8000) {
+  const start = Date.now();
+  const selectorParts = [`[data-visualization-id="${vizId}"]`];
+  if (entityKey) {
+    selectorParts.push(`[data-visualization-entity="${cssEscape(entityKey)}"]`);
+  }
+  const selector = selectorParts.join("");
+  while (Date.now() - start < timeoutMs) {
+    const el = document.querySelector(selector) || document.querySelector(`[data-visualization-id="${vizId}"]`);
+    if (el) {
+      return el;
+    }
+    await wait(150);
+  }
+  return null;
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char.charCodeAt(0).toString(16)} `);
+}
+
+function detachChartsForElement(element) {
+  if (!element || !state.charts) return;
+  Object.entries(state.charts).forEach(([key, chart]) => {
+    if (chart?.canvas && element.contains(chart.canvas)) {
+      delete state.charts[key];
+    }
+  });
+}
+
+function showKioskPlaceholder(message) {
+  if (!kioskState.placeholder) return;
+  kioskState.placeholder.style.display = "flex";
+  kioskState.placeholder.innerHTML = `<p>${message}</p>`;
+  if (kioskState.slideContainer) {
+    kioskState.slideContainer.style.display = "none";
+  }
+}
+
+function hideKioskPlaceholder() {
+  if (kioskState.placeholder) {
+    kioskState.placeholder.style.display = "none";
+  }
+  if (kioskState.slideContainer) {
+    kioskState.slideContainer.style.display = "block";
+  }
+}
+
+function advanceKioskSlide(step = 1) {
+  if (!kioskState.slides.length) {
+    showKioskPlaceholder("No slides ready.");
+    return;
+  }
+  kioskState.currentIndex = (kioskState.currentIndex + step + kioskState.slides.length) % kioskState.slides.length;
+  showKioskSlide(kioskState.currentIndex);
+}
+
+function showKioskSlide(index) {
+  kioskState.slides.forEach((slide, idx) => {
+    slide.element.classList.toggle("active", idx === index);
+  });
+  const active = kioskState.slides[index];
+  if (active?.element) {
+    kioskState.overlayTitle.textContent = active.element.dataset.title || active.definition?.label || "Visualization";
+    kioskState.overlayMeta.textContent = active.element.dataset.subtitle || "";
+  }
+}
+
+function scheduleKioskRotation() {
+  if (kioskState.rotationTimer) {
+    clearInterval(kioskState.rotationTimer);
+  }
+  kioskState.rotationTimer = setInterval(() => advanceKioskSlide(1), kioskState.rotationSeconds * 1000);
+}
+
+function scheduleKioskRefresh() {
+  if (kioskState.refreshTimer) {
+    clearTimeout(kioskState.refreshTimer);
+  }
+  kioskState.refreshTimer = setTimeout(() => {
+    refreshKioskSlides();
+  }, kioskState.refreshMinutes * 60000);
+}
+
+function clearKioskTimers() {
+  if (kioskState.rotationTimer) {
+    clearInterval(kioskState.rotationTimer);
+    kioskState.rotationTimer = null;
+  }
+  if (kioskState.refreshTimer) {
+    clearTimeout(kioskState.refreshTimer);
+    kioskState.refreshTimer = null;
+  }
+}
+
+function handleKioskHotkeys(event) {
+  if (!isKioskMode()) return;
+  if (event.key === "ArrowRight") {
+    advanceKioskSlide(1);
+  } else if (event.key === "ArrowLeft") {
+    advanceKioskSlide(-1);
+  } else if (event.key?.toLowerCase() === "r") {
+    refreshKioskSlides();
+  }
+}
+
+// --------------------------
+// Kiosk settings management
+// --------------------------
+
+let kioskSettingsConfig = null;
+let kioskSettingsLoading = false;
+
+function initializeKioskSettingsHandlers() {
+  const saveBtn = $("save-kiosk-settings");
+  const resetBtn = $("reset-kiosk-settings");
+  const addBtn = $("add-kiosk-item");
+  const container = $("kiosk-items-container");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", saveKioskSettings);
+    if (READ_ONLY_MODE) {
+      saveBtn.disabled = true;
+      saveBtn.title = "Disabled in read-only mode";
+    }
+  }
+  if (resetBtn) {
+    resetBtn.addEventListener("click", resetKioskSettings);
+  }
+  if (addBtn) {
+    addBtn.addEventListener("click", addKioskItem);
+    if (READ_ONLY_MODE) {
+      addBtn.disabled = true;
+      addBtn.title = "Disabled in read-only mode";
+    }
+  }
+  if (container) {
+    container.addEventListener("change", handleKioskItemChange);
+    container.addEventListener("click", handleKioskItemClick);
+  }
+}
+
+async function loadKioskSettingsUI(force = false) {
+  if (kioskSettingsLoading) {
+    return;
+  }
+  const alertEl = $("kiosk-settings-alert");
+  if (alertEl) {
+    alertEl.classList.remove("show");
+  }
+  kioskSettingsLoading = true;
+  try {
+    const response = await fetch("/api/settings/kiosk");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    kioskSettingsConfig = await response.json();
+    renderKioskSettingsForm();
+  } catch (error) {
+    console.error("Failed to load kiosk settings:", error);
+    showKioskSettingsMessage(error?.message || "Unable to load kiosk configuration.", "error");
+  } finally {
+    kioskSettingsLoading = false;
+  }
+}
+
+function renderKioskSettingsForm() {
+  const rotationInput = $("kiosk-rotation-seconds");
+  const refreshInput = $("kiosk-refresh-minutes");
+  if (rotationInput && kioskSettingsConfig) {
+    rotationInput.value = kioskSettingsConfig.rotation_seconds || 30;
+    rotationInput.disabled = READ_ONLY_MODE;
+  }
+  if (refreshInput && kioskSettingsConfig) {
+    refreshInput.value = kioskSettingsConfig.refresh_minutes || 15;
+    refreshInput.disabled = READ_ONLY_MODE;
+  }
+  renderKioskItems();
+}
+
+function renderKioskItems() {
+  const container = $("kiosk-items-container");
+  if (!container) return;
+  container.innerHTML = "";
+  const items = Array.isArray(kioskSettingsConfig?.items) ? kioskSettingsConfig.items : [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state">No kiosk slides configured yet.</div>';
+    return;
+  }
+  items.forEach((item) => {
+    container.appendChild(renderKioskItemCard(item));
+  });
+}
+
+function renderKioskItemCard(item) {
+  const card = document.createElement("div");
+  card.className = "kiosk-item-card";
+  card.dataset.itemId = item.id;
+  const vizOptions = getVisualizationOptions();
+  const entityOptions = getEntityOptions(item.scope || VISUALIZATION_REGISTRY[item.visualization_id]?.scope);
+  const selectVisualization = document.createElement("select");
+  selectVisualization.dataset.field = "visualization_id";
+  selectVisualization.dataset.itemId = item.id;
+  selectVisualization.disabled = READ_ONLY_MODE;
+  vizOptions.forEach((option) => {
+    const opt = document.createElement("option");
+    opt.value = option.id;
+    opt.textContent = `${option.label}`;
+    opt.selected = option.id === item.visualization_id;
+    opt.dataset.scope = option.scope;
+    selectVisualization.appendChild(opt);
+  });
+  const vizGroup = createFormGroup("Visualization", selectVisualization);
+  const entitySelect = document.createElement("select");
+  entitySelect.dataset.field = "entity_id";
+  entitySelect.dataset.itemId = item.id;
+  entitySelect.disabled = READ_ONLY_MODE || !entityOptions.length;
+  entityOptions.forEach((entity) => {
+    const opt = document.createElement("option");
+    opt.value = entity.value;
+    opt.textContent = entity.label;
+    if (entity.value === item.entity_id) {
+      opt.selected = true;
+    }
+    entitySelect.appendChild(opt);
+  });
+  const entityGroup = createFormGroup("Entity", entitySelect);
+  if (!entityOptions.length) {
+    const note = document.createElement("small");
+    note.textContent = "No data loaded yet";
+    note.style.color = "#fcd34d";
+    entityGroup.appendChild(note);
+  }
+  const periodSelect = document.createElement("select");
+  periodSelect.dataset.field = "period_mode";
+  periodSelect.dataset.itemId = item.id;
+  periodSelect.disabled = READ_ONLY_MODE;
+  [
+    { value: "latest-year", label: "Latest yearly data" },
+    { value: "latest-month", label: "Latest monthly data" }
+  ].forEach(({ value, label }) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    opt.selected = (item.period_mode || "latest-year") === value;
+    periodSelect.appendChild(opt);
+  });
+  const periodGroup = createFormGroup("Period", periodSelect);
+  const row = document.createElement("div");
+  row.className = "kiosk-item-row";
+  row.appendChild(vizGroup);
+  row.appendChild(entityGroup);
+  row.appendChild(periodGroup);
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.placeholder = "Custom title (optional)";
+  titleInput.dataset.field = "custom_title";
+  titleInput.dataset.itemId = item.id;
+  titleInput.value = item.custom_title || "";
+  titleInput.disabled = READ_ONLY_MODE;
+  const actions = document.createElement("div");
+  actions.className = "kiosk-item-actions";
+  actions.appendChild(titleInput);
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "btn-link";
+  removeBtn.dataset.action = "remove-item";
+  removeBtn.dataset.itemId = item.id;
+  removeBtn.type = "button";
+  removeBtn.textContent = "Remove";
+  if (READ_ONLY_MODE) {
+    removeBtn.disabled = true;
+  }
+  actions.appendChild(removeBtn);
+  card.appendChild(row);
+  card.appendChild(actions);
+  return card;
+}
+
+function createFormGroup(labelText, control) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "form-group";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  wrapper.appendChild(label);
+  wrapper.appendChild(control);
+  return wrapper;
+}
+
+function getVisualizationOptions() {
+  return VISUALIZATION_DEFINITIONS.map((def) => ({
+    id: def.id,
+    label: def.label,
+    scope: def.scope
+  }));
+}
+
+function getEntityOptions(scope) {
+  if (scope === "user") {
+    return (state.users || []).map((user) => ({ value: user.slug, label: user.display_name || user.slug }));
+  }
+  if (scope === "team") {
+    return (state.teams || []).map((team) => ({ value: team.id || team.name, label: team.name || team.id }));
+  }
+  if (scope === "subsystem") {
+    return (state.subsystems || []).map((subsystem) => ({ value: subsystem.name, label: subsystem.name }));
+  }
+  return [];
+}
+
+function addKioskItem() {
+  if (READ_ONLY_MODE) return;
+  const defs = getVisualizationOptions();
+  if (!defs.length) {
+    showKioskSettingsMessage("No visualizations are available yet.", "error");
+    return;
+  }
+  const def = defs[0];
+  const entityOptions = getEntityOptions(def.scope);
+  const newItem = {
+    id: generateKioskItemId(),
+    visualization_id: def.id,
+    scope: def.scope,
+    entity_id: entityOptions[0]?.value || "",
+    entity_label: entityOptions[0]?.label || "",
+    period_mode: "latest-year",
+    custom_title: ""
+  };
+  kioskSettingsConfig = kioskSettingsConfig || { rotation_seconds: 30, refresh_minutes: 15, items: [] };
+  kioskSettingsConfig.items = kioskSettingsConfig.items || [];
+  kioskSettingsConfig.items.push(newItem);
+  renderKioskItems();
+}
+
+function handleKioskItemChange(event) {
+  const field = event.target?.dataset?.field;
+  const itemId = event.target?.dataset?.itemId;
+  if (!field || !itemId || !kioskSettingsConfig?.items) {
+    return;
+  }
+  const item = kioskSettingsConfig.items.find((i) => i.id === itemId);
+  if (!item) {
+    return;
+  }
+  if (field === "visualization_id") {
+    item.visualization_id = event.target.value;
+    const def = VISUALIZATION_REGISTRY[item.visualization_id];
+    item.scope = def?.scope;
+    const options = getEntityOptions(item.scope);
+    if (!options.find((opt) => opt.value === item.entity_id)) {
+      item.entity_id = options[0]?.value || "";
+      item.entity_label = options[0]?.label || "";
+    }
+    renderKioskItems();
+    return;
+  }
+  if (field === "entity_id") {
+    item.entity_id = event.target.value;
+    const options = getEntityOptions(item.scope);
+    const selected = options.find((opt) => opt.value === item.entity_id);
+    if (selected) {
+      item.entity_label = selected.label;
+    }
+    return;
+  }
+  if (field === "period_mode") {
+    item.period_mode = event.target.value;
+    return;
+  }
+  if (field === "custom_title") {
+    item.custom_title = event.target.value;
+  }
+}
+
+function handleKioskItemClick(event) {
+  const action = event.target?.dataset?.action;
+  if (action !== "remove-item") {
+    return;
+  }
+  const itemId = event.target.dataset.itemId;
+  if (!itemId || !kioskSettingsConfig?.items) {
+    return;
+  }
+  kioskSettingsConfig.items = kioskSettingsConfig.items.filter((item) => item.id !== itemId);
+  renderKioskItems();
+}
+
+async function saveKioskSettings() {
+  if (READ_ONLY_MODE) {
+    showKioskSettingsMessage("Cannot save in read-only mode.", "error");
+    return;
+  }
+  if (!kioskSettingsConfig) {
+    return;
+  }
+  const rotationInput = $("kiosk-rotation-seconds");
+  const refreshInput = $("kiosk-refresh-minutes");
+  if (rotationInput) {
+    kioskSettingsConfig.rotation_seconds = parseInt(rotationInput.value, 10) || 30;
+  }
+  if (refreshInput) {
+    kioskSettingsConfig.refresh_minutes = parseInt(refreshInput.value, 10) || 15;
+  }
+  try {
+    const response = await fetch("/api/settings/kiosk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(kioskSettingsConfig)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    if (data?.config) {
+      kioskSettingsConfig = data.config;
+    }
+    showKioskSettingsMessage("Kiosk configuration saved.", "success");
+  } catch (error) {
+    console.error("Failed to save kiosk settings:", error);
+    showKioskSettingsMessage(error?.message || "Unable to save kiosk configuration.", "error");
+  }
+}
+
+async function resetKioskSettings() {
+  await loadKioskSettingsUI(true);
+  showKioskSettingsMessage("Kiosk configuration reset.");
+}
+
+function showKioskSettingsMessage(message, type = "info") {
+  const alertEl = $("kiosk-settings-alert");
+  if (!alertEl) return;
+  alertEl.textContent = message;
+  alertEl.classList.remove("success", "error", "info");
+  alertEl.classList.add("show");
+  if (type === "success") {
+    alertEl.style.background = "rgba(34,197,94,0.15)";
+    alertEl.style.borderColor = "#22c55e";
+  } else if (type === "error") {
+    alertEl.style.background = "rgba(248,113,113,0.15)";
+    alertEl.style.borderColor = "#ef4444";
+  } else {
+    alertEl.style.background = "rgba(59,130,246,0.1)";
+    alertEl.style.borderColor = "#3b82f6";
+  }
+}
+
+function generateKioskItemId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `kiosk-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 
 // --------------------------
