@@ -158,6 +158,156 @@ const VISUALIZATION_DEFINITIONS = [
     supportedPeriods: ["yearly"],
     requiresEntity: true,
     match: { mode: "includes", text: "Line Change Timeline" }
+  },
+  {
+    id: "alerts-kpis",
+    scope: "alerts",
+    label: "Alerts · KPI Summary",
+    description: "PagerDuty incident KPIs for the synced window.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-open-incidents",
+    scope: "alerts",
+    label: "Alerts · Open incidents trend",
+    description: "Line chart showing how many PagerDuty incidents were open per day.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-daily-open-vs-closed",
+    scope: "alerts",
+    label: "Alerts · Daily opened vs. closed",
+    description: "Daily comparison of incident openings and resolutions.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-weekly-trend",
+    scope: "alerts",
+    label: "Alerts · Weekly opened vs. closed",
+    description: "Weekly incident cadence, opened vs resolved.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-hourly-arrivals",
+    scope: "alerts",
+    label: "Alerts · Incidents by hour",
+    description: "Hourly distribution of PagerDuty incident creations.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-weekly-severity",
+    scope: "alerts",
+    label: "Alerts · Severity over time",
+    description: "Stacked weekly severity counts plus average trend line.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-severity-mix",
+    scope: "alerts",
+    label: "Alerts · Severity mix",
+    description: "Breakdown of incidents by severity for the selected window.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-severity-cadence",
+    scope: "alerts",
+    label: "Alerts · Severity cadence",
+    description: "Table summarizing frequency and share of each severity.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-top-services",
+    scope: "alerts",
+    label: "Alerts · Top services",
+    description: "Services with the highest incident counts.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-team-mentions",
+    scope: "alerts",
+    label: "Alerts · Team mentions",
+    description: "Counts of how often teams are attached to incidents.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-team-activity",
+    scope: "alerts",
+    label: "Alerts · Team activity",
+    description: "Assignments, acknowledgements, and resolutions grouped by RepoSquirrel team.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-top-responders",
+    scope: "alerts",
+    label: "Alerts · Top responders",
+    description: "Ranked responders linked to RepoSquirrel developers.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-open-incidents-list",
+    scope: "alerts",
+    label: "Alerts · Active incidents",
+    description: "Filterable list of currently open PagerDuty incidents.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-recent-incidents",
+    scope: "alerts",
+    label: "Alerts · Recent incidents",
+    description: "Latest PagerDuty incidents regardless of status.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "overview",
+    match: { mode: "manual" }
+  },
+  {
+    id: "alerts-all-incidents-timeline",
+    scope: "alerts",
+    label: "Alerts · Incident timeline",
+    description: "Filter-aware stacked severity timeline from the All incidents explorer.",
+    supportedPeriods: [],
+    requiresEntity: false,
+    kioskView: "all-incidents",
+    match: { mode: "manual" }
   }
 ];
 
@@ -956,7 +1106,7 @@ async function loadUsersAndSubsystems() {
     
     // Force update of current mode visibility
     console.log("Setting mode to:", state.mode);
-    setMode(state.mode);
+    setMode(state.mode, !isKioskMode());
     
     // Clear loading indicator
     if (main) {
@@ -2126,6 +2276,7 @@ function renderAllIncidentsExplorer(payload) {
   timelineEmptyMessage.style.display = "none";
   timelineSection.appendChild(timelineEmptyMessage);
   card.appendChild(timelineSection);
+  tagVisualization(timelineSection, "alerts-all-incidents-timeline", { scope: "alerts" });
 
   const filters = ensureAllIncidentsFilters();
   const controls = document.createElement("div");
@@ -2375,6 +2526,7 @@ function renderPagerDutyKpis(container, overview) {
     grid.appendChild(card);
   });
   container.appendChild(grid);
+  tagVisualization(grid, "alerts-kpis", { scope: "alerts" });
 }
 
 function renderPagerDutyCharts(container, overview) {
@@ -2390,6 +2542,7 @@ function renderPagerDutyCharts(container, overview) {
       "h2"
     ) + '<div class="chart-container"><canvas id="chart-pd-open"></canvas></div>';
     container.appendChild(card);
+    tagVisualization(card, "alerts-open-incidents", { scope: "alerts" });
     chartConfigs.push({
       id: "chart-pd-open",
       type: "line",
@@ -2416,6 +2569,7 @@ function renderPagerDutyCharts(container, overview) {
       "h2"
     ) + '<div class="chart-container"><canvas id="chart-pd-daily"></canvas></div>';
     container.appendChild(card);
+    tagVisualization(card, "alerts-daily-open-vs-closed", { scope: "alerts" });
     chartConfigs.push({
       id: "chart-pd-daily",
       type: "line",
@@ -2450,6 +2604,7 @@ function renderPagerDutyCharts(container, overview) {
       "h2"
     ) + '<div class="chart-container"><canvas id="chart-pd-weekly"></canvas></div>';
     container.appendChild(card);
+    tagVisualization(card, "alerts-weekly-trend", { scope: "alerts" });
     chartConfigs.push({
       id: "chart-pd-weekly",
       type: "bar",
@@ -2491,6 +2646,7 @@ function renderPagerDutyCharts(container, overview) {
       "h2"
     ) + '<div class="chart-container"><canvas id="chart-pd-hourly"></canvas></div>';
     container.appendChild(card);
+    tagVisualization(card, "alerts-hourly-arrivals", { scope: "alerts" });
     chartConfigs.push({
       id: "chart-pd-hourly",
       type: "bar",
@@ -2570,6 +2726,7 @@ function renderPagerDutyCharts(container, overview) {
         "h2"
       ) + '<div class="chart-container"><canvas id="chart-pd-weekly-severity"></canvas></div>';
       container.appendChild(card);
+      tagVisualization(card, "alerts-weekly-severity", { scope: "alerts" });
       chartConfigs.push({
         id: "chart-pd-weekly-severity",
         type: "bar",
@@ -2647,6 +2804,7 @@ function renderPagerDutyBreakdowns(container, overview) {
     "h3"
   );
   severityCard.appendChild(createPagerDutyBreakdownList(overview.severity_breakdown));
+  tagVisualization(severityCard, "alerts-severity-mix", { scope: "alerts" });
   grid.appendChild(severityCard);
 
   const severityCadenceCard = document.createElement("div");
@@ -2663,6 +2821,7 @@ function renderPagerDutyBreakdowns(container, overview) {
       overview.totals?.total
     )
   );
+  tagVisualization(severityCadenceCard, "alerts-severity-cadence", { scope: "alerts" });
   grid.appendChild(severityCadenceCard);
 
   const serviceCard = document.createElement("div");
@@ -2673,6 +2832,7 @@ function renderPagerDutyBreakdowns(container, overview) {
     "h3"
   );
   serviceCard.appendChild(createPagerDutyServiceTable(overview.service_breakdown));
+  tagVisualization(serviceCard, "alerts-top-services", { scope: "alerts" });
   grid.appendChild(serviceCard);
 
   const teamCard = document.createElement("div");
@@ -2683,6 +2843,7 @@ function renderPagerDutyBreakdowns(container, overview) {
     "h3"
   );
   teamCard.appendChild(createPagerDutyBreakdownList(overview.team_breakdown));
+  tagVisualization(teamCard, "alerts-team-mentions", { scope: "alerts" });
   grid.appendChild(teamCard);
 
   container.appendChild(grid);
@@ -2721,6 +2882,7 @@ function renderPagerDutyResponders(container, overview) {
   });
   tableWrapper.appendChild(table);
   card.appendChild(tableWrapper);
+  tagVisualization(card, "alerts-top-responders", { scope: "alerts" });
   container.appendChild(card);
 }
 
@@ -2867,6 +3029,7 @@ function renderPagerDutyTeamActivity(container, overview) {
     list.appendChild(row);
   });
   card.appendChild(list);
+  tagVisualization(card, "alerts-team-activity", { scope: "alerts" });
   container.appendChild(card);
 }
 
@@ -4210,6 +4373,7 @@ function renderPagerDutyIncidents(container, overview) {
     });
   }
   recentCard.appendChild(recentList);
+  tagVisualization(recentCard, "alerts-recent-incidents", { scope: "alerts" });
   cardsWrapper.appendChild(recentCard);
 
   container.appendChild(cardsWrapper);
@@ -4341,6 +4505,7 @@ function buildOverviewOpenIncidentsCard(openIncidents = [], totalOpen = null) {
   }
 
   renderIncidents();
+  tagVisualization(card, "alerts-open-incidents-list", { scope: "alerts" });
   return card;
 }
 
@@ -10540,6 +10705,7 @@ async function initializeKioskMode() {
     setupKioskStage();
     startKioskClock();
     kioskState.initialized = true;
+    await refreshIntegrationsStatus(true);
     await loadUsersAndSubsystems();
     await refreshKioskSlides();
     document.addEventListener("keydown", handleKioskHotkeys);
@@ -10682,22 +10848,30 @@ async function createKioskSlide(item) {
   if (!def) {
     return createKioskMessageSlide(`Visualization "${item.visualization_id}" is not supported.`);
   }
-  if (def.requiresEntity && !item.entity_id) {
+  const scope = def.scope || item.scope;
+  const requiresEntity = def.requiresEntity !== false;
+  if (requiresEntity && !item.entity_id) {
     return createKioskMessageSlide("No entity configured for this slide.");
   }
-  const entity = resolveEntityForScope(def.scope, item.entity_id);
-  if (!entity) {
-    return createKioskMessageSlide(`Unable to find ${def.scope} "${item.entity_id}".`);
+  let entity = null;
+  if (requiresEntity) {
+    entity = resolveEntityForScope(scope, item.entity_id);
+    if (!entity) {
+      return createKioskMessageSlide(`Unable to find ${scope} "${item.entity_id}".`);
+    }
   }
-  const period = resolvePeriodForEntity(def.scope, entity, item.period_mode || "latest-year");
-  if (!period) {
-    return createKioskMessageSlide(`No ${item.period_mode || 'latest'} period exists for ${item.entity_id}.`);
+  let period = null;
+  if (requiresEntity) {
+    period = resolvePeriodForEntity(scope, entity, item.period_mode || "latest-year");
+    if (!period) {
+      return createKioskMessageSlide(`No ${item.period_mode || 'latest'} period exists for ${item.entity_id}.`);
+    }
   }
-  await renderSourceForKiosk(def.scope, entity, period);
-  const entityKey = getEntityKey(def.scope, entity);
+  await renderSourceForKiosk(scope, entity, period, def, item);
+  const entityKey = requiresEntity ? getEntityKey(scope, entity) : "";
   const element = await waitForVisualizationElementBySelector(item.visualization_id, entityKey, 9000);
   if (!element) {
-    return createKioskMessageSlide(`Could not render ${def.label} for ${entityKey}.`);
+    return createKioskMessageSlide(`Could not render ${def.label}${entityKey ? ` for ${entityKey}` : ''}.`);
   }
   if (element.parentElement) {
     element.parentElement.removeChild(element);
@@ -10706,9 +10880,12 @@ async function createKioskSlide(item) {
   element.style.height = "100%";
   const slideEl = document.createElement("div");
   slideEl.className = "kiosk-slide";
-  const entityLabel = item.entity_label || getEntityLabel(def.scope, entity, entityKey);
+  const entityLabel = requiresEntity ? (item.entity_label || getEntityLabel(scope, entity, entityKey)) : "";
+  const subtitle = requiresEntity
+    ? buildSlideSubtitle(entityLabel, period, item.period_mode || "latest-year")
+    : "";
   slideEl.dataset.title = item.custom_title || def.label;
-  slideEl.dataset.subtitle = buildSlideSubtitle(entityLabel, period, item.period_mode || "latest-year");
+  slideEl.dataset.subtitle = subtitle;
   slideEl.appendChild(element);
   return { element: slideEl, definition: def, item, entity, period };
 }
@@ -10777,7 +10954,23 @@ function resolvePeriodForEntity(scope, entity, mode) {
   return sorted[0];
 }
 
-async function renderSourceForKiosk(scope, entity, period) {
+async function renderSourceForKiosk(scope, entity, period, definition = null) {
+  if (scope === "alerts") {
+    if (!isPagerDutyConfigured()) {
+      throw new Error("PagerDuty integration is required for this visualization.");
+    }
+    if (state.mode !== "alerts") {
+      suppressAlertsModeWarning = true;
+      setMode("alerts", false);
+    }
+    const targetView = definition?.kioskView || "overview";
+    if (targetView === "all-incidents") {
+      await showAllPagerDutyIncidentsView(false);
+    } else {
+      await showAlertsOverviewDashboard(false);
+    }
+    return;
+  }
   if (scope === "user") {
     state.selectedUser = entity;
     state.selectedUserMonth = period;
@@ -11003,7 +11196,13 @@ function renderKioskItemCard(item) {
   card.className = "kiosk-item-card";
   card.dataset.itemId = item.id;
   const vizOptions = getVisualizationOptions();
-  const entityOptions = getEntityOptions(item.scope || VISUALIZATION_REGISTRY[item.visualization_id]?.scope);
+  const definition = VISUALIZATION_REGISTRY[item.visualization_id] || {};
+  const scope = definition.scope || item.scope;
+  if (scope && item.scope !== scope) {
+    item.scope = scope;
+  }
+  const requiresEntity = definition.requiresEntity !== false;
+  const entityOptions = requiresEntity ? getEntityOptions(scope) : [];
   const selectVisualization = document.createElement("select");
   selectVisualization.dataset.field = "visualization_id";
   selectVisualization.dataset.itemId = item.id;
@@ -11017,46 +11216,59 @@ function renderKioskItemCard(item) {
     selectVisualization.appendChild(opt);
   });
   const vizGroup = createFormGroup("Visualization", selectVisualization);
-  const entitySelect = document.createElement("select");
-  entitySelect.dataset.field = "entity_id";
-  entitySelect.dataset.itemId = item.id;
-  entitySelect.disabled = READ_ONLY_MODE || !entityOptions.length;
-  entityOptions.forEach((entity) => {
-    const opt = document.createElement("option");
-    opt.value = entity.value;
-    opt.textContent = entity.label;
-    if (entity.value === item.entity_id) {
-      opt.selected = true;
+
+  let entityGroup = null;
+  if (requiresEntity) {
+    const entitySelect = document.createElement("select");
+    entitySelect.dataset.field = "entity_id";
+    entitySelect.dataset.itemId = item.id;
+    entitySelect.disabled = READ_ONLY_MODE || !entityOptions.length;
+    entityOptions.forEach((entity) => {
+      const opt = document.createElement("option");
+      opt.value = entity.value;
+      opt.textContent = entity.label;
+      if (entity.value === item.entity_id) {
+        opt.selected = true;
+      }
+      entitySelect.appendChild(opt);
+    });
+    entityGroup = createFormGroup("Entity", entitySelect);
+    if (!entityOptions.length) {
+      const note = document.createElement("small");
+      note.textContent = "No data loaded yet";
+      note.style.color = "#fcd34d";
+      entityGroup.appendChild(note);
     }
-    entitySelect.appendChild(opt);
-  });
-  const entityGroup = createFormGroup("Entity", entitySelect);
-  if (!entityOptions.length) {
-    const note = document.createElement("small");
-    note.textContent = "No data loaded yet";
-    note.style.color = "#fcd34d";
-    entityGroup.appendChild(note);
   }
-  const periodSelect = document.createElement("select");
-  periodSelect.dataset.field = "period_mode";
-  periodSelect.dataset.itemId = item.id;
-  periodSelect.disabled = READ_ONLY_MODE;
-  [
-    { value: "latest-year", label: "Latest yearly data" },
-    { value: "latest-month", label: "Latest monthly data" }
-  ].forEach(({ value, label }) => {
-    const opt = document.createElement("option");
-    opt.value = value;
-    opt.textContent = label;
-    opt.selected = (item.period_mode || "latest-year") === value;
-    periodSelect.appendChild(opt);
-  });
-  const periodGroup = createFormGroup("Period", periodSelect);
+
+  let periodGroup = null;
+  if (requiresEntity) {
+    const periodSelect = document.createElement("select");
+    periodSelect.dataset.field = "period_mode";
+    periodSelect.dataset.itemId = item.id;
+    periodSelect.disabled = READ_ONLY_MODE;
+    [
+      { value: "latest-year", label: "Latest yearly data" },
+      { value: "latest-month", label: "Latest monthly data" }
+    ].forEach(({ value, label }) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      opt.selected = (item.period_mode || "latest-year") === value;
+      periodSelect.appendChild(opt);
+    });
+    periodGroup = createFormGroup("Period", periodSelect);
+  }
+
   const row = document.createElement("div");
   row.className = "kiosk-item-row";
   row.appendChild(vizGroup);
-  row.appendChild(entityGroup);
-  row.appendChild(periodGroup);
+  if (entityGroup) {
+    row.appendChild(entityGroup);
+  }
+  if (periodGroup) {
+    row.appendChild(periodGroup);
+  }
   const titleInput = document.createElement("input");
   titleInput.type = "text";
   titleInput.placeholder = "Custom title (optional)";
@@ -11121,14 +11333,16 @@ function addKioskItem() {
     return;
   }
   const def = defs[0];
-  const entityOptions = getEntityOptions(def.scope);
+  const requiresEntity = def.requiresEntity !== false;
+  const entityOptions = requiresEntity ? getEntityOptions(def.scope) : [];
+  const firstEntity = requiresEntity ? entityOptions[0] : null;
   const newItem = {
     id: generateKioskItemId(),
     visualization_id: def.id,
     scope: def.scope,
-    entity_id: entityOptions[0]?.value || "",
-    entity_label: entityOptions[0]?.label || "",
-    period_mode: "latest-year",
+    entity_id: requiresEntity ? (firstEntity?.value || "") : "",
+    entity_label: requiresEntity ? (firstEntity?.label || "") : "",
+    period_mode: requiresEntity ? "latest-year" : "",
     custom_title: ""
   };
   kioskSettingsConfig = kioskSettingsConfig || { rotation_seconds: 30, refresh_minutes: 15, items: [] };
@@ -11151,10 +11365,20 @@ function handleKioskItemChange(event) {
     item.visualization_id = event.target.value;
     const def = VISUALIZATION_REGISTRY[item.visualization_id];
     item.scope = def?.scope;
-    const options = getEntityOptions(item.scope);
-    if (!options.find((opt) => opt.value === item.entity_id)) {
-      item.entity_id = options[0]?.value || "";
-      item.entity_label = options[0]?.label || "";
+    const requiresEntity = def?.requiresEntity !== false;
+    if (requiresEntity) {
+      const options = getEntityOptions(item.scope);
+      if (!options.find((opt) => opt.value === item.entity_id)) {
+        item.entity_id = options[0]?.value || "";
+        item.entity_label = options[0]?.label || "";
+      }
+      if (!item.period_mode) {
+        item.period_mode = "latest-year";
+      }
+    } else {
+      item.entity_id = "";
+      item.entity_label = "";
+      item.period_mode = "";
     }
     renderKioskItems();
     return;
