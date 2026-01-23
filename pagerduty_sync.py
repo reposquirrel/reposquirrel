@@ -9,7 +9,7 @@ import random
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -407,6 +407,34 @@ def _build_github_user_lookup(stats_root: str) -> Dict[str, List[Dict[str, str]]
     return lookup
 
 
+def _load_team_membership_map(base_dir: str) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+    teams_file = os.path.join(base_dir, "configuration", "teams.json")
+    if not os.path.exists(teams_file):
+        return {}, {}
+    try:
+        with open(teams_file, "r", encoding="utf-8") as handle:
+            teams_config = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}, {}
+    memberships: Dict[str, List[str]] = {}
+    team_meta: Dict[str, Dict[str, Any]] = {}
+    for team_id, info in (teams_config or {}).items():
+        members = info.get("members")
+        if not isinstance(members, list) or not members:
+            continue
+        team_name = info.get("name") or team_id
+        team_meta[team_id] = {
+            "name": team_name,
+            "member_count": len(members),
+        }
+        for member in members:
+            slug = str(member).strip()
+            if not slug:
+                continue
+            memberships.setdefault(slug, []).append(team_id)
+    return memberships, team_meta
+
+
 def _extract_user_id(ref: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(ref, dict):
         return None
@@ -420,9 +448,9 @@ def _build_responder_leaderboard(
     incidents: Sequence[Dict[str, Any]],
     pagerduty_users: Sequence[Dict[str, Any]],
     github_lookup: Dict[str, List[Dict[str, str]]],
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     if not incidents:
-        return None
+        return None, []
     pd_by_id = {str(user.get("id")): user for user in pagerduty_users if user.get("id")}
     stats: Dict[str, Dict[str, Any]] = {}
 
@@ -544,7 +572,7 @@ def _build_responder_leaderboard(
         entries.append(entry)
 
     if not entries:
-        return None
+        return None, []
 
     entries.sort(
         key=lambda item: (
@@ -555,11 +583,71 @@ def _build_responder_leaderboard(
     )
     total = len(entries)
     matched = sum(1 for item in entries if item.get("github_user"))
-    return {
-        "total_responders": total,
-        "matched_responders": matched,
-        "entries": entries[:25],
-    }
+    return (
+        {
+            "total_responders": total,
+            "matched_responders": matched,
+            "entries": entries[:25],
+        },
+        entries,
+    )
+
+
+def _build_team_activity(
+    leaderboard_entries: Sequence[Dict[str, Any]],
+    team_memberships: Dict[str, List[str]],
+    team_meta: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    if not leaderboard_entries or not team_memberships:
+        return [], 0
+    team_stats: Dict[str, Dict[str, Any]] = {}
+    unique_slugs: Set[str] = set()
+    for entry in leaderboard_entries:
+        github_user = entry.get("github_user") or {}
+        slug = github_user.get("slug")
+        if not slug:
+            continue
+        team_ids = team_memberships.get(slug)
+        if not team_ids:
+            continue
+        unique_slugs.add(slug)
+        for team_id in team_ids:
+            meta = team_meta.get(team_id) or {}
+            record = team_stats.setdefault(
+                team_id,
+                {
+                    "team_id": team_id,
+                    "team_name": meta.get("name", team_id),
+                    "member_count": meta.get("member_count"),
+                    "resolved": 0,
+                    "acknowledged": 0,
+                    "assigned": 0,
+                    "touch_count": 0,
+                    "responder_count": 0,
+                    "_responder_ids": set(),
+                },
+            )
+            record["resolved"] += entry.get("resolved_count", 0)
+            record["acknowledged"] += entry.get("acknowledged_count", 0)
+            record["assigned"] += entry.get("assignment_count", 0)
+            record["touch_count"] += entry.get("touch_count", 0)
+            responder_id = entry.get("pagerduty_user_id")
+            if responder_id is not None:
+                record["_responder_ids"].add(str(responder_id))
+    results: List[Dict[str, Any]] = []
+    for data in team_stats.values():
+        responder_ids = data.pop("_responder_ids", set())
+        data["responder_count"] = len(responder_ids)
+        results.append(data)
+    results.sort(
+        key=lambda item: (
+            -item.get("resolved", 0),
+            -item.get("acknowledged", 0),
+            -item.get("assigned", 0),
+            item.get("team_name") or item.get("team_id") or "",
+        )
+    )
+    return results, len(unique_slugs)
 
 
 def _incident_windows(
@@ -1068,12 +1156,13 @@ def sync_pagerduty_data(
     summary = _summarize_incidents(incidents, since, until, lookback_days)
     stats_root = os.path.join(os.path.abspath(output_root), "stats")
     github_lookup = _build_github_user_lookup(stats_root)
+    team_memberships, team_meta = _load_team_membership_map(base_dir)
     pagerduty_users: List[Dict[str, Any]] = []
     try:
         pagerduty_users = _fetch_pagerduty_users(token)
     except Exception as exc:  # pragma: no cover - network failure
         log.info("Warning: failed to fetch PagerDuty users: %s", exc)
-    responder_leaderboard = _build_responder_leaderboard(incidents, pagerduty_users, github_lookup)
+    responder_leaderboard, responder_entries = _build_responder_leaderboard(incidents, pagerduty_users, github_lookup)
     if responder_leaderboard:
         summary["responders"] = responder_leaderboard
         log.info(
@@ -1081,6 +1170,15 @@ def sync_pagerduty_data(
             responder_leaderboard.get("total_responders"),
             responder_leaderboard.get("matched_responders"),
         )
+        if team_memberships:
+            team_activity, unique_slugs = _build_team_activity(responder_entries, team_memberships, team_meta)
+            if team_activity:
+                summary["team_activity"] = {
+                    "teams": team_activity,
+                    "team_count": len(team_activity),
+                    "unique_responders": unique_slugs,
+                    "generated_at": iso_utc(datetime.now(timezone.utc)),
+                }
     os.makedirs(output_dir, exist_ok=True)
     overview_path = os.path.join(output_dir, "overview.json")
 

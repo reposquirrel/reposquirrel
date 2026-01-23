@@ -2451,6 +2451,7 @@ function renderPagerDutyBreakdowns(container, overview) {
   grid.appendChild(teamCard);
 
   container.appendChild(grid);
+  renderPagerDutyTeamActivity(container, overview);
   renderPagerDutyResponders(container, overview);
 }
 
@@ -2485,6 +2486,152 @@ function renderPagerDutyResponders(container, overview) {
   });
   tableWrapper.appendChild(table);
   card.appendChild(tableWrapper);
+  container.appendChild(card);
+}
+
+function renderPagerDutyTeamActivity(container, overview) {
+  const repoTeamsConfigured = Array.isArray(state?.teams) && state.teams.length > 0;
+  const activity = overview?.team_activity;
+  const teams = Array.isArray(activity?.teams) ? activity.teams : [];
+  if (!repoTeamsConfigured || teams.length === 0) {
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "card pd-team-activity-card";
+  card.innerHTML = createTitleWithTooltip(
+    "RepoSquirrel teams on PagerDuty",
+    "Aggregates assignments, acknowledgements, and resolutions by RepoSquirrel team membership (GitHub-linked responders only).",
+    "h3"
+  );
+
+  const note = document.createElement("p");
+  note.className = "pd-team-activity-note";
+  const teamCount = typeof activity.team_count === "number" ? activity.team_count : teams.length;
+  const responderCount = typeof activity.unique_responders === "number" ? activity.unique_responders : null;
+  const noteParts = [`${teamCount} team${teamCount === 1 ? "" : "s"} with PagerDuty activity`];
+  if (responderCount) {
+    noteParts.push(`${responderCount} linked responder${responderCount === 1 ? "" : "s"}`);
+  }
+  note.textContent = noteParts.join(" • ");
+  card.appendChild(note);
+
+  const sortTeams = teams
+    .slice()
+    .sort((a, b) => {
+      const resolvedDiff = (b.resolved || 0) - (a.resolved || 0);
+      if (resolvedDiff !== 0) {
+        return resolvedDiff;
+      }
+      const ackDiff = (b.acknowledged || 0) - (a.acknowledged || 0);
+      if (ackDiff !== 0) {
+        return ackDiff;
+      }
+      return (b.assigned || 0) - (a.assigned || 0);
+    });
+
+  const topForChart = sortTeams.slice(0, 8);
+  if (topForChart.length > 0) {
+    const labels = topForChart.map((team) => team.team_name || team.team_id || "Team");
+    const chartId = "chart-pd-team-activity";
+    const chartWrapper = document.createElement("div");
+    chartWrapper.className = "pd-team-activity-chart";
+    const canvas = document.createElement("canvas");
+    canvas.id = chartId;
+    chartWrapper.appendChild(canvas);
+    card.appendChild(chartWrapper);
+
+    if (state.charts[chartId]) {
+      state.charts[chartId].destroy();
+      delete state.charts[chartId];
+    }
+
+    const ctx = canvas.getContext("2d");
+    state.charts[chartId] = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Assigned",
+            data: topForChart.map((team) => team.assigned || 0),
+            backgroundColor: "rgba(56, 189, 248, 0.85)",
+          },
+          {
+            label: "Acknowledged",
+            data: topForChart.map((team) => team.acknowledged || 0),
+            backgroundColor: "rgba(249, 115, 22, 0.85)",
+          },
+          {
+            label: "Resolved",
+            data: topForChart.map((team) => team.resolved || 0),
+            backgroundColor: "rgba(34, 197, 94, 0.9)",
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        indexAxis: "y",
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "bottom" },
+          tooltip: {
+            callbacks: {
+              title(items) {
+                if (!items || !items.length) {
+                  return "";
+                }
+                return labels[items[0].dataIndex] || "Team";
+              },
+            },
+          },
+        },
+        scales: {
+          x: { beginAtZero: true, ticks: { precision: 0 } },
+          y: { ticks: { autoSkip: false } },
+        },
+      },
+    });
+  }
+
+  const list = document.createElement("div");
+  list.className = "pd-team-activity-list";
+  const header = document.createElement("div");
+  header.className = "pd-team-activity-row pd-team-activity-header";
+  header.innerHTML = `
+    <span>Team</span>
+    <span>Resolved</span>
+    <span>Ack'd</span>
+    <span>Assigned</span>
+    <span>Responders</span>
+  `;
+  list.appendChild(header);
+
+  const formatCount = (value) => (Number(value) || 0).toLocaleString();
+  sortTeams.slice(0, 10).forEach((team) => {
+    const row = document.createElement("div");
+    row.className = "pd-team-activity-row";
+    const metaParts = [];
+    if (typeof team.member_count === "number") {
+      metaParts.push(`${team.member_count} member${team.member_count === 1 ? "" : "s"}`);
+    }
+    if (typeof team.touch_count === "number" && team.touch_count > 0) {
+      metaParts.push(`${team.touch_count.toLocaleString()} touches`);
+    }
+    row.innerHTML = `
+      <div class="pd-team-activity-team">
+        <strong>${team.team_name || team.team_id || "Team"}</strong>
+        ${metaParts.length ? `<span class="pd-team-activity-meta">${metaParts.join(" • ")}</span>` : ""}
+      </div>
+      <div class="pd-team-activity-metric">${formatCount(team.resolved)}</div>
+      <div class="pd-team-activity-metric">${formatCount(team.acknowledged)}</div>
+      <div class="pd-team-activity-metric">${formatCount(team.assigned)}</div>
+      <div class="pd-team-activity-metric">${formatCount(team.responder_count)}</div>
+    `;
+    list.appendChild(row);
+  });
+  card.appendChild(list);
   container.appendChild(card);
 }
 
