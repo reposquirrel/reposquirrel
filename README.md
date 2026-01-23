@@ -78,11 +78,11 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 
 ## License
 
-This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License**.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-See [LICENSE](LICENSE) file for details.
+See [LICENSE](LICENSE) for details.
 
-Commercial organizations are welcome to trial RepoSquirrel without requesting an exception, but if you plan to use it longer-term please apply for a license exception via [COMMERCIAL_LICENSE_EXCEPTIONS.md](COMMERCIAL_LICENSE_EXCEPTIONS.md).
+If you need commercial terms that avoid the obligations of the AGPL, please review [COMMERCIAL_LICENSE_EXCEPTIONS.md](COMMERCIAL_LICENSE_EXCEPTIONS.md).
 
 ## Contributing
 
