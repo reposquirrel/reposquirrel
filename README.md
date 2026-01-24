@@ -62,7 +62,7 @@ Loop curated repo metrics and/or PagerDuty responders on hallway displays via `/
 - For manual setup, dependency installation, configuration file formats, project structure, and Docker/Makefile workflows, see the [Development Guide](docs/development_guide.md).
 - Once running, visit `http://localhost:5000` to configure repositories, teams, subsystems, aliases, and to launch “Run Update” jobs.
 
-![Linux Kernel Dashboard](screenshots/linux_kernel2.png)
+![Subsystem details](screenshots/subsystem_details.png)
 
 ## Screenshots
 
