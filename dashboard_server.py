@@ -113,7 +113,7 @@ DEFAULT_UPDATE_SETTINGS = {
 DEFAULT_KIOSK_CONFIG = {
     "rotation_seconds": 30,
     "refresh_minutes": 15,
-    "items": []
+    "pages": []
 }
 
 update_settings_lock = threading.Lock()
@@ -266,6 +266,77 @@ def ensure_kiosk_config_file() -> None:
             json.dump(DEFAULT_KIOSK_CONFIG, f, indent=2)
 
 
+def _sanitize_kiosk_item(item: Dict[str, Any], page_id: str, index: int) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+    visualization_id = item.get('visualization_id')
+    if not visualization_id:
+        return None
+    entry = {
+        'id': item.get('id') or f"{page_id}-item-{index + 1}",
+        'visualization_id': visualization_id,
+        'scope': item.get('scope'),
+        'entity_id': item.get('entity_id'),
+        'entity_label': item.get('entity_label'),
+        'period_mode': item.get('period_mode') or 'latest-year',
+        'period': item.get('period') if isinstance(item.get('period'), dict) else None,
+        'custom_title': item.get('custom_title'),
+        'options': item.get('options') if isinstance(item.get('options'), dict) else {},
+        'notes': item.get('notes') or ''
+    }
+    return entry
+
+
+def _sanitize_kiosk_page(page: Dict[str, Any], index: int) -> Dict[str, Any]:
+    if not isinstance(page, dict):
+        page = {}
+    page_id = page.get('id') or f"page-{index + 1}"
+    title = (page.get('title') or '').strip() or f"Page {index + 1}"
+    description = (page.get('description') or '').strip()
+    layout = (page.get('layout') or 'grid').strip() or 'grid'
+    raw_items = page.get('items') if isinstance(page.get('items'), list) else []
+    items: List[Dict[str, Any]] = []
+    for item_index, raw in enumerate(raw_items):
+        sanitized_item = _sanitize_kiosk_item(raw, page_id, item_index)
+        if sanitized_item:
+            items.append(sanitized_item)
+    return {
+        'id': page_id,
+        'title': title,
+        'description': description,
+        'layout': layout,
+        'items': items
+    }
+
+
+def _prepare_kiosk_pages_structure(source: Any) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if isinstance(source, list):
+        candidates = source
+    elif isinstance(source, dict):
+        if isinstance(source.get('pages'), list):
+            candidates = source.get('pages') or []
+        elif isinstance(source.get('items'), list) and source.get('items'):
+            candidates = [{
+                'id': source.get('id') or 'page-1',
+                'title': source.get('title') or 'Slide 1',
+                'description': source.get('description') or '',
+                'layout': source.get('layout') or 'grid',
+                'items': source.get('items')
+            }]
+    pages: List[Dict[str, Any]] = []
+    for idx, page in enumerate(candidates):
+        pages.append(_sanitize_kiosk_page(page, idx))
+    return pages
+
+
+def _flatten_kiosk_items(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    flattened: List[Dict[str, Any]] = []
+    for page in pages:
+        flattened.extend(page.get('items') or [])
+    return flattened
+
+
 def load_kiosk_config() -> Dict[str, Any]:
     ensure_kiosk_config_file()
     try:
@@ -274,41 +345,27 @@ def load_kiosk_config() -> Dict[str, Any]:
     except (json.JSONDecodeError, OSError):
         data = {}
     merged = copy.deepcopy(DEFAULT_KIOSK_CONFIG)
-    merged.update(data or {})
+    incoming = data or {}
+    merged.update({k: v for k, v in incoming.items() if k not in {'pages', 'items'}})
     merged['rotation_seconds'] = max(5, int(merged.get('rotation_seconds', 30) or 30))
     merged['refresh_minutes'] = max(1, int(merged.get('refresh_minutes', 15) or 15))
-    merged['items'] = [item for item in merged.get('items', []) if isinstance(item, dict)]
+    pages = _prepare_kiosk_pages_structure(incoming)
+    merged['pages'] = pages
+    merged['items'] = _flatten_kiosk_items(pages)
     return merged
 
 
 def save_kiosk_config(config: Dict[str, Any]) -> Dict[str, Any]:
     ensure_kiosk_config_file()
     sanitized = load_kiosk_config()
+    incoming = config or {}
     sanitized.update({
-        'rotation_seconds': max(5, int(config.get('rotation_seconds', sanitized['rotation_seconds']))),
-        'refresh_minutes': max(1, int(config.get('refresh_minutes', sanitized['refresh_minutes'])))
+        'rotation_seconds': max(5, int(incoming.get('rotation_seconds', sanitized['rotation_seconds']))),
+        'refresh_minutes': max(1, int(incoming.get('refresh_minutes', sanitized['refresh_minutes'])))
     })
-    raw_items = config.get('items', [])
-    sanitized_items: List[Dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            continue
-        entry = {
-            'id': item.get('id') or f"item-{len(sanitized_items)+1}",
-            'visualization_id': item.get('visualization_id'),
-            'scope': item.get('scope'),
-            'entity_id': item.get('entity_id'),
-            'entity_label': item.get('entity_label'),
-            'period_mode': item.get('period_mode') or 'latest-year',
-            'period': item.get('period'),
-            'custom_title': item.get('custom_title'),
-            'options': item.get('options') or {},
-            'notes': item.get('notes') or ''
-        }
-        if not entry['visualization_id']:
-            continue
-        sanitized_items.append(entry)
-    sanitized['items'] = sanitized_items
+    pages = _prepare_kiosk_pages_structure(incoming)
+    sanitized['pages'] = pages
+    sanitized['items'] = _flatten_kiosk_items(pages)
     with open(KIOSK_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(sanitized, f, indent=2)
     return sanitized

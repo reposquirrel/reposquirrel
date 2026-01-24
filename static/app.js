@@ -421,6 +421,60 @@ const kioskState = {
   overlayClock: null
 };
 
+function sanitizeKioskItem(item, pageId, index) {
+  if (!item || !item.visualization_id) {
+    return null;
+  }
+  const options = typeof item.options === "object" && item.options !== null ? item.options : {};
+  return {
+    id: item.id || `${pageId}-item-${index + 1}`,
+    visualization_id: item.visualization_id,
+    scope: item.scope,
+    entity_id: item.entity_id || "",
+    entity_label: item.entity_label || "",
+    period_mode: item.period_mode || "latest-year",
+    period: item.period || null,
+    custom_title: item.custom_title || "",
+    options,
+    notes: item.notes || ""
+  };
+}
+
+function sanitizeKioskPage(page, index) {
+  const safePage = page || {};
+  const pageId = safePage.id || `page-${index + 1}`;
+  const title = (safePage.title || "").trim() || `Page ${index + 1}`;
+  const description = (safePage.description || "").trim();
+  const layout = safePage.layout || "grid";
+  const rawItems = Array.isArray(safePage.items) ? safePage.items : [];
+  const items = rawItems
+    .map((item, itemIndex) => sanitizeKioskItem(item, pageId, itemIndex))
+    .filter(Boolean);
+  return { id: pageId, title, description, layout, items };
+}
+
+function normalizeKioskPages(source, options = {}) {
+  const config = source || {};
+  let rawPages = [];
+  if (Array.isArray(config.pages) && config.pages.length) {
+    rawPages = config.pages;
+  } else if (Array.isArray(config.items) && config.items.length) {
+    rawPages = [{
+      id: config.id || "page-1",
+      title: config.title || "Slide 1",
+      description: config.description || "",
+      layout: config.layout || "grid",
+      items: config.items
+    }];
+  }
+  const pages = rawPages.map((page, index) => sanitizeKioskPage(page, index));
+  if (pages.length === 0 && options.ensurePage) {
+    const fallback = sanitizeKioskPage({ id: "page-1", title: "Page 1", items: [] }, 0);
+    return [fallback];
+  }
+  return pages;
+}
+
 function isKioskMode() {
   return !!(APP_CONFIG && APP_CONFIG.kioskMode);
 }
@@ -10780,7 +10834,7 @@ async function fetchKioskConfig() {
 }
 
 async function buildKioskSlides(config) {
-  const items = Array.isArray(config?.items) ? config.items : [];
+  const pages = normalizeKioskPages(config);
   kioskState.rotationSeconds = Math.max(5, config?.rotation_seconds || 30);
   kioskState.refreshMinutes = Math.max(1, config?.refresh_minutes || 15);
   clearKioskTimers();
@@ -10788,23 +10842,32 @@ async function buildKioskSlides(config) {
   kioskState.currentIndex = -1;
   const container = ensureKioskSlideContainer();
   container.innerHTML = "";
-  if (!items.length) {
-    showKioskPlaceholder("No kiosk slides configured yet. Open Settings → Kiosk Mode to add some.");
+  if (!pages.length) {
+    showKioskPlaceholder("No kiosk pages configured yet. Open Settings → Kiosk Mode to add some.");
     return;
   }
   hideKioskPlaceholder();
-  for (const item of items) {
+  for (let i = 0; i < pages.length; i += 1) {
+    const page = pages[i];
     try {
-      const slide = await createKioskSlide(item);
+      const slide = await createKioskPage(page, i, container);
       if (slide) {
         kioskState.slides.push(slide);
-        container.appendChild(slide.element);
+        if (slide.element?.parentElement !== container) {
+          container.appendChild(slide.element);
+        }
       }
     } catch (error) {
-      console.warn("Slide failed", error);
-      const fallback = createKioskMessageSlide(error?.message || "Unable to render slide.");
+      console.warn("Page failed", error);
+      const fallback = createKioskMessageSlide(
+        error?.message || "Unable to render page.",
+        page?.title || `Page ${i + 1}`,
+        page?.description || ""
+      );
       kioskState.slides.push(fallback);
-      container.appendChild(fallback.element);
+      if (fallback.element?.parentElement !== container) {
+        container.appendChild(fallback.element);
+      }
     }
   }
   if (!kioskState.slides.length) {
@@ -10833,9 +10896,59 @@ function ensureKioskSlideContainer() {
   throw new Error('Missing kiosk stage container.');
 }
 
-function createKioskMessageSlide(message) {
+async function createKioskPage(page, index, mountContainer = null) {
+  const items = Array.isArray(page?.items) ? page.items : [];
+  const pageTitle = (page?.title || ``).trim() || `Page ${index + 1}`;
+  const pageSubtitle = (page?.description || ``).trim() || `${items.length} visualization${items.length === 1 ? '' : 's'}`;
+  if (!items.length) {
+    return createKioskMessageSlide("No visualizations configured for this page.", pageTitle, page?.description || "");
+  }
+  const slideEl = document.createElement("div");
+  slideEl.className = "kiosk-slide kiosk-page-slide";
+  slideEl.dataset.title = pageTitle;
+  slideEl.dataset.subtitle = page?.description || pageSubtitle;
+  if (mountContainer && mountContainer.appendChild) {
+    mountContainer.appendChild(slideEl);
+  }
+  const grid = document.createElement("div");
+  grid.className = "kiosk-page-grid";
+  slideEl.appendChild(grid);
+  let renderedCount = 0;
+  const renderContext = { key: null };
+  for (const item of items) {
+    try {
+      const panel = await createKioskVisualization(item, renderContext);
+      if (panel) {
+        grid.appendChild(panel.element);
+        reflowChartsForElement(panel.element);
+        renderedCount += 1;
+      }
+    } catch (error) {
+      console.warn("Visualization failed", error);
+      grid.appendChild(createKioskPanelMessage(error?.message || "Unable to render visualization."));
+    }
+  }
+  if (!renderedCount) {
+    return createKioskMessageSlide("No visualizations rendered for this page.", pageTitle, page?.description || "");
+  }
+  return { element: slideEl, definition: null, item: null, page };
+}
+
+function createKioskPanelMessage(message) {
+  const panel = document.createElement("div");
+  panel.className = "kiosk-panel";
+  const msgEl = document.createElement("div");
+  msgEl.className = "kiosk-panel-message";
+  msgEl.innerHTML = `<p>${message}</p>`;
+  panel.appendChild(msgEl);
+  return panel;
+}
+
+function createKioskMessageSlide(message, title = "Visualization", subtitle = "") {
   const slideEl = document.createElement("div");
   slideEl.className = "kiosk-slide";
+  slideEl.dataset.title = title || "Visualization";
+  slideEl.dataset.subtitle = subtitle || "";
   const msgEl = document.createElement("div");
   msgEl.className = "kiosk-message";
   msgEl.innerHTML = `<p>${message || 'Slide unavailable'}</p>`;
@@ -10843,51 +10956,55 @@ function createKioskMessageSlide(message) {
   return { element: slideEl, definition: null, item: null };
 }
 
-async function createKioskSlide(item) {
+async function createKioskVisualization(item, renderContext = null) {
   const def = VISUALIZATION_REGISTRY[item.visualization_id];
   if (!def) {
-    return createKioskMessageSlide(`Visualization "${item.visualization_id}" is not supported.`);
+    return { element: createKioskPanelMessage(`Visualization "${item.visualization_id}" is not supported.`), definition: null, item };
   }
   const scope = def.scope || item.scope;
   const requiresEntity = def.requiresEntity !== false;
   if (requiresEntity && !item.entity_id) {
-    return createKioskMessageSlide("No entity configured for this slide.");
+    return { element: createKioskPanelMessage("No entity configured for this slide."), definition: def, item };
   }
   let entity = null;
   if (requiresEntity) {
     entity = resolveEntityForScope(scope, item.entity_id);
     if (!entity) {
-      return createKioskMessageSlide(`Unable to find ${scope} "${item.entity_id}".`);
+      return { element: createKioskPanelMessage(`Unable to find ${scope} "${item.entity_id}".`), definition: def, item };
     }
   }
   let period = null;
   if (requiresEntity) {
     period = resolvePeriodForEntity(scope, entity, item.period_mode || "latest-year");
     if (!period) {
-      return createKioskMessageSlide(`No ${item.period_mode || 'latest'} period exists for ${item.entity_id}.`);
+      return { element: createKioskPanelMessage(`No ${item.period_mode || 'latest'} period exists for ${item.entity_id}.`), definition: def, item };
     }
   }
-  await renderSourceForKiosk(scope, entity, period, def, item);
   const entityKey = requiresEntity ? getEntityKey(scope, entity) : "";
+  const periodKey = requiresEntity ? buildPeriodKey(period) : "global";
+  const viewKey = def?.kioskView || def?.id || item.visualization_id;
+  const renderKey = `${scope || 'global'}|${viewKey}|${entityKey}|${periodKey}`;
+  const shouldRenderSource = !renderContext || renderContext.key !== renderKey;
+  if (shouldRenderSource) {
+    await renderSourceForKiosk(scope, entity, period, def, item);
+    if (renderContext) {
+      renderContext.key = renderKey;
+    }
+  }
   const element = await waitForVisualizationElementBySelector(item.visualization_id, entityKey, 9000);
   if (!element) {
-    return createKioskMessageSlide(`Could not render ${def.label}${entityKey ? ` for ${entityKey}` : ''}.`);
+    return { element: createKioskPanelMessage(`Could not render ${def.label}${entityKey ? ` for ${entityKey}` : ''}.`), definition: def, item };
   }
   if (element.parentElement) {
     element.parentElement.removeChild(element);
   }
   detachChartsForElement(element);
   element.style.height = "100%";
-  const slideEl = document.createElement("div");
-  slideEl.className = "kiosk-slide";
-  const entityLabel = requiresEntity ? (item.entity_label || getEntityLabel(scope, entity, entityKey)) : "";
-  const subtitle = requiresEntity
-    ? buildSlideSubtitle(entityLabel, period, item.period_mode || "latest-year")
-    : "";
-  slideEl.dataset.title = item.custom_title || def.label;
-  slideEl.dataset.subtitle = subtitle;
-  slideEl.appendChild(element);
-  return { element: slideEl, definition: def, item, entity, period };
+  const panel = document.createElement("div");
+  panel.className = "kiosk-panel";
+  panel.appendChild(element);
+  scheduleChartDetachment(element);
+  return { element: panel, definition: def, item, entity, period };
 }
 
 function getEntityKey(scope, entity) {
@@ -11002,8 +11119,9 @@ async function waitForVisualizationElementBySelector(vizId, entityKey, timeoutMs
     selectorParts.push(`[data-visualization-entity="${cssEscape(entityKey)}"]`);
   }
   const selector = selectorParts.join("");
+  const searchRoot = document.getElementById("app") || document;
   while (Date.now() - start < timeoutMs) {
-    const el = document.querySelector(selector) || document.querySelector(`[data-visualization-id="${vizId}"]`);
+    const el = searchRoot.querySelector(selector) || searchRoot.querySelector(`[data-visualization-id="${vizId}"]`);
     if (el) {
       return el;
     }
@@ -11026,6 +11144,62 @@ function detachChartsForElement(element) {
       delete state.charts[key];
     }
   });
+}
+
+function scheduleChartDetachment(element, attempts = 5, delay = 200) {
+  if (!element) return;
+  let remaining = Math.max(0, attempts);
+  if (remaining <= 0) return;
+  const tick = () => {
+    if (remaining <= 0) return;
+    detachChartsForElement(element);
+    remaining -= 1;
+    if (remaining > 0) {
+      setTimeout(tick, delay);
+    }
+  };
+  setTimeout(tick, delay);
+}
+
+function reflowChartsForElement(element) {
+  if (!element || typeof Chart === "undefined") {
+    return;
+  }
+  const canvases = element.querySelectorAll("canvas");
+  if (!canvases.length) {
+    return;
+  }
+  const resizeCharts = () => {
+    canvases.forEach((canvas) => {
+      let chartInstance = null;
+      if (typeof Chart.getChart === "function") {
+        chartInstance = Chart.getChart(canvas);
+      }
+      if (!chartInstance && typeof Chart.instances === "object") {
+        const candidates = Array.isArray(Chart.instances)
+          ? Chart.instances
+          : Object.values(Chart.instances || {});
+        chartInstance = candidates.find((instance) => instance?.canvas === canvas) || null;
+      }
+      if (!chartInstance) {
+        chartInstance = canvas._chart || canvas.__chart || null;
+      }
+      if (!chartInstance) {
+        return;
+      }
+      if (typeof chartInstance.resize === "function") {
+        chartInstance.resize();
+      }
+      if (typeof chartInstance.update === "function") {
+        chartInstance.update("none");
+      }
+    });
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(resizeCharts);
+  } else {
+    setTimeout(resizeCharts, 0);
+  }
 }
 
 function showKioskPlaceholder(message) {
@@ -11114,8 +11288,8 @@ let kioskSettingsLoading = false;
 function initializeKioskSettingsHandlers() {
   const saveBtn = $("save-kiosk-settings");
   const resetBtn = $("reset-kiosk-settings");
-  const addBtn = $("add-kiosk-item");
-  const container = $("kiosk-items-container");
+  const addPageBtn = $("add-kiosk-page");
+  const container = $("kiosk-pages-container");
   if (saveBtn) {
     saveBtn.addEventListener("click", saveKioskSettings);
     if (READ_ONLY_MODE) {
@@ -11126,16 +11300,16 @@ function initializeKioskSettingsHandlers() {
   if (resetBtn) {
     resetBtn.addEventListener("click", resetKioskSettings);
   }
-  if (addBtn) {
-    addBtn.addEventListener("click", addKioskItem);
+  if (addPageBtn) {
+    addPageBtn.addEventListener("click", addKioskPage);
     if (READ_ONLY_MODE) {
-      addBtn.disabled = true;
-      addBtn.title = "Disabled in read-only mode";
+      addPageBtn.disabled = true;
+      addPageBtn.title = "Disabled in read-only mode";
     }
   }
   if (container) {
-    container.addEventListener("change", handleKioskItemChange);
-    container.addEventListener("click", handleKioskItemClick);
+    container.addEventListener("change", handleKioskSettingsChange);
+    container.addEventListener("click", handleKioskSettingsClick);
   }
 }
 
@@ -11153,7 +11327,8 @@ async function loadKioskSettingsUI(force = false) {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    kioskSettingsConfig = await response.json();
+    const payload = await response.json();
+    kioskSettingsConfig = normalizeKioskSettingsConfig(payload);
     renderKioskSettingsForm();
   } catch (error) {
     console.error("Failed to load kiosk settings:", error);
@@ -11161,6 +11336,15 @@ async function loadKioskSettingsUI(force = false) {
   } finally {
     kioskSettingsLoading = false;
   }
+}
+
+function normalizeKioskSettingsConfig(rawConfig) {
+  const normalized = {
+    rotation_seconds: rawConfig?.rotation_seconds || 30,
+    refresh_minutes: rawConfig?.refresh_minutes || 15
+  };
+  normalized.pages = normalizeKioskPages(rawConfig);
+  return normalized;
 }
 
 function renderKioskSettingsForm() {
@@ -11174,27 +11358,114 @@ function renderKioskSettingsForm() {
     refreshInput.value = kioskSettingsConfig.refresh_minutes || 15;
     refreshInput.disabled = READ_ONLY_MODE;
   }
-  renderKioskItems();
+  renderKioskPages();
 }
 
-function renderKioskItems() {
-  const container = $("kiosk-items-container");
+function renderKioskPages() {
+  const container = $("kiosk-pages-container");
   if (!container) return;
   container.innerHTML = "";
-  const items = Array.isArray(kioskSettingsConfig?.items) ? kioskSettingsConfig.items : [];
-  if (!items.length) {
-    container.innerHTML = '<div class="empty-state">No kiosk slides configured yet.</div>';
+  const pages = Array.isArray(kioskSettingsConfig?.pages) ? kioskSettingsConfig.pages : [];
+  if (!pages.length) {
+    container.innerHTML = '<div class="empty-state">No kiosk pages configured yet.</div>';
     return;
   }
-  items.forEach((item) => {
-    container.appendChild(renderKioskItemCard(item));
+  pages.forEach((page, index) => {
+    container.appendChild(renderKioskPageCard(page, index));
   });
 }
 
-function renderKioskItemCard(item) {
+function renderKioskPageCard(page, index) {
+  const card = document.createElement("div");
+  card.className = "kiosk-page-card";
+  card.dataset.pageId = page.id;
+
+  const header = document.createElement("div");
+  header.className = "kiosk-page-header";
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "form-group";
+  const titleLabel = document.createElement("label");
+  titleLabel.textContent = "Page title";
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.value = page.title || `Page ${index + 1}`;
+  titleInput.placeholder = "e.g., Alerts overview";
+  titleInput.dataset.field = "title";
+  titleInput.dataset.pageId = page.id;
+  titleInput.disabled = READ_ONLY_MODE;
+  titleGroup.appendChild(titleLabel);
+  titleGroup.appendChild(titleInput);
+  header.appendChild(titleGroup);
+
+  const actions = document.createElement("div");
+  actions.className = "kiosk-page-actions";
+  const removePageBtn = document.createElement("button");
+  removePageBtn.className = "btn btn-link";
+  removePageBtn.type = "button";
+  removePageBtn.dataset.action = "remove-page";
+  removePageBtn.dataset.pageId = page.id;
+  removePageBtn.textContent = "Remove page";
+  removePageBtn.disabled = READ_ONLY_MODE;
+  actions.appendChild(removePageBtn);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  const descriptionRow = document.createElement("div");
+  descriptionRow.className = "kiosk-page-description";
+  const descriptionGroup = document.createElement("div");
+  descriptionGroup.className = "form-group";
+  const descriptionLabel = document.createElement("label");
+  descriptionLabel.textContent = "Subtitle (optional)";
+  const descriptionInput = document.createElement("input");
+  descriptionInput.type = "text";
+  descriptionInput.placeholder = "Shown under the page title in kiosk mode";
+  descriptionInput.value = page.description || "";
+  descriptionInput.dataset.field = "description";
+  descriptionInput.dataset.pageId = page.id;
+  descriptionInput.disabled = READ_ONLY_MODE;
+  descriptionGroup.appendChild(descriptionLabel);
+  descriptionGroup.appendChild(descriptionInput);
+  descriptionRow.appendChild(descriptionGroup);
+  card.appendChild(descriptionRow);
+
+  const itemsHeader = document.createElement("div");
+  itemsHeader.className = "kiosk-items-header";
+  const itemsTitle = document.createElement("h4");
+  itemsTitle.textContent = "Visualizations";
+  itemsHeader.appendChild(itemsTitle);
+  const addItemBtn = document.createElement("button");
+  addItemBtn.className = "btn btn-secondary";
+  addItemBtn.type = "button";
+  addItemBtn.dataset.action = "add-item";
+  addItemBtn.dataset.pageId = page.id;
+  addItemBtn.textContent = "+ Add visualization";
+  addItemBtn.disabled = READ_ONLY_MODE;
+  itemsHeader.appendChild(addItemBtn);
+  card.appendChild(itemsHeader);
+
+  const itemsWrapper = document.createElement("div");
+  itemsWrapper.className = "kiosk-page-items kiosk-items-container";
+  if (!page.items.length) {
+    const emptyState = document.createElement("div");
+    emptyState.className = "kiosk-page-empty";
+    emptyState.textContent = "No visualizations yet. Add one to include this page in kiosk mode.";
+    itemsWrapper.appendChild(emptyState);
+  } else {
+    page.items.forEach((item) => {
+      itemsWrapper.appendChild(renderKioskItemCard(page, item));
+    });
+  }
+  card.appendChild(itemsWrapper);
+
+  return card;
+}
+
+function renderKioskItemCard(page, item) {
   const card = document.createElement("div");
   card.className = "kiosk-item-card";
   card.dataset.itemId = item.id;
+  card.dataset.pageId = page.id;
   const vizOptions = getVisualizationOptions();
   const definition = VISUALIZATION_REGISTRY[item.visualization_id] || {};
   const scope = definition.scope || item.scope;
@@ -11206,6 +11477,7 @@ function renderKioskItemCard(item) {
   const selectVisualization = document.createElement("select");
   selectVisualization.dataset.field = "visualization_id";
   selectVisualization.dataset.itemId = item.id;
+  selectVisualization.dataset.pageId = page.id;
   selectVisualization.disabled = READ_ONLY_MODE;
   vizOptions.forEach((option) => {
     const opt = document.createElement("option");
@@ -11222,6 +11494,7 @@ function renderKioskItemCard(item) {
     const entitySelect = document.createElement("select");
     entitySelect.dataset.field = "entity_id";
     entitySelect.dataset.itemId = item.id;
+    entitySelect.dataset.pageId = page.id;
     entitySelect.disabled = READ_ONLY_MODE || !entityOptions.length;
     entityOptions.forEach((entity) => {
       const opt = document.createElement("option");
@@ -11246,6 +11519,7 @@ function renderKioskItemCard(item) {
     const periodSelect = document.createElement("select");
     periodSelect.dataset.field = "period_mode";
     periodSelect.dataset.itemId = item.id;
+    periodSelect.dataset.pageId = page.id;
     periodSelect.disabled = READ_ONLY_MODE;
     [
       { value: "latest-year", label: "Latest yearly data" },
@@ -11274,6 +11548,7 @@ function renderKioskItemCard(item) {
   titleInput.placeholder = "Custom title (optional)";
   titleInput.dataset.field = "custom_title";
   titleInput.dataset.itemId = item.id;
+  titleInput.dataset.pageId = page.id;
   titleInput.value = item.custom_title || "";
   titleInput.disabled = READ_ONLY_MODE;
   const actions = document.createElement("div");
@@ -11283,6 +11558,7 @@ function renderKioskItemCard(item) {
   removeBtn.className = "btn-link";
   removeBtn.dataset.action = "remove-item";
   removeBtn.dataset.itemId = item.id;
+  removeBtn.dataset.pageId = page.id;
   removeBtn.type = "button";
   removeBtn.textContent = "Remove";
   if (READ_ONLY_MODE) {
@@ -11325,12 +11601,25 @@ function getEntityOptions(scope) {
   return [];
 }
 
-function addKioskItem() {
+function addKioskItem(pageId) {
   if (READ_ONLY_MODE) return;
   const defs = getVisualizationOptions();
   if (!defs.length) {
     showKioskSettingsMessage("No visualizations are available yet.", "error");
     return;
+  }
+  kioskSettingsConfig = kioskSettingsConfig || { rotation_seconds: 30, refresh_minutes: 15, pages: [] };
+  kioskSettingsConfig.pages = kioskSettingsConfig.pages || [];
+  let page = kioskSettingsConfig.pages.find((p) => p.id === pageId);
+  if (!page) {
+    page = {
+      id: generateKioskPageId(),
+      title: `Page ${kioskSettingsConfig.pages.length + 1}`,
+      description: "",
+      layout: "grid",
+      items: []
+    };
+    kioskSettingsConfig.pages.push(page);
   }
   const def = defs[0];
   const requiresEntity = def.requiresEntity !== false;
@@ -11343,21 +11632,60 @@ function addKioskItem() {
     entity_id: requiresEntity ? (firstEntity?.value || "") : "",
     entity_label: requiresEntity ? (firstEntity?.label || "") : "",
     period_mode: requiresEntity ? "latest-year" : "",
-    custom_title: ""
+    custom_title: "",
+    options: {}
   };
-  kioskSettingsConfig = kioskSettingsConfig || { rotation_seconds: 30, refresh_minutes: 15, items: [] };
-  kioskSettingsConfig.items = kioskSettingsConfig.items || [];
-  kioskSettingsConfig.items.push(newItem);
-  renderKioskItems();
+  page.items.push(newItem);
+  renderKioskPages();
 }
 
-function handleKioskItemChange(event) {
-  const field = event.target?.dataset?.field;
-  const itemId = event.target?.dataset?.itemId;
-  if (!field || !itemId || !kioskSettingsConfig?.items) {
+function addKioskPage() {
+  if (READ_ONLY_MODE) return;
+  kioskSettingsConfig = kioskSettingsConfig || { rotation_seconds: 30, refresh_minutes: 15, pages: [] };
+  kioskSettingsConfig.pages = kioskSettingsConfig.pages || [];
+  const newPage = {
+    id: generateKioskPageId(),
+    title: `Page ${kioskSettingsConfig.pages.length + 1}`,
+    description: "",
+    layout: "grid",
+    items: []
+  };
+  kioskSettingsConfig.pages.push(newPage);
+  renderKioskPages();
+}
+
+function removeKioskPage(pageId) {
+  if (READ_ONLY_MODE) return;
+  if (!kioskSettingsConfig?.pages?.length) {
     return;
   }
-  const item = kioskSettingsConfig.items.find((i) => i.id === itemId);
+  if (!confirm("Remove this kiosk page?")) {
+    return;
+  }
+  kioskSettingsConfig.pages = kioskSettingsConfig.pages.filter((page) => page.id !== pageId);
+  renderKioskPages();
+}
+
+function handleKioskSettingsChange(event) {
+  const field = event.target?.dataset?.field;
+  const pageId = event.target?.dataset?.pageId;
+  if (!field || !pageId || !kioskSettingsConfig?.pages) {
+    return;
+  }
+  const page = kioskSettingsConfig.pages.find((p) => p.id === pageId);
+  if (!page) {
+    return;
+  }
+  const itemId = event.target?.dataset?.itemId;
+  if (!itemId) {
+    if (field === "title") {
+      page.title = event.target.value;
+    } else if (field === "description") {
+      page.description = event.target.value;
+    }
+    return;
+  }
+  const item = page.items.find((i) => i.id === itemId);
   if (!item) {
     return;
   }
@@ -11380,7 +11708,7 @@ function handleKioskItemChange(event) {
       item.entity_label = "";
       item.period_mode = "";
     }
-    renderKioskItems();
+    renderKioskPages();
     return;
   }
   if (field === "entity_id") {
@@ -11401,17 +11729,32 @@ function handleKioskItemChange(event) {
   }
 }
 
-function handleKioskItemClick(event) {
+function handleKioskSettingsClick(event) {
   const action = event.target?.dataset?.action;
-  if (action !== "remove-item") {
+  if (!action) {
     return;
   }
-  const itemId = event.target.dataset.itemId;
-  if (!itemId || !kioskSettingsConfig?.items) {
+  if (action === "remove-item") {
+    const pageId = event.target.dataset.pageId;
+    const itemId = event.target.dataset.itemId;
+    if (!pageId || !itemId || !kioskSettingsConfig?.pages) {
+      return;
+    }
+    const page = kioskSettingsConfig.pages.find((p) => p.id === pageId);
+    if (!page) {
+      return;
+    }
+    page.items = page.items.filter((item) => item.id !== itemId);
+    renderKioskPages();
     return;
   }
-  kioskSettingsConfig.items = kioskSettingsConfig.items.filter((item) => item.id !== itemId);
-  renderKioskItems();
+  if (action === "add-item") {
+    addKioskItem(event.target.dataset.pageId);
+    return;
+  }
+  if (action === "remove-page") {
+    removeKioskPage(event.target.dataset.pageId);
+  }
 }
 
 async function saveKioskSettings() {
@@ -11441,7 +11784,7 @@ async function saveKioskSettings() {
       throw new Error(data.error || `HTTP ${response.status}`);
     }
     if (data?.config) {
-      kioskSettingsConfig = data.config;
+      kioskSettingsConfig = normalizeKioskSettingsConfig(data.config);
     }
     showKioskSettingsMessage("Kiosk configuration saved.", "success");
   } catch (error) {
@@ -11478,6 +11821,13 @@ function generateKioskItemId() {
     return window.crypto.randomUUID();
   }
   return `kiosk-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
+function generateKioskPageId() {
+  if (window.crypto?.randomUUID) {
+    return `page-${window.crypto.randomUUID()}`;
+  }
+  return `page-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
 
 // --------------------------
