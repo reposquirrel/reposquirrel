@@ -80,7 +80,7 @@ Loop curated repo metrics and/or PagerDuty responders on hallway displays via `/
 - **Historical analysis** - How has contribution changed over time?
 - **Onboarding insights** - Who are the experts in each area?
 - **Resource planning** - Where is development effort being spent?
-
+- **Kiosk mode ** - Show visualizations / alerts in the developement room or management area, based on git or pagerDuty
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
