@@ -116,6 +116,8 @@ DEFAULT_KIOSK_CONFIG = {
     "pages": []
 }
 
+VALID_KIOSK_LAYOUTS = {"grid", "vertical", "horizontal"}
+
 update_settings_lock = threading.Lock()
 background_scheduler_event = threading.Event()
 background_scheduler_stop_event = threading.Event()
@@ -293,7 +295,9 @@ def _sanitize_kiosk_page(page: Dict[str, Any], index: int) -> Dict[str, Any]:
     page_id = page.get('id') or f"page-{index + 1}"
     title = (page.get('title') or '').strip() or f"Page {index + 1}"
     description = (page.get('description') or '').strip()
-    layout = (page.get('layout') or 'grid').strip() or 'grid'
+    layout = (page.get('layout') or 'grid').strip().lower() or 'grid'
+    if layout not in VALID_KIOSK_LAYOUTS:
+        layout = 'grid'
     raw_items = page.get('items') if isinstance(page.get('items'), list) else []
     items: List[Dict[str, Any]] = []
     for item_index, raw in enumerate(raw_items):

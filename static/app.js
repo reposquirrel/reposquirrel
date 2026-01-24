@@ -421,6 +421,13 @@ const kioskState = {
   overlayClock: null
 };
 
+const ALLOWED_KIOSK_LAYOUTS = ["grid", "vertical", "horizontal"];
+
+function normalizeKioskLayout(value) {
+  const layout = (value || "grid").toString().trim().toLowerCase();
+  return ALLOWED_KIOSK_LAYOUTS.includes(layout) ? layout : "grid";
+}
+
 function sanitizeKioskItem(item, pageId, index) {
   if (!item || !item.visualization_id) {
     return null;
@@ -445,7 +452,7 @@ function sanitizeKioskPage(page, index) {
   const pageId = safePage.id || `page-${index + 1}`;
   const title = (safePage.title || "").trim() || `Page ${index + 1}`;
   const description = (safePage.description || "").trim();
-  const layout = safePage.layout || "grid";
+  const layout = normalizeKioskLayout(safePage.layout);
   const rawItems = Array.isArray(safePage.items) ? safePage.items : [];
   const items = rawItems
     .map((item, itemIndex) => sanitizeKioskItem(item, pageId, itemIndex))
@@ -463,7 +470,7 @@ function normalizeKioskPages(source, options = {}) {
       id: config.id || "page-1",
       title: config.title || "Slide 1",
       description: config.description || "",
-      layout: config.layout || "grid",
+      layout: normalizeKioskLayout(config.layout),
       items: config.items
     }];
   }
@@ -10911,7 +10918,9 @@ async function createKioskPage(page, index, mountContainer = null) {
     mountContainer.appendChild(slideEl);
   }
   const grid = document.createElement("div");
-  grid.className = "kiosk-page-grid";
+  const layout = normalizeKioskLayout(page?.layout);
+  grid.className = `kiosk-page-grid kiosk-layout-${layout}`;
+  grid.dataset.layout = layout;
   slideEl.appendChild(grid);
   let renderedCount = 0;
   const renderContext = { key: null };
@@ -11427,6 +11436,32 @@ function renderKioskPageCard(page, index) {
   descriptionGroup.appendChild(descriptionLabel);
   descriptionGroup.appendChild(descriptionInput);
   descriptionRow.appendChild(descriptionGroup);
+
+  const layoutGroup = document.createElement("div");
+  layoutGroup.className = "form-group";
+  const layoutLabel = document.createElement("label");
+  layoutLabel.textContent = "Layout";
+  const layoutSelect = document.createElement("select");
+  layoutSelect.dataset.field = "layout";
+  layoutSelect.dataset.pageId = page.id;
+  layoutSelect.disabled = READ_ONLY_MODE;
+  [
+    { value: "grid", label: "Balanced grid" },
+    { value: "vertical", label: "Vertical stack" },
+    { value: "horizontal", label: "Horizontal row" }
+  ].forEach(({ value, label }) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    if (normalizeKioskLayout(page.layout) === value) {
+      opt.selected = true;
+    }
+    layoutSelect.appendChild(opt);
+  });
+  layoutGroup.appendChild(layoutLabel);
+  layoutGroup.appendChild(layoutSelect);
+  descriptionRow.appendChild(layoutGroup);
+
   card.appendChild(descriptionRow);
 
   const itemsHeader = document.createElement("div");
@@ -11682,6 +11717,8 @@ function handleKioskSettingsChange(event) {
       page.title = event.target.value;
     } else if (field === "description") {
       page.description = event.target.value;
+    } else if (field === "layout") {
+      page.layout = normalizeKioskLayout(event.target.value);
     }
     return;
   }

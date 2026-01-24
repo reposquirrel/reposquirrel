@@ -4979,6 +4979,23 @@ body.kiosk-mode #kiosk-stage {
   padding-right: 6px;
 }
 
+.kiosk-page-grid.kiosk-layout-vertical {
+  display: flex;
+  flex-direction: column;
+}
+
+.kiosk-page-grid.kiosk-layout-horizontal {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.kiosk-page-grid.kiosk-layout-vertical > .kiosk-panel,
+.kiosk-page-grid.kiosk-layout-horizontal > .kiosk-panel {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .kiosk-panel {
   min-height: 0;
   display: flex;
