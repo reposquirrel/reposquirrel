@@ -10,7 +10,7 @@
 docker run -p 5000:5000 -v repos:/app/repos -v stats:/app/stats -v configuration:/app/configuration ghcr.io/reposquirrel/reposquirrel:latest
 ```
 
-A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases.
+A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases. Also integrates with for example pagerDuty to give helicopter view of the developement and support activities.
 
 ![Line of code Evolution](screenshots/lines_of_code_evolution.png)
 ![Developer Details](screenshots/developer_details.png)
