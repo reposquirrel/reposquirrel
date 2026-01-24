@@ -1,0 +1,214 @@
+[
+  {
+    "name": "Rust",
+    "extensions": ["rs"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Python",
+    "extensions": ["py"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "JavaScript",
+    "extensions": ["js", "jsx"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "TypeScript",
+    "extensions": ["ts", "tsx"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "C",
+    "extensions": ["c", "h"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "C++",
+    "extensions": ["cpp", "cc", "hpp", "hh"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Java",
+    "extensions": ["java"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Go",
+    "extensions": ["go"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Shell",
+    "extensions": ["sh"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "Perl",
+    "extensions": ["pl"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "Ruby",
+    "extensions": ["rb"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "gemfile",
+      "rakefile",
+      "podfile",
+      "capfile",
+      "vagrantfile",
+      "brewfile"
+    ]
+  },
+  {
+    "name": "PHP",
+    "extensions": ["php"],
+    "line_markers": ["//", "#"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "HTML",
+    "extensions": ["html", "htm"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "CSS",
+    "extensions": ["css"],
+    "line_markers": [],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Markdown",
+    "extensions": ["md", "markdown", "mdown", "mkd", "mkdn", "mdx"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "SVG",
+    "extensions": ["svg"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "XML",
+    "extensions": ["xml"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "YAML",
+    "extensions": ["yml", "yaml"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "TOML",
+    "extensions": ["toml"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "pipfile",
+      "cargo.lock"
+    ]
+  },
+  {
+    "name": "INI",
+    "extensions": ["ini", "cfg", "conf", "properties"],
+    "line_markers": [";", "#"],
+    "block_markers": null,
+    "special_filenames": [
+      ".editorconfig",
+      ".env",
+      ".envrc"
+    ]
+  },
+  {
+    "name": "Text",
+    "extensions": ["txt", "text"],
+    "line_markers": [],
+    "block_markers": null,
+    "special_filenames": [
+      "license",
+      "copying",
+      "readme",
+      "changelog",
+      "changes",
+      "news"
+    ]
+  },
+  {
+    "name": "reStructuredText",
+    "extensions": ["rst"],
+    "line_markers": [],
+    "block_markers": null
+  },
+  {
+    "name": "AsciiDoc",
+    "extensions": ["adoc", "asciidoc"],
+    "line_markers": ["//"],
+    "block_markers": null
+  },
+  {
+    "name": "JSON",
+    "extensions": ["json"],
+    "line_markers": [],
+    "block_markers": null
+  },
+  {
+    "name": "Starlark",
+    "extensions": ["bzl"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "build",
+      "build.bazel",
+      "workspace",
+      "workspace.bazel",
+      "module.bazel"
+    ]
+  },
+  {
+    "name": "Just",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "justfile"
+    ]
+  },
+  {
+    "name": "Dockerfile",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["dockerfile"]
+  },
+  {
+    "name": "Make",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["makefile", "gnumakefile"]
+  },
+  {
+    "name": "CMake",
+    "extensions": ["cmake"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["cmakelists.txt"]
+  }
+]
