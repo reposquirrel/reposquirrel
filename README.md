@@ -41,6 +41,11 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 - **Interactive dashboard** - Web-based UI for exploring data
 - **Real-time updates** - Live progress tracking for long-running analyses
 
+### 🖥️ Kiosk Mode
+Loop curated repo metrics and/or PagerDuty responders on hallway displays via `/kiosk`
+
+![Kiosk Mode PagerDuty](screenshots/kioskmode_pagerDuty.png)
+
 ### 🚨 PagerDuty Alerts
 - **Alerts mode** - A dedicated dashboard tab that visualizes your PagerDuty incidents alongside repo metrics
 - **Automatic ingestion** - Configure an API token once and every “Run Update” pull grabs the last 12 months of incidents
