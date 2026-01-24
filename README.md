@@ -31,7 +31,7 @@ A comprehensive Git repository analytics tool that provides detailed insights in
 - **Path-based filtering** - Define services by directory paths
 - **Unified statistics** - Aggregate data across related subsystems
 
-![Subsystem Overview](screenshots/hurd_subsystem_overview.png)
+![Subsystem Overview](screenshots/subsystem_overview.png)
 
 ### 🎯 Advanced Features
 - **Blame analysis** - Full repository ownership tracking
