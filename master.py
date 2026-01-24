@@ -276,7 +276,7 @@ def compute_month_range(year: int, month: int) -> tuple[str, str]:
 def run_cmd(cmd: list[str], desc: str) -> None:
     """Run a subprocess command with some logging and error handling."""
     logger.info(f"\n=== Running: {desc} ===")
-    logger.info("Command:", " ".join(cmd))
+    logger.info("Command: %s", " ".join(cmd))
     try:
         result = subprocess.run(cmd, check=False)
     except FileNotFoundError as e:

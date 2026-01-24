@@ -37,6 +37,7 @@ BADGE_CACHE_FILE = os.path.join(STATS_ROOT, "badges_summary.json")
 PAGERDUTY_STATS_DIR = os.path.join(STATS_ROOT, "pagerduty")
 PAGERDUTY_OVERVIEW_FILE = os.path.join(PAGERDUTY_STATS_DIR, "overview.json")
 PAGERDUTY_INCIDENTS_FILE = os.path.join(PAGERDUTY_STATS_DIR, "incidents_last_year.json")
+SSH_KNOWN_HOSTS_FILE = os.path.join(BASE_DIR, "configuration", "known_hosts")
 
 MONTH_ABBREVIATIONS = [
     "Jan",
@@ -129,6 +130,40 @@ background_state = {
 
 background_state_lock = threading.Lock()
 background_cancel_event = threading.Event()
+
+
+def _ensure_known_hosts_file(path: str) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8"):
+            pass
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return path
+
+
+def _is_ssh_repo_url(url: str) -> bool:
+    if not url:
+        return False
+    return url.startswith("git@") or url.startswith("ssh://")
+
+
+def _build_git_clone_env(repo_url: str) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_PROGRESS_DELAY"] = "1"
+    if _is_ssh_repo_url(repo_url):
+        known_hosts_path = _ensure_known_hosts_file(SSH_KNOWN_HOSTS_FILE)
+        ssh_cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+        ]
+        env["GIT_SSH_COMMAND"] = " ".join(shlex.quote(part) for part in ssh_cmd)
+    return env
 
 
 def get_background_state_snapshot() -> Dict[str, Any]:
@@ -3654,8 +3689,7 @@ def api_settings_repositories():
                             print(f"🔄 Clone worker started for {repo_name}")
                             
                             # Clone with progress output - simplified approach
-                            env = os.environ.copy()
-                            env['GIT_PROGRESS_DELAY'] = '1'
+                            env = _build_git_clone_env(repo_url)
                             
                             print(f"🚀 Starting git clone: git clone --progress {repo_url} {repo_path}")
                             

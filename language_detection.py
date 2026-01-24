@@ -8,11 +8,231 @@ can classify files without shelling out to an external tool.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "ocloc_languages.json")
+logger = logging.getLogger(__name__)
+
+DATA_PATH = Path(__file__).resolve().parent / "data" / "ocloc_languages.json"
+FALLBACK_LANGUAGE_SPECS = json.loads(
+    """[
+  {
+    "name": "Rust",
+    "extensions": ["rs"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Python",
+    "extensions": ["py"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "JavaScript",
+    "extensions": ["js", "jsx"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "TypeScript",
+    "extensions": ["ts", "tsx"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "C",
+    "extensions": ["c", "h"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "C++",
+    "extensions": ["cpp", "cc", "hpp", "hh"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Java",
+    "extensions": ["java"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Go",
+    "extensions": ["go"],
+    "line_markers": ["//"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Shell",
+    "extensions": ["sh"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "Perl",
+    "extensions": ["pl"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "Ruby",
+    "extensions": ["rb"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "gemfile",
+      "rakefile",
+      "podfile",
+      "capfile",
+      "vagrantfile",
+      "brewfile"
+    ]
+  },
+  {
+    "name": "PHP",
+    "extensions": ["php"],
+    "line_markers": ["//", "#"],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "HTML",
+    "extensions": ["html", "htm"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "CSS",
+    "extensions": ["css"],
+    "line_markers": [],
+    "block_markers": ["/*", "*/"]
+  },
+  {
+    "name": "Markdown",
+    "extensions": ["md", "markdown", "mdown", "mkd", "mkdn", "mdx"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "SVG",
+    "extensions": ["svg"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "XML",
+    "extensions": ["xml"],
+    "line_markers": [],
+    "block_markers": ["<!--", "-->"]
+  },
+  {
+    "name": "YAML",
+    "extensions": ["yml", "yaml"],
+    "line_markers": ["#"],
+    "block_markers": null
+  },
+  {
+    "name": "TOML",
+    "extensions": ["toml"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "pipfile",
+      "cargo.lock"
+    ]
+  },
+  {
+    "name": "INI",
+    "extensions": ["ini", "cfg", "conf", "properties"],
+    "line_markers": [";", "#"],
+    "block_markers": null,
+    "special_filenames": [
+      ".editorconfig",
+      ".env",
+      ".envrc"
+    ]
+  },
+  {
+    "name": "Text",
+    "extensions": ["txt", "text"],
+    "line_markers": [],
+    "block_markers": null,
+    "special_filenames": [
+      "license",
+      "copying",
+      "readme",
+      "changelog",
+      "changes",
+      "news"
+    ]
+  },
+  {
+    "name": "reStructuredText",
+    "extensions": ["rst"],
+    "line_markers": [],
+    "block_markers": null
+  },
+  {
+    "name": "AsciiDoc",
+    "extensions": ["adoc", "asciidoc"],
+    "line_markers": ["//"],
+    "block_markers": null
+  },
+  {
+    "name": "JSON",
+    "extensions": ["json"],
+    "line_markers": [],
+    "block_markers": null
+  },
+  {
+    "name": "Starlark",
+    "extensions": ["bzl"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "build",
+      "build.bazel",
+      "workspace",
+      "workspace.bazel",
+      "module.bazel"
+    ]
+  },
+  {
+    "name": "Just",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": [
+      "justfile"
+    ]
+  },
+  {
+    "name": "Dockerfile",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["dockerfile"]
+  },
+  {
+    "name": "Make",
+    "extensions": [],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["makefile", "gnumakefile"]
+  },
+  {
+    "name": "CMake",
+    "extensions": ["cmake"],
+    "line_markers": ["#"],
+    "block_markers": null,
+    "special_filenames": ["cmakelists.txt"]
+  }
+]"""
+)
 DEFAULT_IGNORE_DIRS = {
     ".git",
     "node_modules",
@@ -27,11 +247,18 @@ DEFAULT_IGNORE_DIRS = {
 
 @lru_cache(maxsize=1)
 def _load_language_tables() -> tuple[list[dict], Dict[str, str], Dict[str, str]]:
-    if not os.path.isfile(DATA_PATH):
-        raise FileNotFoundError(f"Missing language data file: {DATA_PATH}")
-
-    with open(DATA_PATH, "r", encoding="utf-8") as fh:
-        specs = json.load(fh)
+    if DATA_PATH.is_file():
+        with open(DATA_PATH, "r", encoding="utf-8") as fh:
+            specs = json.load(fh)
+    else:
+        logger.warning("Missing language data file: %s; using embedded defaults", DATA_PATH)
+        specs = FALLBACK_LANGUAGE_SPECS
+        try:
+            DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DATA_PATH, "w", encoding="utf-8") as fh:
+                json.dump(specs, fh, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            logger.debug("Unable to write fallback language data to %s: %s", DATA_PATH, exc)
 
     ext_map: Dict[str, str] = {}
     special_map: Dict[str, str] = {}
