@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install system dependencies required by repo-squirrel
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl ca-certificates build-essential pkg-config && \
+    apt-get install -y --no-install-recommends git curl ca-certificates openssh-client build-essential pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/opt/cargo \
