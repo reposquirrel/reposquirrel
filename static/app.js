@@ -2168,6 +2168,25 @@ function formatRankSummary(rankInfo) {
   return text;
 }
 
+function computeCommitsPerWeek(summary) {
+  if (!summary) {
+    return 0;
+  }
+  const commits = Number(summary.total_commits) || 0;
+  const fromDate = summary.from ? new Date(summary.from) : null;
+  const toDate = summary.to ? new Date(summary.to) : null;
+  if (!fromDate || !toDate || Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    return commits;
+  }
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daySpan = Math.max(1, Math.round((toDate - fromDate) / msPerDay) + 1);
+  const weeks = daySpan / 7;
+  if (!Number.isFinite(weeks) || weeks <= 0) {
+    return commits;
+  }
+  return commits / weeks;
+}
+
 async function ensurePagerDutyOverview(forceReload = false) {
   if (!forceReload && state.alerts.overview) {
     return state.alerts.overview;
@@ -5462,6 +5481,24 @@ async function renderUserDashboard(user, month, summary) {
     heatmapContainer.appendChild(heatmapElement);
     
     heatmapCard.appendChild(heatmapContainer);
+
+    const commitsPerWeekRank = kpiRankings.commits_per_week;
+    const commitsPerWeekValue = commitsPerWeekRank && typeof commitsPerWeekRank.value === "number"
+      ? commitsPerWeekRank.value
+      : computeCommitsPerWeek(summary);
+    if (Number.isFinite(commitsPerWeekValue)) {
+      const frequencyBlock = document.createElement("div");
+      frequencyBlock.className = "contribution-frequency";
+      const rankText = formatRankSummary(commitsPerWeekRank);
+      frequencyBlock.innerHTML = `
+        <span class="frequency-label">Average commits per week</span>
+        <strong>${commitsPerWeekValue.toFixed(1)}</strong>
+        ${rankText ? `<span class="frequency-rank">${rankText}</span>` : ""}
+      `;
+      frequencyBlock.title = "Total commits divided by the number of weeks in this period.";
+      heatmapCard.appendChild(frequencyBlock);
+    }
+
     main.appendChild(heatmapCard);
   } catch (error) {
     console.error("Error creating contribution heatmap:", error);

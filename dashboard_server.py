@@ -62,13 +62,6 @@ _CLOC_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
 _BADGE_CACHE_DATA: Optional[Dict[str, Any]] = None
 _BADGE_CACHE_MTIME: Optional[float] = None
 
-USER_METRIC_FIELDS: Dict[str, Dict[str, Any]] = {
-    "total_commits": {},
-    "total_lines_added": {"fallback": ["total_additions"]},
-    "total_lines_deleted": {"fallback": ["total_deletions"]},
-    "net_lines": {},
-}
-
 _SUBSYSTEM_TOUCH_COUNT_CACHE: Dict[int, Dict[str, int]] = {}
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -931,7 +924,42 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _extract_metric_value(summary: Dict[str, Any], metric: str, config: Dict[str, Any]) -> int:
+def _calculate_commits_per_week(summary: Dict[str, Any]) -> float:
+    total_commits = _safe_int(summary.get("total_commits"), 0)
+    from_date = summary.get("from")
+    to_date = summary.get("to")
+    if not from_date or not to_date:
+        return float(total_commits)
+    try:
+        start = datetime.strptime(from_date, "%Y-%m-%d")
+        end = datetime.strptime(to_date, "%Y-%m-%d")
+    except ValueError:
+        return float(total_commits)
+    day_span = max(1, (end - start).days + 1)
+    weeks = day_span / 7.0
+    if weeks <= 0:
+        return float(total_commits)
+    return total_commits / weeks
+
+
+USER_METRIC_FIELDS: Dict[str, Dict[str, Any]] = {
+    "total_commits": {},
+    "total_lines_added": {"fallback": ["total_additions"]},
+    "total_lines_deleted": {"fallback": ["total_deletions"]},
+    "net_lines": {},
+    "commits_per_week": {"compute": _calculate_commits_per_week},
+}
+
+
+def _extract_metric_value(summary: Dict[str, Any], metric: str, config: Dict[str, Any]) -> float:
+    compute_fn = config.get("compute")
+    if callable(compute_fn):
+        try:
+            value = compute_fn(summary)
+        except Exception:
+            value = None
+        return float(value) if value is not None else 0.0
+
     value = summary.get(metric)
     if value is None:
         for fallback_key in config.get("fallback", []):
@@ -939,7 +967,7 @@ def _extract_metric_value(summary: Dict[str, Any], metric: str, config: Dict[str
                 value = summary.get(fallback_key)
                 if value is not None:
                     break
-    return _safe_int(value, 0)
+    return float(_safe_int(value, 0))
 
 
 def _load_user_month_rows(from_date: str, to_date: str) -> List[Tuple[str, Dict[str, Any]]]:
@@ -990,11 +1018,11 @@ def _build_peer_rankings(rows: List[Tuple[str, Dict[str, Any]]], target_slug: st
         return {}
     rankings: Dict[str, Dict[str, Any]] = {}
     for metric, config in USER_METRIC_FIELDS.items():
-        metric_values: List[Tuple[str, int]] = []
+        metric_values: List[Tuple[str, float]] = []
         for slug, summary in rows:
             metric_values.append((slug, _extract_metric_value(summary, metric, config)))
         metric_values.sort(key=lambda item: item[1], reverse=True)
-        prev_value: Optional[int] = None
+        prev_value: Optional[float] = None
         current_rank = 0
         target_info: Optional[Dict[str, Any]] = None
         for index, (slug, value) in enumerate(metric_values, start=1):

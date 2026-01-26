@@ -1563,6 +1563,33 @@ body {
   min-height: 180px;
 }
 
+.contribution-frequency {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.contribution-frequency strong {
+  font-size: 18px;
+  color: #fde68a;
+}
+
+.contribution-frequency .frequency-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.contribution-frequency .frequency-rank {
+  font-size: 12px;
+  color: #facc15;
+}
+
 .github-heatmap {
   position: relative;
   min-width: 800px; /* Minimum width to display a year properly */
