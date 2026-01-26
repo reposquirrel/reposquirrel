@@ -19,6 +19,9 @@ let state = {
   rendering: false, // flag to prevent concurrent renders
   loadingUsersOverview: false, // flag to prevent concurrent users overview loads
   loadingTeamsOverview: false, // flag to prevent concurrent teams overview loads
+  userRequestToken: 0,
+  userRenderTokenCounter: 0,
+  activeUserRenderToken: null,
   integrations: {
     pagerduty: {
       has_token: false,
@@ -327,6 +330,19 @@ function buildPeriodKey(period) {
     return `year:${period.label || period.from || ''}`;
   }
   return `range:${period.from || ''}:${period.to || ''}`;
+}
+
+function startUserRenderCycle() {
+  state.userRenderTokenCounter = (state.userRenderTokenCounter || 0) + 1;
+  state.activeUserRenderToken = state.userRenderTokenCounter;
+  return state.activeUserRenderToken;
+}
+
+function isActiveUserRender(token) {
+  if (!token) {
+    return true;
+  }
+  return state.activeUserRenderToken === token;
 }
 
 function tagVisualization(element, vizId, context = {}) {
@@ -2047,6 +2063,11 @@ function findSubsystemByRepoName(repoName) {
 // --------------------------
 
 async function loadUserMonth(user, month) {
+  if (!user || !month) {
+    return;
+  }
+  const requestToken = (state.userRequestToken || 0) + 1;
+  state.userRequestToken = requestToken;
   try {
     let url;
     if (month.is_yearly) {
@@ -2057,8 +2078,16 @@ async function loadUserMonth(user, month) {
       url = "/api/users/" + encodeURIComponent(user.slug) + "/month/" + encodeURIComponent(month.from) + "/" + encodeURIComponent(month.to);
     }
     const data = await fetchJSON(url);
-    await renderUserDashboard(user, month, data);
+    if (state.userRequestToken !== requestToken) {
+      console.log("Stale user month response discarded", user.slug, month.label);
+      return;
+    }
+    const renderToken = startUserRenderCycle();
+    await renderUserDashboard(user, month, data, renderToken);
   } catch (err) {
+    if (state.userRequestToken !== requestToken) {
+      return;
+    }
     clearMain();
     setViewHeader("Error", "Failed to load user stats: " + err.message, "Error");
   }
@@ -5155,7 +5184,10 @@ async function createLastMonthStatsCard(user, isTeam = false) {
 // Dashboard rendering
 // --------------------------
 
-async function renderUserDashboard(user, month, summary) {
+async function renderUserDashboard(user, month, summary, renderToken = null) {
+  if (!isActiveUserRender(renderToken)) {
+    return;
+  }
   clearMain();
 
   const periodType = month.is_yearly ? "Yearly" : "Monthly";
@@ -5234,6 +5266,9 @@ async function renderUserDashboard(user, month, summary) {
   // Load and render badges (only for yearly view)
   if (month.is_yearly) {
     loadUserBadges(user.slug).then(badges => {
+      if (!isActiveUserRender(renderToken)) {
+        return;
+      }
       try {
         console.log("Rendering badges for user", user.slug, ":", badges?.length || 0, "badges");
         if (badges && badges.length > 0) {
@@ -5243,19 +5278,26 @@ async function renderUserDashboard(user, month, summary) {
         }
       } catch (error) {
         console.error("Error rendering user badges:", error);
-        // Create error element to show to user
+        if (!isActiveUserRender(renderToken)) {
+          return;
+        }
         const errorDiv = document.createElement("div");
         errorDiv.className = "error";
         errorDiv.textContent = "Error loading badges: " + error.message;
         main.appendChild(errorDiv);
       }
     }).catch(error => {
+      if (!isActiveUserRender(renderToken)) {
+        return;
+      }
       console.error("Error loading user badges:", error);
-      // Don't break the UI, just log the error
     });
     
     // Load and render ownership timelines for subsystems where user is top maintainer
     loadUserOwnershipTimeline(user.slug).then(timelines => {
+      if (!isActiveUserRender(renderToken)) {
+        return;
+      }
       try {
         if (timelines && Object.keys(timelines).length > 0) {
           renderUserOwnershipTimelines(user.slug, timelines, main);
@@ -5264,6 +5306,9 @@ async function renderUserDashboard(user, month, summary) {
         console.error("Error rendering ownership timelines:", error);
       }
     }).catch(error => {
+      if (!isActiveUserRender(renderToken)) {
+        return;
+      }
       console.error("Error loading ownership timelines:", error);
     });
   }
@@ -5397,6 +5442,9 @@ async function renderUserDashboard(user, month, summary) {
     const timelineYear = parseInt(month.label, 10);
     loadUserSubsystemActivity(user.slug, timelineYear)
       .then(activity => {
+        if (!isActiveUserRender(renderToken)) {
+          return;
+        }
         try {
           renderUserSubsystemTimeline(user.slug, activity, subsystemTimelineAnchor);
         } catch (error) {
@@ -5407,6 +5455,9 @@ async function renderUserDashboard(user, month, summary) {
         }
       })
       .catch(error => {
+        if (!isActiveUserRender(renderToken)) {
+          return;
+        }
         console.error("Failed to load user subsystem timeline:", error);
         if (subsystemTimelineAnchor.parentElement) {
           subsystemTimelineAnchor.remove();
@@ -5436,6 +5487,9 @@ async function renderUserDashboard(user, month, summary) {
       const year = month.label;
       try {
         const resp = await fetchJSON(`/api/users/${encodeURIComponent(user.slug)}/daily-stats/${year}`);
+        if (!isActiveUserRender(renderToken)) {
+          return;
+        }
         const dailyStats = resp.daily_stats || [];
         dailyStats.forEach(ds => {
           heatmapData[ds.date] = {
@@ -5499,6 +5553,10 @@ async function renderUserDashboard(user, month, summary) {
       heatmapCard.appendChild(frequencyBlock);
     }
 
+    if (!isActiveUserRender(renderToken)) {
+      return;
+    }
+
     main.appendChild(heatmapCard);
   } catch (error) {
     console.error("Error creating contribution heatmap:", error);
@@ -5519,20 +5577,26 @@ async function renderUserDashboard(user, month, summary) {
     
     // Create the monthly chart asynchronously
     const year = parseInt(month.label);
-    setTimeout(() => createMonthlyChart("chart-monthly", user.slug, year, false), 100);
+    const chartRenderToken = renderToken;
+    setTimeout(() => {
+      if (!isActiveUserRender(chartRenderToken)) {
+        return;
+      }
+      createMonthlyChart("chart-monthly", user.slug, year, false);
+    }, 100);
   }
 
   // Monthly Statistics Card (different behavior for monthly vs yearly view)
   if (month.is_yearly) {
     // For yearly view: show last month statistics
     const lastMonthCard = await createLastMonthStatsCard(user.slug, false);
-    if (lastMonthCard) {
+    if (isActiveUserRender(renderToken) && lastMonthCard) {
       main.appendChild(lastMonthCard);
     }
   } else {
     // For monthly view: show selected month statistics using summary data
     const selectedMonthCard = await createSelectedMonthStatsCard(user.slug, month, summary, false);
-    if (selectedMonthCard) {
+    if (isActiveUserRender(renderToken) && selectedMonthCard) {
       main.appendChild(selectedMonthCard);
     }
   }
@@ -5596,7 +5660,13 @@ async function renderUserDashboard(user, month, summary) {
   main.appendChild(dailyChartCard);
   
   // Create the daily chart asynchronously
-  setTimeout(() => createDailyChart("chart-daily-activity", user.slug, chartYear, chartMonth, false), 100);
+  const dailyChartRenderToken = renderToken;
+  setTimeout(() => {
+    if (!isActiveUserRender(dailyChartRenderToken)) {
+      return;
+    }
+    createDailyChart("chart-daily-activity", user.slug, chartYear, chartMonth, false);
+  }, 100);
 
   // Chart containers
   const chartRow = document.createElement("div");
