@@ -62,6 +62,15 @@ _CLOC_CACHE_DATA: Optional[Dict[str, Dict[str, Any]]] = None
 _BADGE_CACHE_DATA: Optional[Dict[str, Any]] = None
 _BADGE_CACHE_MTIME: Optional[float] = None
 
+USER_METRIC_FIELDS: Dict[str, Dict[str, Any]] = {
+    "total_commits": {},
+    "total_lines_added": {"fallback": ["total_additions"]},
+    "total_lines_deleted": {"fallback": ["total_deletions"]},
+    "net_lines": {},
+}
+
+_SUBSYSTEM_TOUCH_COUNT_CACHE: Dict[int, Dict[str, int]] = {}
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
 
@@ -773,9 +782,10 @@ def refresh_badge_cache() -> Optional[Dict[str, Any]]:
 # Automatic cleanup on server startup
 def reset_update_state():
     """Reset update process state - called on startup and after repo operations"""
-    global update_process_active
+    global update_process_active, _SUBSYSTEM_TOUCH_COUNT_CACHE
     print("🔄 Resetting update process state...")
     update_process_active = False
+    _SUBSYSTEM_TOUCH_COUNT_CACHE.clear()
     
     # Clear any remaining messages in the queue
     queue_cleared = 0
@@ -906,6 +916,203 @@ def list_user_months() -> Dict[str, List[Dict[str, Any]]]:
         if month_entries:
             result[user_slug] = month_entries
     return result
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_metric_value(summary: Dict[str, Any], metric: str, config: Dict[str, Any]) -> int:
+    value = summary.get(metric)
+    if value is None:
+        for fallback_key in config.get("fallback", []):
+            if fallback_key in summary:
+                value = summary.get(fallback_key)
+                if value is not None:
+                    break
+    return _safe_int(value, 0)
+
+
+def _load_user_month_rows(from_date: str, to_date: str) -> List[Tuple[str, Dict[str, Any]]]:
+    users_root = os.path.join(STATS_ROOT, "users")
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    if not os.path.isdir(users_root):
+        return rows
+    for user_slug in os.listdir(users_root):
+        user_dir = os.path.join(users_root, user_slug)
+        if not os.path.isdir(user_dir):
+            continue
+        summary_path = find_user_summary(user_slug, from_date, to_date)
+        if not os.path.isfile(summary_path):
+            continue
+        try:
+            rows.append((user_slug, load_json(summary_path)))
+        except Exception:
+            continue
+    return rows
+
+
+def _load_user_year_rows(year: int) -> List[Tuple[str, Dict[str, Any]]]:
+    users_root = os.path.join(STATS_ROOT, "users")
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    if not os.path.isdir(users_root):
+        return rows
+    filename = f"{year}.json"
+    for user_slug in os.listdir(users_root):
+        user_dir = os.path.join(users_root, user_slug, "year")
+        if not os.path.isdir(user_dir):
+            continue
+        summary_path = os.path.join(user_dir, filename)
+        if not os.path.isfile(summary_path):
+            continue
+        try:
+            rows.append((user_slug, load_json(summary_path)))
+        except Exception:
+            continue
+    return rows
+
+
+def _build_peer_rankings(rows: List[Tuple[str, Dict[str, Any]]], target_slug: str) -> Dict[str, Dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return {}
+    rows_map = {slug: summary for slug, summary in rows}
+    if target_slug not in rows_map:
+        return {}
+    rankings: Dict[str, Dict[str, Any]] = {}
+    for metric, config in USER_METRIC_FIELDS.items():
+        metric_values: List[Tuple[str, int]] = []
+        for slug, summary in rows:
+            metric_values.append((slug, _extract_metric_value(summary, metric, config)))
+        metric_values.sort(key=lambda item: item[1], reverse=True)
+        prev_value: Optional[int] = None
+        current_rank = 0
+        target_info: Optional[Dict[str, Any]] = None
+        for index, (slug, value) in enumerate(metric_values, start=1):
+            if prev_value is None or value != prev_value:
+                current_rank = index
+                prev_value = value
+            if slug == target_slug:
+                percentile = 100.0 if total == 0 else round((current_rank / total) * 100, 1)
+                target_info = {
+                    "rank": current_rank,
+                    "value": value,
+                    "total": total,
+                    "percentile": percentile,
+                }
+                break
+        if target_info:
+            rankings[metric] = target_info
+    return rankings
+
+
+def compute_user_month_peer_rankings(user_slug: str, from_date: str, to_date: str) -> Dict[str, Dict[str, Any]]:
+    rows = _load_user_month_rows(from_date, to_date)
+    return _build_peer_rankings(rows, user_slug)
+
+
+def _get_subsystem_touch_counts(year: int) -> Dict[str, int]:
+    if year in _SUBSYSTEM_TOUCH_COUNT_CACHE:
+        return _SUBSYSTEM_TOUCH_COUNT_CACHE[year]
+    subsystems_root = os.path.join(STATS_ROOT, "subsystems")
+    counts: Dict[str, Set[str]] = defaultdict(set)
+    if os.path.isdir(subsystems_root):
+        for subsystem_name in os.listdir(subsystems_root):
+            subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+            if not os.path.isdir(subsystem_dir):
+                continue
+            for entry in os.listdir(subsystem_dir):
+                if "_" not in entry:
+                    continue
+                date_from_str, date_to_str = entry.split("_", 1)
+                if not date_from_str.startswith(f"{year:04d}-"):
+                    continue
+                try:
+                    date_from = datetime.strptime(date_from_str, "%Y-%m-%d")
+                    date_to = datetime.strptime(date_to_str, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if (date_to - date_from).days > 40:
+                    continue
+                summary_path = os.path.join(subsystem_dir, entry, "summary.json")
+                if not os.path.isfile(summary_path):
+                    continue
+                try:
+                    summary_data = load_json(summary_path)
+                except Exception:
+                    continue
+                developers = summary_data.get("developers")
+                if not isinstance(developers, dict):
+                    continue
+                for dev_slug, dev_data in developers.items():
+                    if not isinstance(dev_data, dict):
+                        continue
+                    commits = _safe_int(dev_data.get("commits"), 0)
+                    lines_added = _safe_int(dev_data.get("lines_added"), 0)
+                    lines_deleted = _safe_int(dev_data.get("lines_deleted"), 0)
+                    changed_lines = _safe_int(dev_data.get("changed_lines"), 0)
+                    if commits or lines_added or lines_deleted or changed_lines:
+                        counts[dev_slug].add(subsystem_name)
+    result = {slug: len(subsystems) for slug, subsystems in counts.items()}
+    _SUBSYSTEM_TOUCH_COUNT_CACHE[year] = result
+    return result
+
+
+def get_subsystem_touch_rank(
+    year: int,
+    user_slug: str,
+    population_slugs: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    counts = _get_subsystem_touch_counts(year)
+    population: List[str]
+    if population_slugs:
+        population = list(dict.fromkeys(population_slugs))
+    else:
+        population = list(counts.keys())
+    if user_slug not in population:
+        population.append(user_slug)
+    total = len(population)
+    if total == 0:
+        return None
+    values: List[Tuple[str, int]] = [(slug, counts.get(slug, 0)) for slug in population]
+    values.sort(key=lambda item: item[1], reverse=True)
+    prev_value: Optional[int] = None
+    current_rank = 0
+    for index, (slug, value) in enumerate(values, start=1):
+        if prev_value is None or value != prev_value:
+            current_rank = index
+            prev_value = value
+        if slug == user_slug:
+            percentile = 100.0 if total == 0 else round((current_rank / total) * 100, 1)
+            return {
+                "rank": current_rank,
+                "value": value,
+                "total": total,
+                "percentile": percentile,
+            }
+    return None
+
+
+def compute_user_year_peer_rankings(user_slug: str, year: int) -> Dict[str, Dict[str, Any]]:
+    rows = _load_user_year_rows(year)
+    rankings = _build_peer_rankings(rows, user_slug)
+    if rows:
+        population_slugs = [slug for slug, _ in rows]
+    else:
+        population_slugs = []
+    subsystem_rank = get_subsystem_touch_rank(year, user_slug, population_slugs)
+    if subsystem_rank:
+        rankings["subsystems_touched"] = subsystem_rank
+    return rankings
 
 
 def list_repos_with_blame() -> List[str]:
@@ -2353,6 +2560,9 @@ def api_user_month(user_slug: str, from_date: str, to_date: str):
     if not os.path.isfile(path):
         abort(404, description="User month summary not found")
     data = load_json(path)
+    peer_rankings = compute_user_month_peer_rankings(user_slug, from_date, to_date)
+    if peer_rankings:
+        data["peer_rankings"] = peer_rankings
     return jsonify(data)
 
 
@@ -2366,6 +2576,9 @@ def api_user_year(user_slug: str, year: int):
     capacity_profile = get_developer_capacity_profile(user_slug, min_equivalent=0.9)
     if capacity_profile:
         data["developer_capacity_profile"] = capacity_profile
+    peer_rankings = compute_user_year_peer_rankings(user_slug, year)
+    if peer_rankings:
+        data["peer_rankings"] = peer_rankings
     return jsonify(data)
 
 
@@ -2374,6 +2587,13 @@ def api_user_subsystem_activity(user_slug: str, year: int):
     """Return subsystem timeline for a developer."""
     try:
         payload = build_user_subsystem_activity(user_slug, year)
+        population_rows = _load_user_year_rows(year)
+        population_slugs = [slug for slug, _ in population_rows] if population_rows else None
+        subsystem_rank = get_subsystem_touch_rank(year, user_slug, population_slugs)
+        if subsystem_rank:
+            payload.setdefault("summary", {})
+            payload["summary"].setdefault("peer_rankings", {})
+            payload["summary"]["peer_rankings"]["subsystems_touched"] = subsystem_rank
         return jsonify(payload)
     except Exception as exc:
         app.logger.error("Error generating subsystem activity for %s: %s", user_slug, exc)

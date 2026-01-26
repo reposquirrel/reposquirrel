@@ -407,6 +407,12 @@ body {
   font-weight: 600;
 }
 
+.kpi-rank {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
 .kpi-subvalue {
   margin-top: 2px;
   font-size: 11px;
@@ -3883,6 +3889,13 @@ body {
 .subsystem-timeline-stat .stat-description {
   font-size: 12px;
   color: #a5b4fc;
+}
+
+.subsystem-timeline-stat .stat-rank {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #fbbf24;
+  font-weight: 500;
 }
 
 .subsystem-timeline-row {

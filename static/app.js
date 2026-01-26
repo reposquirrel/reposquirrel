@@ -2154,6 +2154,20 @@ function describePagerDutyPeriod(period, fallbackDays = 365) {
   }
 }
 
+function formatRankSummary(rankInfo) {
+  if (!rankInfo || typeof rankInfo.rank !== "number" || typeof rankInfo.total !== "number" || rankInfo.total <= 0) {
+    return "";
+  }
+  const rank = Math.max(1, Math.round(rankInfo.rank));
+  const total = Math.max(1, Math.round(rankInfo.total));
+  let text = `#${rank} of ${total}`;
+  if (typeof rankInfo.percentile === "number" && total > 1) {
+    const percentile = Math.max(1, Math.min(100, Math.round(rankInfo.percentile)));
+    text += ` · top ${percentile}%`;
+  }
+  return text;
+}
+
 async function ensurePagerDutyOverview(forceReload = false) {
   if (!forceReload && state.alerts.overview) {
     return state.alerts.overview;
@@ -5155,20 +5169,28 @@ async function renderUserDashboard(user, month, summary) {
   const kpiContainer = document.createElement("div");
   kpiContainer.className = "kpi-grid";
 
+  const kpiRankings = summary.peer_rankings || {};
   const kpis = [
-    { label: "Total commits", value: summary.total_commits || 0 },
-    { label: "Lines added", value: summary.total_lines_added || 0 },
-    { label: "Lines deleted", value: summary.total_lines_deleted || 0 },
+    { label: "Total commits", value: summary.total_commits || 0, metric: "total_commits" },
+    { label: "Lines added", value: summary.total_lines_added || 0, metric: "total_lines_added" },
+    { label: "Lines deleted", value: summary.total_lines_deleted || 0, metric: "total_lines_deleted" },
     {
       label: "Net lines",
-      value: summary.net_lines || 0
+      value: summary.net_lines || 0,
+      metric: "net_lines"
     }
   ];
 
   kpis.forEach((k) => {
     const card = document.createElement("div");
     card.className = "kpi-card";
-    card.innerHTML = '<div class="kpi-label">' + k.label + '</div><div class="kpi-value">' + k.value + '</div>';
+    const displayValue = typeof k.value === "number" ? k.value.toLocaleString() : k.value;
+    const rankText = formatRankSummary(kpiRankings[k.metric]);
+    card.innerHTML = `
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value">${displayValue}</div>
+      ${rankText ? `<div class="kpi-rank">${rankText}</div>` : ""}
+    `;
     kpiContainer.appendChild(card);
   });
 
@@ -14887,6 +14909,7 @@ function renderUserSubsystemTimeline(userSlug, activityData, mountPoint) {
   const statsRow = document.createElement("div");
   statsRow.className = "subsystem-timeline-stats";
 
+  const subsystemRankInfo = summary?.peer_rankings?.subsystems_touched;
   const statsConfig = [
     {
       label: "Active Months",
@@ -14897,6 +14920,7 @@ function renderUserSubsystemTimeline(userSlug, activityData, mountPoint) {
       label: "Subsystems Touched",
       value: summary.subsystems_touched || 0,
       description: "Unique subsystems this year",
+      rankInfo: subsystemRankInfo,
     },
     {
       label: "Lines Changed",
@@ -14933,6 +14957,17 @@ function renderUserSubsystemTimeline(userSlug, activityData, mountPoint) {
     statCard.appendChild(statLabel);
     statCard.appendChild(statValue);
     statCard.appendChild(statDescription);
+
+    if (stat.rankInfo) {
+      const rankText = formatRankSummary(stat.rankInfo);
+      if (rankText) {
+        const rankEl = document.createElement("div");
+        rankEl.className = "stat-rank";
+        rankEl.textContent = rankText;
+        statCard.appendChild(rankEl);
+      }
+    }
+
     statsRow.appendChild(statCard);
   });
 
