@@ -421,10 +421,10 @@ def compute_subsystem_significant_ownership(
         if not existing:
             deduped[slug] = owner
             continue
-        if owner.get("total_lines", 0) > existing.get("total_lines", 0):
+        if owner.get("share", 0) > existing.get("share", 0):
             deduped[slug] = owner
             continue
-        if owner.get("total_lines", 0) == existing.get("total_lines", 0) and owner.get("share", 0) > existing.get("share", 0):
+        if owner.get("share", 0) == existing.get("share", 0) and owner.get("total_lines", 0) > existing.get("total_lines", 0):
             deduped[slug] = owner
 
     filtered = [owner for owner in deduped.values() if owner.get("share", 0) > ownership_threshold]

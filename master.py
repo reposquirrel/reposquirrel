@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import multiprocessing
 from collections import defaultdict
 import importlib
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple
 
 try:
     from pagerduty_sync import sync_pagerduty_data
@@ -1900,9 +1900,8 @@ def create_team_yearly_summaries(stats_root: str, year: int, first_month: int, l
 
 def generate_subsystem_language_stats(repos_root: str, output_root: str, services_file: str, max_parallel_workers: Optional[int] = None) -> None:
     """Generate language statistics for each subsystem using tokei."""
-    
-    # Load services configuration
-    services_config = {}
+
+    services_config: dict = {}
     if os.path.isfile(services_file):
         try:
             with open(services_file, "r", encoding="utf-8") as f:
@@ -1911,58 +1910,68 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
             logger.info(f"Warning: Error loading services file {services_file}: {e}")
     else:
         logger.info(f"Services file {services_file} not found, will only process standalone repositories")
-    
+
     stats_root = os.path.join(output_root, "stats")
     subsystems_stats_root = os.path.join(stats_root, "subsystems")
-    
-    # Check if tokei is available
+
     if not _get_tokei_version():
         logger.info("tokei not found. Please install tokei to generate language statistics.")
         logger.info("See https://github.com/XAMPPRocky/tokei for installation instructions or set TOKEI_BIN to the binary path.")
         return
-    
+
     logger.info("Generating language statistics for subsystems...")
-    
-    # Create a mapping of subsystem -> list of (repo, paths)
-    subsystem_repos = {}
-    
-    # First, add services defined in configuration/services.json
+
+    repo_service_paths: dict[str, set[str]] = defaultdict(set)
+    subsystem_repos: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
     for repo_name, services in services_config.items():
-        for service_name, paths in services.items():
-            if service_name not in subsystem_repos:
-                subsystem_repos[service_name] = []
-            subsystem_repos[service_name].append((repo_name, paths))
-    
-    # Next, discover standalone repositories (those that exist on disk but not in configuration/services.json)
+        for service_name, raw_paths in services.items():
+            clean_paths = [p.rstrip("/") for p in (raw_paths or []) if p]
+            subsystem_repos[service_name].append(
+                {
+                    "repo": repo_name,
+                    "paths": clean_paths or [""],
+                    "exclude_paths": [],
+                }
+            )
+            for path in clean_paths:
+                repo_service_paths[repo_name].add(path)
+
     repos_root_abs = os.path.abspath(repos_root)
     if os.path.exists(repos_root_abs):
-        logger.info("  Looking for standalone repositories...")
+        logger.info("  Discovering repository-backed subsystems...")
         for org_dir in os.listdir(repos_root_abs):
             org_path = os.path.join(repos_root_abs, org_dir)
             if not os.path.isdir(org_path):
                 continue
-                
+
             for repo_dir in os.listdir(org_path):
                 repo_path = os.path.join(org_path, repo_dir)
                 git_dir = os.path.join(repo_path, ".git")
-                
-                if os.path.exists(git_dir):
-                    repo_name = f"{org_dir}/{repo_dir}"
-                    
-                    # Check if this repository is NOT already handled by configuration/services.json
-                    if repo_name not in services_config:
-                        logger.info(f"  Found standalone repository: {repo_name}")
-                        # Use the repo directory name as the subsystem name
-                        subsystem_name = repo_dir
-                        if subsystem_name not in subsystem_repos:
-                            subsystem_repos[subsystem_name] = []
-                        subsystem_repos[subsystem_name].append((repo_name, [""]))  # Empty path = entire repo
-    
+                if not os.path.isdir(git_dir):
+                    continue
+
+                repo_name = f"{org_dir}/{repo_dir}"
+                subsystem_name = repo_dir
+                exclude_paths = sorted(repo_service_paths.get(repo_name, set()))
+
+                # Ensure each repository is also treated as its own subsystem (the remainder)
+                existing_specs = subsystem_repos[subsystem_name]
+                already_present = any(spec.get("repo") == repo_name and spec.get("paths") == [""] for spec in existing_specs)
+                if not already_present:
+                    subsystem_repos[subsystem_name].append(
+                        {
+                            "repo": repo_name,
+                            "paths": [""],
+                            "exclude_paths": exclude_paths,
+                        }
+                    )
+
     subsystem_items = sorted(subsystem_repos.items())
     if not subsystem_items:
         logger.info("  No subsystems discovered for language statistics.")
         return
-    
+
     if max_parallel_workers is not None and max_parallel_workers > 0:
         max_workers = max_parallel_workers
     else:
@@ -1972,46 +1981,45 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
         logger.info(f"  Processing {len(subsystem_items)} subsystems in parallel (CPU workers: {max_workers})")
     else:
         logger.info("  Processing subsystems sequentially")
-    
-    def process_subsystem(subsystem_name, repo_paths):
+
+    def process_subsystem(subsystem_name: str, repo_specs: list[dict[str, Any]]) -> bool:
         try:
             logger.info(f"  Processing subsystem: {subsystem_name}")
             subsystem_dir = os.path.join(subsystems_stats_root, subsystem_name)
             os.makedirs(subsystem_dir, exist_ok=True)
-            all_paths = []
-            for repo_name, service_paths in repo_paths:
-                repo_path = os.path.join(repos_root, repo_name)
-                if not os.path.exists(repo_path):
-                    logger.info(f"    Repository not found: {repo_path}, skipping...")
+
+            aggregate = _init_language_stats()
+            produced = False
+
+            for spec in repo_specs:
+                repo_name = spec.get("repo")
+                include_paths = spec.get("paths") or [""]
+                exclude_paths = spec.get("exclude_paths") or []
+                stats = _compute_repo_language_stats(repos_root, repo_name, include_paths, exclude_paths)
+                if not stats:
                     continue
-                for service_path in service_paths:
-                    if service_path == "":
-                        all_paths.append(repo_path)
-                    else:
-                        full_path = os.path.join(repo_path, service_path.rstrip("/"))
-                        if os.path.exists(full_path):
-                            all_paths.append(full_path)
-            if not all_paths:
+                _merge_language_stats(aggregate, stats)
+                produced = True
+
+            if not produced:
                 logger.info(f"    No valid paths found for subsystem {subsystem_name}, skipping...")
                 return False
-            cloc_result = run_cloc_for_paths(all_paths)
-            if cloc_result:
-                languages_file = os.path.join(subsystem_dir, "languages.json")
-                with open(languages_file, "w", encoding="utf-8") as f:
-                    json.dump(cloc_result, f, indent=2)
-                logger.info(f"    Generated language stats: {languages_file}")
-                return True
-            logger.info(f"    No language statistics generated for {subsystem_name}")
-            return False
+
+            aggregate["generated_at"] = datetime.utcnow().isoformat() + "Z"
+            languages_file = os.path.join(subsystem_dir, "languages.json")
+            with open(languages_file, "w", encoding="utf-8") as f:
+                json.dump(aggregate, f, indent=2)
+            logger.info(f"    Generated language stats: {languages_file}")
+            return True
         except Exception as e:
             logger.info(f"    Error generating language stats for {subsystem_name}: {e}")
             return False
-    
+
     if use_parallel:
         futures = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for subsystem_name, repo_paths in subsystem_items:
-                futures[executor.submit(process_subsystem, subsystem_name, repo_paths)] = subsystem_name
+            for subsystem_name, repo_specs in subsystem_items:
+                futures[executor.submit(process_subsystem, subsystem_name, repo_specs)] = subsystem_name
             for future in as_completed(futures):
                 subsystem_name = futures[future]
                 try:
@@ -2019,8 +2027,106 @@ def generate_subsystem_language_stats(repos_root: str, output_root: str, service
                 except Exception as exc:
                     logger.info(f"    Unexpected error for subsystem {subsystem_name}: {exc}")
     else:
-        for subsystem_name, repo_paths in subsystem_items:
-            process_subsystem(subsystem_name, repo_paths)
+        for subsystem_name, repo_specs in subsystem_items:
+            process_subsystem(subsystem_name, repo_specs)
+
+
+def _init_language_stats() -> dict:
+    return {
+        "generated_at": "",
+        "tokei_version": _get_tokei_version() or "unknown",
+        "elapsed_seconds": 0.0,
+        "languages": {},
+        "totals": {
+            "files": 0,
+            "blank_lines": 0,
+            "comment_lines": 0,
+            "code_lines": 0,
+        },
+    }
+
+
+def _merge_language_stats(target: dict, addition: dict) -> None:
+    if not addition:
+        return
+    target["elapsed_seconds"] += addition.get("elapsed_seconds", 0.0)
+    if addition.get("tokei_version"):
+        target["tokei_version"] = addition["tokei_version"]
+
+    lang_keys = ("files", "blank_lines", "comment_lines", "code_lines")
+    for lang, stats in (addition.get("languages") or {}).items():
+        entry = target["languages"].setdefault(
+            lang,
+            {key: 0 for key in lang_keys},
+        )
+        for key in lang_keys:
+            entry[key] += stats.get(key, 0)
+
+    for key in target["totals"]:
+        target["totals"][key] += (addition.get("totals", {}) or {}).get(key, 0)
+
+
+def _subtract_language_stats(base: dict, subtraction: dict) -> dict:
+    if not subtraction:
+        return base
+
+    lang_keys = ("files", "blank_lines", "comment_lines", "code_lines")
+    for lang, stats in (subtraction.get("languages") or {}).items():
+        entry = base.get("languages", {}).get(lang)
+        if not entry:
+            continue
+        for key in lang_keys:
+            entry[key] = max(0, entry.get(key, 0) - stats.get(key, 0))
+        if all(entry.get(key, 0) == 0 for key in lang_keys):
+            base["languages"].pop(lang, None)
+
+    for key in ("files", "blank_lines", "comment_lines", "code_lines"):
+        base["totals"][key] = max(0, base["totals"].get(key, 0) - (subtraction.get("totals", {}) or {}).get(key, 0))
+
+    base["elapsed_seconds"] += subtraction.get("elapsed_seconds", 0.0)
+    return base
+
+
+def _compute_repo_language_stats(
+    repos_root: str,
+    repo_name: Optional[str],
+    include_paths: List[str],
+    exclude_paths: List[str],
+) -> Optional[dict]:
+    if not repo_name:
+        return None
+    repo_path = os.path.join(repos_root, repo_name)
+    if not os.path.isdir(repo_path):
+        logger.info(f"    Repository not found: {repo_path}, skipping...")
+        return None
+
+    include_abs: List[str] = []
+    for rel_path in include_paths or [""]:
+        rel = (rel_path or "").rstrip("/")
+        candidate = repo_path if not rel else os.path.join(repo_path, rel)
+        if os.path.exists(candidate):
+            include_abs.append(candidate)
+    if not include_abs:
+        return None
+
+    stats = run_cloc_for_paths(include_abs)
+    if not stats:
+        return None
+
+    exclude_abs: List[str] = []
+    for rel_path in exclude_paths or []:
+        rel = (rel_path or "").rstrip("/")
+        if not rel:
+            continue
+        candidate = os.path.join(repo_path, rel)
+        if os.path.exists(candidate):
+            exclude_abs.append(candidate)
+    if exclude_abs:
+        excluded = run_cloc_for_paths(exclude_abs)
+        if excluded:
+            _subtract_language_stats(stats, excluded)
+
+    return stats
 
 
 def run_cloc_for_paths(paths: list) -> dict:
@@ -2117,16 +2223,22 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
     subsystems_root = os.path.join(stats_root, "subsystems")
     repos_root_abs = os.path.abspath(repos_root)
 
-    # Build subsystem -> {repo, paths} mapping
+    # Build subsystem -> {repo, paths, exclude_paths} mapping
     subsystem_repos: dict[str, dict] = {}
+    repo_service_paths: dict[str, set[str]] = defaultdict(set)
 
     # First, services defined in services.json
     for repo_key, services in services_config.items():
         for service_name, paths in services.items():
             cleaned_paths = [p.rstrip("/") for p in paths if p]
-            subsystem_repos.setdefault(service_name, {"repo": repo_key, "paths": cleaned_paths or [""]})
+            subsystem_repos.setdefault(
+                service_name,
+                {"repo": repo_key, "paths": cleaned_paths or [""], "exclude_paths": []},
+            )
+            for path in cleaned_paths:
+                repo_service_paths[repo_key].add(path)
 
-    # Then, standalone repos: each repo basename is its own subsystem
+    # Then, ensure each repo (or the remainder of it) is represented
     if os.path.isdir(repos_root_abs):
         for org_dir in os.listdir(repos_root_abs):
             org_path = os.path.join(repos_root_abs, org_dir)
@@ -2141,9 +2253,12 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
 
                 repo_key = f"{org_dir}/{repo_dir}"
                 subsystem_name = repo_dir
+                exclude_paths = sorted(repo_service_paths.get(repo_key, set()))
 
-                # Do not overwrite explicit mapping from services.json
-                subsystem_repos.setdefault(subsystem_name, {"repo": repo_key, "paths": [""]})
+                subsystem_repos.setdefault(
+                    subsystem_name,
+                    {"repo": repo_key, "paths": [""], "exclude_paths": exclude_paths},
+                )
 
     subsystem_items = sorted(subsystem_repos.items())
     if not subsystem_items:
@@ -2160,7 +2275,8 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
             continue
         paths = info.get("paths") or [""]
         filtered_paths = tuple(p for p in paths if p)
-        prepared_subsystems.append((subsystem_name, repo_key, repo_path, filtered_paths))
+        exclude_paths = tuple(info.get("exclude_paths") or [])
+        prepared_subsystems.append((subsystem_name, repo_key, repo_path, filtered_paths, exclude_paths))
 
     if not prepared_subsystems:
         logger.info("[loc-precompute] No valid subsystems to process after repository checks.")
@@ -2171,16 +2287,16 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
         subsystem_name: {
             label: {"month": label, "code_lines": 0, "files": 0} for label in month_labels
         }
-        for subsystem_name, _, _, _ in prepared_subsystems
+        for subsystem_name, _, _, _, _ in prepared_subsystems
     }
 
     exclude_patterns = _tokei_exclude_patterns()
 
     tasks = []
-    for subsystem_name, repo_key, repo_path, filtered_paths in prepared_subsystems:
+    for subsystem_name, repo_key, repo_path, filtered_paths, exclude_paths in prepared_subsystems:
         logger.info("[loc-precompute] %s (%s)", subsystem_name, repo_key)
         for month in range(1, 13):
-            tasks.append((subsystem_name, repo_key, repo_path, filtered_paths, month))
+            tasks.append((subsystem_name, repo_key, repo_path, filtered_paths, exclude_paths, month))
 
     if max_parallel_workers is not None and max_parallel_workers > 0:
         max_workers = max_parallel_workers
@@ -2193,8 +2309,9 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
         max_workers,
     )
 
-    def process_month_task(subsystem_name, repo_key, repo_path, filtered_paths, month):
+    def process_month_task(subsystem_name, repo_key, repo_path, filtered_paths, exclude_paths, month):
         filtered_list = list(filtered_paths)
+        exclude_list = [p for p in (exclude_paths or []) if p]
         since = f"{year:04d}-{month:02d}-01"
         until = f"{year + 1:04d}-01-01" if month == 12 else f"{year:04d}-{month + 1:02d}-01"
         month_label = f"{year:04d}-{month:02d}"
@@ -2297,6 +2414,17 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 with tarfile.open(tar_path, "r") as tar:
                     tar.extractall(path=tmpdir)
 
+                if exclude_list:
+                    for rel_path in exclude_list:
+                        rel = rel_path.strip().strip("/\\")
+                        if not rel:
+                            continue
+                        candidate = os.path.join(tmpdir, rel)
+                        if os.path.isdir(candidate):
+                            shutil.rmtree(candidate, ignore_errors=True)
+                        elif os.path.isfile(candidate):
+                            os.remove(candidate)
+
                 data, _ = _run_tokei_json(tmpdir, exclude_patterns)
 
                 if not data:
@@ -2363,7 +2491,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 "files": total_files,
             }
 
-    for subsystem_name, _, _, _ in prepared_subsystems:
+    for subsystem_name, _, _, _, _ in prepared_subsystems:
         out_dir = os.path.join(subsystems_root, subsystem_name, "monthly")
         os.makedirs(out_dir, exist_ok=True)
         out_file = os.path.join(out_dir, f"{year:04d}.json")
