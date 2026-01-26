@@ -332,18 +332,20 @@ def _extract_significant_owners(
             lines = int(lines)
         except Exception:
             lines = 0
+        if lines <= 0:
+            continue
         share = (lines / total_lines) if total_lines else 0
-        if share > threshold:
-            owners.append(
-                {
-                    "slug": slug,
-                    "display_name": display_name,
-                    "lines": lines,
-                    "share": share,
-                    "percentage": round(share * 100, 1),
-                    "source": source_label,
-                }
-            )
+        owners.append(
+            {
+                "slug": slug,
+                "display_name": display_name,
+                "lines": lines,
+                "share": share,
+                "percentage": round(share * 100, 1),
+                "source": source_label,
+                "total_lines": total_lines,
+            }
+        )
     return owners
 
 
@@ -358,61 +360,75 @@ def compute_subsystem_significant_ownership(
 
     owners: List[Dict[str, Any]] = []
 
+    def maybe_process_blame(blame_file: str, repo_label: str, simple_name: str) -> None:
+        blame_data = _safe_load_json(blame_file)
+        if not blame_data:
+            return
+        repo_full_name = str(blame_data.get("repo") or repo_label)
+        repo_simple_name = repo_full_name.split("/")[-1] if repo_full_name else simple_name
+        repo_matches = simple_name == subsystem_name or repo_full_name == subsystem_name
+
+        if repo_matches:
+            developers = blame_data.get("developers", {})
+            if isinstance(developers, dict):
+                owners.extend(
+                    _extract_significant_owners(
+                        developers,
+                        int(blame_data.get("total_lines", 0) or 0),
+                        f"repo-{repo_simple_name}",
+                        ownership_threshold,
+                    )
+                )
+
+        services = blame_data.get("services", {})
+        if isinstance(services, dict):
+            service_data = services.get(subsystem_name)
+            if isinstance(service_data, dict):
+                developers = service_data.get("developers", {})
+                if isinstance(developers, dict):
+                    owners.extend(
+                        _extract_significant_owners(
+                            developers,
+                            int(service_data.get("total_lines", 0) or 0),
+                            f"service-{subsystem_name}-in-{repo_simple_name}",
+                            ownership_threshold,
+                        )
+                    )
+
     for org_name in os.listdir(repos_path):
         org_path = os.path.join(repos_path, org_name)
         if not os.path.isdir(org_path):
+            continue
+
+        direct_blame = os.path.join(org_path, "blame", "blame.json")
+        if os.path.isfile(direct_blame):
+            maybe_process_blame(direct_blame, org_name, org_name)
             continue
 
         for repo_name in os.listdir(org_path):
             repo_path = os.path.join(org_path, repo_name)
             if not os.path.isdir(repo_path):
                 continue
-
             blame_file = os.path.join(repo_path, "blame", "blame.json")
             if not os.path.isfile(blame_file):
                 continue
-
-            blame_data = _safe_load_json(blame_file)
-            if not blame_data:
-                continue
-
-            repo_full_name = blame_data.get("repo") or f"{org_name}/{repo_name}"
-            repo_matches = repo_name == subsystem_name or repo_full_name == subsystem_name
-
-            if repo_matches:
-                developers = blame_data.get("developers", {})
-                if isinstance(developers, dict):
-                    owners.extend(
-                        _extract_significant_owners(
-                            developers,
-                            int(blame_data.get("total_lines", 0) or 0),
-                            f"repo-{repo_name}",
-                            ownership_threshold,
-                        )
-                    )
-
-            services = blame_data.get("services", {})
-            if isinstance(services, dict):
-                service_data = services.get(subsystem_name)
-                if isinstance(service_data, dict):
-                    developers = service_data.get("developers", {})
-                    if isinstance(developers, dict):
-                        owners.extend(
-                            _extract_significant_owners(
-                                developers,
-                                int(service_data.get("total_lines", 0) or 0),
-                                f"service-{subsystem_name}-in-{repo_name}",
-                                ownership_threshold,
-                            )
-                        )
+            maybe_process_blame(blame_file, f"{org_name}/{repo_name}", repo_name)
 
     deduped: Dict[str, Dict[str, Any]] = {}
     for owner in owners:
         slug = owner["slug"]
-        if slug not in deduped or owner.get("share", 0) > deduped[slug].get("share", 0):
+        existing = deduped.get(slug)
+        if not existing:
+            deduped[slug] = owner
+            continue
+        if owner.get("total_lines", 0) > existing.get("total_lines", 0):
+            deduped[slug] = owner
+            continue
+        if owner.get("total_lines", 0) == existing.get("total_lines", 0) and owner.get("share", 0) > existing.get("share", 0):
             deduped[slug] = owner
 
-    sorted_owners = sorted(deduped.values(), key=lambda item: item.get("share", 0), reverse=True)
+    filtered = [owner for owner in deduped.values() if owner.get("share", 0) > ownership_threshold]
+    sorted_owners = sorted(filtered, key=lambda item: item.get("share", 0), reverse=True)
     return {"owners": sorted_owners, "threshold": ownership_threshold}
 
 

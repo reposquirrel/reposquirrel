@@ -63,6 +63,7 @@ _BADGE_CACHE_DATA: Optional[Dict[str, Any]] = None
 _BADGE_CACHE_MTIME: Optional[float] = None
 
 _SUBSYSTEM_TOUCH_COUNT_CACHE: Dict[int, Dict[str, int]] = {}
+_OWNERSHIP_DATA_CACHE: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
@@ -742,14 +743,19 @@ def build_badge_cache_data() -> Optional[Dict[str, Any]]:
 def load_badge_cache(force_reload: bool = False) -> Optional[Dict[str, Any]]:
     global _BADGE_CACHE_DATA, _BADGE_CACHE_MTIME
     try:
-        if not force_reload and _BADGE_CACHE_DATA is not None:
-            return _BADGE_CACHE_DATA
         if not os.path.exists(BADGE_CACHE_FILE):
             return None
+        file_mtime = os.path.getmtime(BADGE_CACHE_FILE)
+        if (
+            not force_reload
+            and _BADGE_CACHE_DATA is not None
+            and _BADGE_CACHE_MTIME == file_mtime
+        ):
+            return _BADGE_CACHE_DATA
         with open(BADGE_CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         _BADGE_CACHE_DATA = data
-        _BADGE_CACHE_MTIME = os.path.getmtime(BADGE_CACHE_FILE)
+        _BADGE_CACHE_MTIME = file_mtime
         return data
     except Exception as exc:
         print(f"Error loading badge cache: {exc}")
@@ -775,10 +781,13 @@ def refresh_badge_cache() -> Optional[Dict[str, Any]]:
 # Automatic cleanup on server startup
 def reset_update_state():
     """Reset update process state - called on startup and after repo operations"""
-    global update_process_active, _SUBSYSTEM_TOUCH_COUNT_CACHE
+    global update_process_active, _SUBSYSTEM_TOUCH_COUNT_CACHE, _OWNERSHIP_DATA_CACHE, _BADGE_CACHE_DATA, _BADGE_CACHE_MTIME
     print("🔄 Resetting update process state...")
     update_process_active = False
     _SUBSYSTEM_TOUCH_COUNT_CACHE.clear()
+    _OWNERSHIP_DATA_CACHE = None
+    _BADGE_CACHE_DATA = None
+    _BADGE_CACHE_MTIME = None
     
     # Clear any remaining messages in the queue
     queue_cleared = 0
@@ -922,6 +931,111 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _extract_ownership_lines(dev_data: Any) -> int:
+    if isinstance(dev_data, dict):
+        return _safe_int(dev_data.get("lines"), 0)
+    return _safe_int(dev_data, 0)
+
+
+def _maybe_store_ownership_entry(bucket: Dict[str, Dict[str, Any]], key: str, entry: Dict[str, Any]) -> None:
+    existing = bucket.get(key)
+    if not existing or entry.get("total_lines", 0) > existing.get("total_lines", 0):
+        bucket[key] = entry
+
+
+def _build_ownership_data() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    repo_entries: Dict[str, Dict[str, Any]] = {}
+    service_entries: Dict[str, Dict[str, Any]] = {}
+    repos_path = os.path.join(STATS_ROOT, "repos")
+    if not os.path.isdir(repos_path):
+        return {"repo": repo_entries, "service": service_entries}
+
+    for root, dirs, files in os.walk(repos_path):
+        if "blame.json" not in files:
+            continue
+        blame_dir = root
+        blame_file = os.path.join(blame_dir, "blame.json")
+        try:
+            blame_data = load_json(blame_file)
+        except Exception:
+            continue
+
+        repo_dir = os.path.dirname(blame_dir)
+        repo_guess = os.path.basename(repo_dir)
+        repo_field = str(blame_data.get("repo") or "").strip()
+        repo_name_only = repo_field.split("/")[-1] if repo_field else repo_guess
+        repo_path_label = repo_field or repo_guess
+
+        developers = blame_data.get("developers")
+        if isinstance(developers, dict):
+            total_lines = _safe_int(blame_data.get("total_lines"), 0)
+            entry = {
+                "name": repo_name_only,
+                "repo_path": repo_path_label,
+                "developers": developers,
+                "total_lines": total_lines,
+            }
+            _maybe_store_ownership_entry(repo_entries, repo_name_only.lower(), entry)
+
+        services = blame_data.get("services")
+        if isinstance(services, dict):
+            for service_name, service_data in services.items():
+                if not isinstance(service_data, dict):
+                    continue
+                service_devs = service_data.get("developers", {})
+                if not isinstance(service_devs, dict):
+                    continue
+                total_lines = _safe_int(service_data.get("total_lines"), 0)
+                entry = {
+                    "name": service_name,
+                    "repo_path": repo_path_label,
+                    "developers": service_devs,
+                    "total_lines": total_lines,
+                }
+                _maybe_store_ownership_entry(service_entries, service_name.lower(), entry)
+
+    return {"repo": repo_entries, "service": service_entries}
+
+
+def _get_ownership_data() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    global _OWNERSHIP_DATA_CACHE
+    if _OWNERSHIP_DATA_CACHE is None:
+        _OWNERSHIP_DATA_CACHE = _build_ownership_data()
+    return _OWNERSHIP_DATA_CACHE
+
+
+def _get_ownership_entry(subsystem_name: str) -> Optional[Dict[str, Any]]:
+    if not subsystem_name:
+        return None
+    ownership_data = _get_ownership_data()
+    target = subsystem_name.lower()
+    entry = ownership_data["service"].get(target)
+    if entry:
+        return entry
+    entry = ownership_data["repo"].get(target)
+    if entry:
+        return entry
+    for bucket in ("service", "repo"):
+        for candidate in ownership_data[bucket].values():
+            if target in candidate["name"].lower():
+                return candidate
+    return None
+
+
+def _find_top_developer(entry: Dict[str, Any]) -> Tuple[Optional[str], int, float]:
+    developers = entry.get("developers") or {}
+    total_lines = entry.get("total_lines") or 0
+    best_slug: Optional[str] = None
+    best_lines = 0
+    for slug, payload in developers.items():
+        lines = _extract_ownership_lines(payload)
+        if lines > best_lines:
+            best_slug = slug
+            best_lines = lines
+    share = (best_lines / total_lines) if total_lines else 0.0
+    return best_slug, best_lines, share
 
 
 def _calculate_commits_per_week(summary: Dict[str, Any]) -> float:
@@ -1783,155 +1897,61 @@ def analyze_developer_badges() -> Dict[str, List[Dict[str, Any]]]:
         return {}
 
 
-def _process_blame_file_for_ownership_percentage(blame_file: str, repo_name: str, repo_full_name: str, badges: Dict[str, List[Dict[str, Any]]]):
-    """Helper function to process a single blame file for ownership percentage badges."""
-    try:
-        blame_data = load_json(blame_file)
-        
-        # Check individual developers in the blame data
-        developers = blame_data.get("developers", {})
-        total_lines = blame_data.get("total_lines", 0)
-        
-        if total_lines > 0:  # Prevent division by zero
-            for dev_slug, dev_data in developers.items():
-                dev_lines = dev_data.get("lines", 0)
-                ownership_share = dev_lines / total_lines
-                
-                # Only create badge if developer owns >10% of the subsystem
-                if ownership_share > 0.10:  # More than 10%
-                    if dev_slug not in badges:
-                        badges[dev_slug] = []
-                    
-                    badges[dev_slug].append({
-                        "type": "ownership_percentage",
-                        "badge_type": "significant_owner",
-                        "title": f"Significant Owner: {repo_name}",
-                        "subtitle": f"{ownership_share*100:.1f}% ownership ({dev_lines:,} lines)",
-                        "subsystem": repo_name,
-                        "repo_path": repo_full_name,
-                        "lines": dev_lines,
-                        "share": ownership_share
-                    })
-        
-        # Check per-service ownership percentages as well  
-        services = blame_data.get("services", {})
-        for service_name, service_data in services.items():
-            service_developers = service_data.get("developers", {})
-            service_total_lines = service_data.get("total_lines", 0)
-            
-            if service_total_lines > 0:  # Prevent division by zero
-                for dev_slug, dev_data in service_developers.items():
-                    dev_lines = dev_data.get("lines", 0)
-                    ownership_share = dev_lines / service_total_lines
-                    
-                    # Only create badge if developer owns >10% of the service
-                    if ownership_share > 0.10:
-                        if dev_slug not in badges:
-                            badges[dev_slug] = []
-                        
-                        # Avoid duplicating if service name same as repo name
-                        if service_name != repo_name:
-                            badges[dev_slug].append({
-                                "type": "ownership_percentage", 
-                                "badge_type": "significant_service_owner",
-                                "title": f"Significant Owner: {service_name}",
-                                "subtitle": f"{ownership_share*100:.1f}% ownership ({dev_lines:,} lines)",
-                                "subsystem": service_name,
-                                "repo_path": repo_full_name,
-                                "lines": dev_lines,
-                                "share": ownership_share
-                            })
-    
-    except Exception as e:
-        print(f"Error processing blame file {blame_file} for ownership percentages: {e}")
-
-
-def _process_blame_file_for_ownership(blame_file: str, repo_name: str, repo_full_name: str, badges: Dict[str, List[Dict[str, Any]]]):
-    """Helper function to process a single blame file for ownership badges."""
-    try:
-        blame_data = load_json(blame_file)
-        
-        # Check overall repository top developer
-        repo_top_dev = blame_data.get("top_developer")
-        if repo_top_dev and repo_top_dev.get("slug"):
-            dev_slug = repo_top_dev["slug"]
-            if dev_slug not in badges:
-                badges[dev_slug] = []
-            
-            badges[dev_slug].append({
-                "type": "ownership",
-                "badge_type": "repository_owner",
-                "title": f"Top Owner: {repo_name}",
-                "subtitle": f"{repo_top_dev.get('lines', 0):,} lines ({repo_top_dev.get('share', 0)*100:.1f}%)",
-                "subsystem": repo_name,
-                "repo_path": repo_full_name,
-                "lines": repo_top_dev.get("lines", 0),
-                "share": repo_top_dev.get("share", 0)
-            })
-        
-        # Check per-service top developers
-        services = blame_data.get("services", {})
-        for service_name, service_data in services.items():
-            service_top_dev = service_data.get("top_developer")
-            if service_top_dev and service_top_dev.get("slug"):
-                dev_slug = service_top_dev["slug"]
-                if dev_slug not in badges:
-                    badges[dev_slug] = []
-                
-                # Skip if it's the same as repo owner and service name matches repo name
-                if service_name == repo_name and repo_top_dev and repo_top_dev.get("slug") == dev_slug:
-                    continue
-                
-                badges[dev_slug].append({
-                    "type": "ownership",
-                    "badge_type": "service_owner", 
-                    "title": f"Top Owner: {service_name}",
-                    "subtitle": f"{service_top_dev.get('lines', 0):,} lines ({service_top_dev.get('share', 0)*100:.1f}%)",
-                    "subsystem": service_name,
-                    "repo_path": repo_full_name,
-                    "lines": service_top_dev.get("lines", 0),
-                    "share": service_top_dev.get("share", 0)
-                })
-    
-    except Exception as e:
-        print(f"Error processing blame file {blame_file}: {e}")
 
 
 def analyze_ownership_badges() -> Dict[str, List[Dict[str, Any]]]:
     """
     Analyze blame data for ownership badges.
     """
-    badges = {}
-    
-    # Check blame files in the repos structure - handle both flat and nested structures
-    repos_path = os.path.join(STATS_ROOT, "repos")
-    if os.path.exists(repos_path):
-        # First, try flat structure (repos/repo_name/blame/blame.json)
-        for repo_name in os.listdir(repos_path):
-            repo_path = os.path.join(repos_path, repo_name)
-            if not os.path.isdir(repo_path):
+    badges: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        ownership_data = _get_ownership_data()
+        service_keys = set(ownership_data.get("service", {}).keys())
+        repo_top_map: Dict[str, Optional[str]] = {}
+
+        for key, entry in ownership_data.get("repo", {}).items():
+            if key in service_keys:
                 continue
-            
-            blame_file = os.path.join(repo_path, "blame", "blame.json")
-            if os.path.exists(blame_file):
-                # Found blame file in flat structure
-                repo_full_name = repo_name
-                _process_blame_file_for_ownership(blame_file, repo_name, repo_full_name, badges)
-            else:
-                # Try nested structure (repos/org_name/repo_name/blame/blame.json)
-                if os.path.isdir(repo_path):
-                    for nested_repo_name in os.listdir(repo_path):
-                        nested_repo_path = os.path.join(repo_path, nested_repo_name)
-                        if not os.path.isdir(nested_repo_path):
-                            continue
-                        
-                        nested_blame_file = os.path.join(nested_repo_path, "blame", "blame.json")
-                        if os.path.exists(nested_blame_file):
-                            # Found blame file in nested structure
-                            repo_full_name = f"{repo_name}/{nested_repo_name}"
-                            _process_blame_file_for_ownership(nested_blame_file, nested_repo_name, repo_full_name, badges)
-    
-    return badges
+            slug, lines, share = _find_top_developer(entry)
+            if not slug or lines <= 0:
+                continue
+            repo_top_map[key] = slug
+            badges.setdefault(slug, []).append(
+                {
+                    "type": "ownership",
+                    "badge_type": "repository_owner",
+                    "title": f"Top Owner: {entry['name']}",
+                    "subtitle": f"{lines:,} lines ({share*100:.1f}%)",
+                    "subsystem": entry["name"],
+                    "repo_path": entry["repo_path"],
+                    "lines": lines,
+                    "share": share,
+                }
+            )
+
+        for key, entry in ownership_data.get("service", {}).items():
+            slug, lines, share = _find_top_developer(entry)
+            if not slug or lines <= 0:
+                continue
+            if repo_top_map.get(key) == slug:
+                continue
+            badges.setdefault(slug, []).append(
+                {
+                    "type": "ownership",
+                    "badge_type": "service_owner",
+                    "title": f"Top Owner: {entry['name']}",
+                    "subtitle": f"{lines:,} lines ({share*100:.1f}%)",
+                    "subsystem": entry["name"],
+                    "repo_path": entry["repo_path"],
+                    "lines": lines,
+                    "share": share,
+                }
+            )
+
+        return badges
+    except Exception as exc:
+        print(f"Error analyzing ownership badges: {exc}")
+        return badges
 
 
 def analyze_maintainer_badges() -> Dict[str, List[Dict[str, Any]]]:
@@ -2115,95 +2135,57 @@ def analyze_ownership_percentage_badges() -> Dict[str, List[Dict[str, Any]]]:
     """
     Analyze ownership percentages to create badges for developers who own >10% of a subsystem.
     """
-    badges = {}
-    
-    try:
-        # Check blame files in the repos structure for ownership percentages
-        repos_path = os.path.join(STATS_ROOT, "repos")
-        if not os.path.exists(repos_path):
-            return badges
-        
-        # Also load services config to understand which services are in which repos
-        services_config = load_services_config()
-        
-        for org_name in os.listdir(repos_path):
-            org_path = os.path.join(repos_path, org_name)
-            if not os.path.isdir(org_path):
+    badges: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _process_entry(entry: Dict[str, Any], badge_type: str) -> None:
+        total_lines = entry.get("total_lines", 0)
+        if total_lines <= 0:
+            return
+        developers = entry.get("developers") or {}
+        for dev_slug, dev_data in developers.items():
+            dev_lines = _extract_ownership_lines(dev_data)
+            if dev_lines <= 0:
                 continue
-                
-            for repo_name in os.listdir(org_path):
-                repo_path = os.path.join(org_path, repo_name)
-                if not os.path.isdir(repo_path):
-                    continue
-                    
-                blame_file = os.path.join(repo_path, "blame", "blame.json")
-                if not os.path.exists(blame_file):
-                    continue
-                
-                try:
-                    blame_data = load_json(blame_file)
-                    repo_full_name = f"{org_name}/{repo_name}"
-                    
-                    # Check individual developers in the blame data
-                    developers = blame_data.get("developers", {})
-                    total_lines = blame_data.get("total_lines", 0)
-                    
-                    if total_lines > 0:  # Prevent division by zero
-                        for dev_slug, dev_data in developers.items():
-                            dev_lines = dev_data.get("lines", 0)
-                            ownership_share = dev_lines / total_lines
-                            
-                            # Only create badge if developer owns >10% of the subsystem
-                            if ownership_share > 0.10:  # More than 10%
-                                if dev_slug not in badges:
-                                    badges[dev_slug] = []
-                                
-                                badges[dev_slug].append({
-                                    "type": "ownership_percentage",
-                                    "badge_type": "significant_owner",
-                                    "title": f"Significant Owner: {repo_name}",
-                                    "subtitle": f"{ownership_share*100:.1f}% ownership ({dev_lines:,} lines)",
-                                    "subsystem": repo_name,
-                                    "repo_path": repo_full_name,
-                                    "lines": dev_lines,
-                                    "share": ownership_share
-                                })
-                    
-                    # Check per-service ownership percentages as well  
-                    services = blame_data.get("services", {})
-                    for service_name, service_data in services.items():
-                        service_developers = service_data.get("developers", {})
-                        service_total_lines = service_data.get("total_lines", 0)
-                        
-                        if service_total_lines > 0:  # Prevent division by zero
-                            for dev_slug, dev_data in service_developers.items():
-                                dev_lines = dev_data.get("lines", 0)
-                                ownership_share = dev_lines / service_total_lines
-                                
-                                # Only create badge if developer owns >10% of the service
-                                if ownership_share > 0.10:  # More than 10%
-                                    if dev_slug not in badges:
-                                        badges[dev_slug] = []
-                                    
-                                    # Avoid duplicating if service name same as repo name
-                                    if service_name != repo_name:
-                                        badges[dev_slug].append({
-                                            "type": "ownership_percentage", 
-                                            "badge_type": "significant_service_owner",
-                                            "title": f"Significant Owner: {service_name}",
-                                            "subtitle": f"{ownership_share*100:.1f}% ownership ({dev_lines:,} lines)",
-                                            "subsystem": service_name,
-                                            "repo_path": repo_full_name,
-                                            "lines": dev_lines,
-                                            "share": ownership_share
-                                        })
-                
-                except Exception as e:
-                    print(f"Error processing blame file {blame_file} for ownership percentages: {e}")
-                    continue
-        
+            ownership_share = dev_lines / total_lines
+            if ownership_share <= 0.10:
+                continue
+            badges.setdefault(dev_slug, []).append(
+                {
+                    "type": "ownership_percentage",
+                    "badge_type": badge_type,
+                    "title": f"Significant Owner: {entry['name']}",
+                    "subtitle": f"{ownership_share*100:.1f}% ownership ({dev_lines:,} lines)",
+                    "subsystem": entry["name"],
+                    "repo_path": entry["repo_path"],
+                    "lines": dev_lines,
+                    "share": ownership_share,
+                }
+            )
+
+    try:
+        ownership_data = _get_ownership_data()
+        repo_entries = ownership_data.get("repo", {})
+        service_entries = ownership_data.get("service", {})
+        skip_service_keys: Set[str] = set()
+
+        for key, entry in repo_entries.items():
+            service_entry = service_entries.get(key)
+            if service_entry:
+                repo_total = entry.get("total_lines", 0) or 0
+                service_total = service_entry.get("total_lines", 0) or 0
+                if repo_total >= service_total:
+                    _process_entry(entry, "significant_owner")
+                    skip_service_keys.add(key)
+                continue
+            _process_entry(entry, "significant_owner")
+
+        for key, entry in service_entries.items():
+            if key in skip_service_keys:
+                continue
+            _process_entry(entry, "significant_service_owner")
+
         return badges
-        
+
     except Exception as e:
         print(f"Error in analyze_ownership_percentage_badges: {e}")
         return {}
@@ -2480,37 +2462,14 @@ def api_user_ownership_timeline(user_slug: str):
         
         for subsystem_name in maintainer_subsystems:
             try:
-                # Get current ownership from blame
-                repos_path = os.path.join(STATS_ROOT, "repos")
-                current_ownership_lines = 0
-                total_current_lines = 0
-                
-                for root, dirs, files in os.walk(repos_path):
-                    if "blame.json" in files:
-                        blame_file = os.path.join(root, "blame.json")
-                        blame_data = load_json(blame_file)
-                        
-                        # Check repo match
-                        if subsystem_name.lower() in blame_data.get("repo", "").lower():
-                            developers = blame_data.get("developers", {})
-                            total_current_lines = blame_data.get("total_lines", 0)
-                            dev_data = developers.get(user_slug, {})
-                            current_ownership_lines = dev_data.get("lines", 0) if isinstance(dev_data, dict) else 0
-                            break
-                        
-                        # Check service match
-                        services = blame_data.get("services", {})
-                        if subsystem_name in services:
-                            service_data = services[subsystem_name]
-                            developers = service_data.get("developers", {})
-                            total_current_lines = service_data.get("total_lines", 0)
-                            dev_data = developers.get(user_slug, {})
-                            if isinstance(dev_data, dict):
-                                current_ownership_lines = dev_data.get("lines", 0)
-                            else:
-                                current_ownership_lines = dev_data if dev_data else 0
-                            break
-                
+                # Get current ownership snapshot from cached blame data
+                ownership_entry = _get_ownership_entry(subsystem_name)
+                if not ownership_entry:
+                    continue
+                developers = ownership_entry.get("developers") or {}
+                total_current_lines = ownership_entry.get("total_lines", 0)
+                current_ownership_lines = _extract_ownership_lines(developers.get(user_slug))
+
                 if total_current_lines == 0:
                     continue
                 

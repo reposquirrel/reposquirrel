@@ -35,4 +35,9 @@ The **All incidents** entry in the left navigation surfaces a searchable, filter
 
 All in all, a convinent way of having a helicopter view of the alerts, in many ways from my own opinion better dashboard then the one in the tool.
 
+### Kiosk Mode Displays
+PagerDuty metrics can also run in Repo Squirrel's `/kiosk` hallway display mode so on-call teams can monitor live incidents without interacting with the dashboard.
+
+![Kiosk Mode PagerDuty](../screenshots/kioskmode_pagerDuty.png)
+
 Would love some additional screenshots here, from live systems

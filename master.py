@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import multiprocessing
 from collections import defaultdict
 import importlib
-from typing import Optional
+from typing import Optional, List, Tuple
 
 try:
     from pagerduty_sync import sync_pagerduty_data
@@ -223,6 +223,11 @@ def parse_args() -> argparse.Namespace:
         help="JSON file mapping user aliases to canonical names (default: configuration/alias.json)",
     )
     parser.add_argument(
+        "--skip-git-pull",
+        action="store_true",
+        help="Skip running git pull on repositories before analysis",
+    )
+    parser.add_argument(
         "--skip-blame",
         action="store_true",
         help="Skip running blame.py (ownership analysis) to save time",
@@ -288,6 +293,77 @@ def run_cmd(cmd: list[str], desc: str) -> None:
         sys.exit(result.returncode)
     else:
         logger.info(f"=== Done: {desc} ===")
+
+
+def _list_git_repositories(repos_root: str) -> List[Tuple[str, str]]:
+    repos: List[Tuple[str, str]] = []
+    if not os.path.isdir(repos_root):
+        return repos
+    for org_name in sorted(os.listdir(repos_root)):
+        org_path = os.path.join(repos_root, org_name)
+        if not os.path.isdir(org_path):
+            continue
+        for repo_name in sorted(os.listdir(org_path)):
+            repo_path = os.path.join(org_path, repo_name)
+            git_dir = os.path.join(repo_path, ".git")
+            if os.path.isdir(repo_path) and os.path.isdir(git_dir):
+                repos.append((f"{org_name}/{repo_name}", repo_path))
+    return repos
+
+
+def git_pull_repositories(repos_root: str, timeout: int = 300) -> bool:
+    """Run git pull --ff-only for all repositories under repos_root."""
+    repos = _list_git_repositories(repos_root)
+    if not repos:
+        logger.info("No git repositories found under %s; skipping git pull", repos_root)
+        return False
+
+    logger.info("\n===========================================")
+    logger.info("Updating git repositories")
+    logger.info("===========================================")
+
+    success = True
+    git_env = os.environ.copy()
+    git_env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    total = len(repos)
+    for idx, (repo_name, repo_path) in enumerate(repos, start=1):
+        logger.info("(%s/%s) git pull %s", idx, total, repo_name)
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env=git_env,
+            )
+        except FileNotFoundError:
+            logger.info("ERROR: git executable not found while updating %s", repo_name)
+            return False
+        except subprocess.TimeoutExpired:
+            logger.info(
+                "WARNING: git pull timed out for %s after %s seconds (continuing with existing data)",
+                repo_name,
+                timeout,
+            )
+            success = False
+            continue
+        if result.returncode != 0:
+            success = False
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            if stderr:
+                logger.info("    git pull failed: %s", stderr.splitlines()[-1])
+            elif stdout:
+                logger.info("    git pull output: %s", stdout.splitlines()[-1])
+            else:
+                logger.info("    git pull failed with exit code %s", result.returncode)
+            continue
+        output_lines = (result.stdout or "").strip().splitlines()
+        summary = output_lines[-1] if output_lines else "Already up to date."
+        logger.info("    %s", summary)
+
+    return success
 
 def load_services_config_file(path: str) -> dict:
     if not os.path.exists(path):
@@ -561,6 +637,7 @@ def main() -> None:
     services_file = args.services_file
     ignore_file = args.ignore_file
     alias_file = args.alias_file
+    skip_git_pull = args.skip_git_pull
     skip_blame = args.skip_blame
     parallel = args.parallel
     cpu_count = args.cpu_count
@@ -640,6 +717,13 @@ def main() -> None:
         logger.info(f"Parallel    : Enabled (CPU workers: {max_workers})")
     else:
         logger.info(f"Parallel    : Disabled (sequential processing)")
+
+    if skip_git_pull:
+        logger.info("Git pull    : Skipped (--skip-git-pull)")
+    else:
+        git_pull_ok = git_pull_repositories(repos_root)
+        if not git_pull_ok:
+            logger.info("Git pull    : Completed with warnings or no repositories; continuing with existing clones")
 
     summery_script = os.path.join(script_dir, "summery.py")
     service_script = os.path.join(script_dir, "service.py")
