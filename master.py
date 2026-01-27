@@ -312,6 +312,120 @@ def _list_git_repositories(repos_root: str) -> List[Tuple[str, str]]:
     return repos
 
 
+def _run_git(repo_path: str, args: list[str], git_env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", repo_path, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=git_env,
+        check=False,
+    )
+
+
+def _detect_missing_remote_branch(output: str) -> bool:
+    if not output:
+        return False
+    lowered = output.lower()
+    return (
+        "no such ref was fetched" in lowered
+        or "couldn't find remote ref" in lowered
+        or "does not match any" in lowered
+    )
+
+
+def _get_remote_default_branch(repo_path: str, git_env: dict[str, str]) -> Optional[str]:
+    result = _run_git(repo_path, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], git_env)
+    if result.returncode == 0:
+        ref = (result.stdout or "").strip()
+        if ref.startswith("origin/"):
+            return ref.split("/", 1)[1]
+        return ref or None
+
+    # Fallback: ask git to refresh the HEAD information
+    _run_git(repo_path, ["remote", "set-head", "origin", "-a"], git_env)
+    result = _run_git(repo_path, ["remote", "show", "origin"], git_env)
+    if result.returncode == 0:
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if line.lower().startswith("head branch:"):
+                branch = line.split(":", 1)[1].strip()
+                if branch and branch != "(unknown)":
+                    return branch
+
+    # Final fallback: inspect remote heads directly
+    result = _run_git(repo_path, ["ls-remote", "--heads", "origin"], git_env)
+    if result.returncode == 0:
+        branches: list[str] = []
+        for line in (result.stdout or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+                branches.append(parts[1].split("/", 2)[2])
+        for preferred in ("main", "master", "develop"):
+            if preferred in branches:
+                return preferred
+        if branches:
+            return branches[0]
+    return None
+
+
+def _get_current_branch(repo_path: str, git_env: dict[str, str]) -> Optional[str]:
+    result = _run_git(repo_path, ["rev-parse", "--abbrev-ref", "HEAD"], git_env)
+    if result.returncode == 0:
+        branch = (result.stdout or "").strip()
+        if branch and branch != "HEAD":
+            return branch
+    return None
+
+
+def _checkout_remote_branch(repo_path: str, branch: str, git_env: dict[str, str]) -> bool:
+    # Ensure refs/remotes/origin/<branch> exists
+    fetch = _run_git(repo_path, ["fetch", "origin"], git_env)
+    if fetch.returncode != 0:
+        return False
+
+    local_ref = _run_git(repo_path, ["show-ref", "--verify", f"refs/heads/{branch}"], git_env)
+    if local_ref.returncode != 0:
+        checkout = _run_git(repo_path, ["checkout", "-b", branch, f"origin/{branch}"], git_env)
+    else:
+        checkout = _run_git(repo_path, ["checkout", branch], git_env)
+
+    if checkout.returncode != 0:
+        return False
+
+    upstream = _run_git(
+        repo_path,
+        ["branch", "--set-upstream-to", f"origin/{branch}", branch],
+        git_env,
+    )
+    return upstream.returncode == 0
+
+
+def _repair_tracking_branch(repo_name: str, repo_path: str, git_env: dict[str, str]) -> bool:
+    remote_branch = _get_remote_default_branch(repo_path, git_env)
+    if not remote_branch:
+        logger.info("    Unable to detect remote default branch for %s", repo_name)
+        return False
+
+    current_branch = _get_current_branch(repo_path, git_env)
+    if current_branch == remote_branch:
+        logger.info("    Current branch already matches remote default (%s)", remote_branch)
+    else:
+        logger.info(
+            "    Switching %s from %s to %s",
+            repo_name,
+            current_branch or "detached HEAD",
+            remote_branch,
+        )
+
+    if not _checkout_remote_branch(repo_path, remote_branch, git_env):
+        logger.info("    Failed to switch %s to origin/%s", repo_name, remote_branch)
+        return False
+
+    logger.info("    Switched %s to track origin/%s", repo_name, remote_branch)
+    return True
+
+
 def git_pull_repositories(repos_root: str, timeout: int = 300) -> bool:
     """Run git pull --ff-only for all repositories under repos_root."""
     repos = _list_git_repositories(repos_root)
@@ -329,61 +443,110 @@ def git_pull_repositories(repos_root: str, timeout: int = 300) -> bool:
     total = len(repos)
     for idx, (repo_name, repo_path) in enumerate(repos, start=1):
         logger.info("(%s/%s) git pull %s", idx, total, repo_name)
-        try:
-            process = subprocess.Popen(
-                ["git", "-C", repo_path, "pull", "--ff-only"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=git_env,
-            )
-        except FileNotFoundError:
-            logger.info("ERROR: git executable not found while updating %s", repo_name)
-            return False
+        def _execute_git_pull(stream_output: bool = True) -> tuple[int, str, str, bool]:
+            """Run git pull once. Returns (returncode, last_line, full_output, timed_out)."""
+            cmd = ["git", "-C", repo_path, "pull", "--ff-only"]
+            if stream_output:
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        env=git_env,
+                    )
+                except FileNotFoundError:
+                    logger.info("ERROR: git executable not found while updating %s", repo_name)
+                    return 1, "", "", False
 
-        last_line: str = ""
+                last_line_stream: str = ""
+                collected: list[str] = []
 
-        def _stream_output(pipe: Optional[Any]) -> None:
-            nonlocal last_line
-            if pipe is None:
-                return
-            for raw_line in iter(pipe.readline, ""):
+                def _stream_output(pipe: Optional[Any]) -> None:
+                    nonlocal last_line_stream
+                    if pipe is None:
+                        return
+                    for raw_line in iter(pipe.readline, ""):
+                        line = raw_line.rstrip()
+                        if not line:
+                            continue
+                        last_line_stream = line
+                        collected.append(line)
+                        logger.info("    %s", line)
+                    pipe.close()
+
+                reader_thread = threading.Thread(target=_stream_output, args=(process.stdout,))
+                reader_thread.daemon = True
+                reader_thread.start()
+
+                timed_out_local = False
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out_local = True
+                    process.kill()
+                    logger.info(
+                        "WARNING: git pull timed out for %s after %s seconds (continuing with existing data)",
+                        repo_name,
+                        timeout,
+                    )
+                finally:
+                    reader_thread.join()
+
+                return process.returncode, last_line_stream, "\n".join(collected), timed_out_local
+
+            # Non-streaming retry path
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=git_env,
+                    check=False,
+                )
+            except FileNotFoundError:
+                logger.info("ERROR: git executable not found while updating %s", repo_name)
+                return 1, "", "", False
+
+            lines = []
+            last_line_retry = ""
+            for raw_line in (result.stdout or "").splitlines():
                 line = raw_line.rstrip()
                 if not line:
                     continue
-                last_line = line
+                lines.append(line)
+                last_line_retry = line
                 logger.info("    %s", line)
-            pipe.close()
 
-        reader_thread = threading.Thread(target=_stream_output, args=(process.stdout,))
-        reader_thread.daemon = True
-        reader_thread.start()
+            return result.returncode, last_line_retry, "\n".join(lines), False
 
-        timed_out = False
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            success = False
-            process.kill()
-            logger.info(
-                "WARNING: git pull timed out for %s after %s seconds (continuing with existing data)",
-                repo_name,
-                timeout,
-            )
-        finally:
-            reader_thread.join()
+        returncode, last_line, full_output, timed_out = _execute_git_pull(stream_output=True)
 
         if timed_out:
+            success = False
             continue
 
-        if process.returncode != 0:
+        if returncode != 0:
             success = False
+            attempted_fix = False
+            if _detect_missing_remote_branch(full_output):
+                attempted_fix = _repair_tracking_branch(repo_name, repo_path, git_env)
+                if attempted_fix:
+                    logger.info("    Retrying git pull after updating tracking branch...")
+                    returncode, last_line, full_output, _ = _execute_git_pull(stream_output=False)
+
+            if returncode == 0:
+                continue
+
+            if attempted_fix:
+                logger.info("    git pull still failing after tracking branch update.")
+
             if last_line:
                 logger.info("    git pull failed: %s", last_line)
             else:
-                logger.info("    git pull failed with exit code %s", process.returncode)
+                logger.info("    git pull failed with exit code %s", returncode)
             continue
 
         if not last_line:
