@@ -6120,6 +6120,8 @@ async function renderTeamDashboard(team, period, summary) {
       const deletions = toNumber(stats.deletions ?? stats.total_deletions ?? stats.total_lines_deleted ?? 0);
       const commits = toNumber(stats.commits ?? stats.total_commits ?? 0);
       const netLines = toNumber(stats.net_lines ?? (additions - deletions));
+      const subsystemKeys = Array.isArray(stats.subsystem_keys) ? stats.subsystem_keys.filter(Boolean) : [];
+      const languageKeys = Array.isArray(stats.language_keys) ? stats.language_keys.filter(Boolean) : [];
       return {
         slug: memberSlug,
         displayName,
@@ -6128,26 +6130,47 @@ async function renderTeamDashboard(team, period, summary) {
         commits,
         additions,
         deletions,
-        net_lines: netLines
+        net_lines: netLines,
+        subsystemKeys,
+        languageKeys
       };
     });
 
-    const totals = membersData.reduce((acc, member) => {
-      acc.subsystems_touched += member.subsystems_touched;
-      acc.languages_used += member.languages_used;
+    const totalsAccumulator = membersData.reduce((acc, member) => {
+      if (member.subsystemKeys.length > 0) {
+        member.subsystemKeys.forEach((key) => acc.uniqueSubsystems.add(key));
+      } else if (member.subsystems_touched > 0) {
+        acc.subsystemsFallback += member.subsystems_touched;
+      }
+      if (member.languageKeys.length > 0) {
+        member.languageKeys.forEach((key) => acc.uniqueLanguages.add(key));
+      } else if (member.languages_used > 0) {
+        acc.languagesFallback += member.languages_used;
+      }
       acc.commits += member.commits;
       acc.additions += member.additions;
       acc.deletions += member.deletions;
       acc.net_lines += member.net_lines;
       return acc;
     }, {
-      subsystems_touched: 0,
-      languages_used: 0,
+      uniqueSubsystems: new Set(),
+      uniqueLanguages: new Set(),
+      subsystemsFallback: 0,
+      languagesFallback: 0,
       commits: 0,
       additions: 0,
       deletions: 0,
       net_lines: 0
     });
+
+    const totals = {
+      subsystems_touched: totalsAccumulator.uniqueSubsystems.size || totalsAccumulator.subsystemsFallback,
+      languages_used: totalsAccumulator.uniqueLanguages.size || totalsAccumulator.languagesFallback,
+      commits: totalsAccumulator.commits,
+      additions: totalsAccumulator.additions,
+      deletions: totalsAccumulator.deletions,
+      net_lines: totalsAccumulator.net_lines
+    };
 
     const columns = [
       { key: "displayName", label: "Member", sortable: true, type: "string", defaultDirection: "asc" },
@@ -6229,7 +6252,12 @@ async function renderTeamDashboard(team, period, summary) {
     columns.slice(1).forEach((column) => {
       const cell = document.createElement("td");
       const totalValue = totals[column.key] || 0;
-      cell.textContent = formatNumber(totalValue);
+      let displayValue = formatNumber(totalValue);
+      if (column.key === "subsystems_touched" || column.key === "languages_used") {
+        displayValue = `${displayValue}*`;
+        cell.title = "Unique count across the team";
+      }
+      cell.textContent = displayValue;
       if (column.key === "additions" || (column.key === "net_lines" && totalValue >= 0)) {
         cell.style.color = "#22c55e";
       } else if (column.key === "deletions" || (column.key === "net_lines" && totalValue < 0)) {
@@ -6348,6 +6376,15 @@ async function renderTeamDashboard(team, period, summary) {
     renderRows();
 
     membersCard.appendChild(membersTable);
+
+    const uniqueTotalsNote = document.createElement("div");
+    uniqueTotalsNote.className = "table-footnote";
+    uniqueTotalsNote.textContent = "* Totals marked with * represent unique counts across the team.";
+    uniqueTotalsNote.style.marginTop = "8px";
+    uniqueTotalsNote.style.fontSize = "0.85em";
+    uniqueTotalsNote.style.color = "var(--text-muted)";
+    membersCard.appendChild(uniqueTotalsNote);
+
     main.appendChild(membersCard);
   }
 

@@ -953,8 +953,9 @@ def _build_member_contribution_entry(member_data: Optional[Dict[str, Any]]) -> D
     languages = member_data.get("languages") if isinstance(member_data, dict) else {}
 
     subsystems_touched = 0
+    subsystem_keys: List[str] = []
     if isinstance(per_repo, dict):
-        for repo_data in per_repo.values():
+        for repo_name, repo_data in per_repo.items():
             if not isinstance(repo_data, dict):
                 continue
             if (
@@ -963,10 +964,14 @@ def _build_member_contribution_entry(member_data: Optional[Dict[str, Any]]) -> D
                 or _safe_int(repo_data.get("deletions"), 0)
             ):
                 subsystems_touched += 1
+                repo_label = str(repo_name).strip()
+                if repo_label and repo_label not in subsystem_keys:
+                    subsystem_keys.append(repo_label)
 
     languages_used = 0
+    language_keys: List[str] = []
     if isinstance(languages, dict):
-        for lang_data in languages.values():
+        for language_name, lang_data in languages.items():
             if not isinstance(lang_data, dict):
                 continue
             if (
@@ -975,6 +980,9 @@ def _build_member_contribution_entry(member_data: Optional[Dict[str, Any]]) -> D
                 or _safe_int(lang_data.get("deletions"), 0)
             ):
                 languages_used += 1
+                language_label = str(language_name).strip()
+                if language_label and language_label not in language_keys:
+                    language_keys.append(language_label)
 
     return {
         "commits": commits,
@@ -984,6 +992,8 @@ def _build_member_contribution_entry(member_data: Optional[Dict[str, Any]]) -> D
         "net_lines": additions - deletions,
         "subsystems_touched": subsystems_touched,
         "languages_used": languages_used,
+        "subsystem_keys": subsystem_keys,
+        "language_keys": language_keys,
     }
 
 
