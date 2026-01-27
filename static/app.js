@@ -6001,7 +6001,7 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
     // Add contribution activity heatmap
     try {
       console.log("Adding contribution activity heatmap for", subsystem.name);
-      await addSubsystemContributionHeatmap(main, subsystem.name, period);
+      await addSubsystemContributionHeatmap(main, subsystem.name, period, summary);
       console.log("Contribution activity heatmap added successfully");
     } catch (error) {
       console.error("Error loading contribution activity:", error);
@@ -7531,7 +7531,7 @@ async function addSubsystemSizeRankingSection(container, subsystemName) {
   }
 }
 
-async function addSubsystemContributionHeatmap(container, subsystemName, period) {
+async function addSubsystemContributionHeatmap(container, subsystemName, period, summaryData = null) {
   try {
     console.log("Loading contribution activity for subsystem:", subsystemName);
     
@@ -7550,127 +7550,63 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period)
       displayEnd = `${dataCollectionYear}-12-31`;   // Always show full year
     }
     
-    // Collect daily commit data for the subsystem
     const dailyCommits = {};
     let monthlyData = [];
-    
+
+    const upsertDailyEntry = (dateStr, metrics = {}, highlightRange = null) => {
+      if (!dateStr) {
+        return;
+      }
+      const commits = Number(metrics.commits ?? metrics.count ?? 0) || 0;
+      const additions = Number(metrics.additions ?? metrics.lines_added ?? metrics.added ?? 0) || 0;
+      const deletions = Number(metrics.deletions ?? metrics.lines_deleted ?? metrics.deleted ?? 0) || 0;
+      if (!dailyCommits[dateStr]) {
+        dailyCommits[dateStr] = { commits: 0, additions: 0, deletions: 0 };
+      }
+      const entry = dailyCommits[dateStr];
+      entry.commits += commits;
+      entry.additions += additions;
+      entry.deletions += deletions;
+      if (
+        highlightRange &&
+        highlightRange.from &&
+        highlightRange.to &&
+        dateStr >= highlightRange.from &&
+        dateStr <= highlightRange.to
+      ) {
+        entry.isHighlighted = true;
+      }
+    };
+
+    const accumulatePerDate = (perDate = {}, highlightRange = null) => {
+      if (!perDate || typeof perDate !== "object") {
+        return;
+      }
+      Object.entries(perDate).forEach(([dateStr, metrics]) => {
+        upsertDailyEntry(dateStr, metrics || {}, highlightRange);
+      });
+    };
+
     if (period.is_yearly) {
-      // For yearly view, get all monthly summaries for the year
       monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
-      
-      // Process each monthly summary to extract developers and get their real daily data
-      for (const monthSummary of monthlyData) {
-        if (monthSummary.repositories) {
-          // Collect all developers who worked in this subsystem this month
-          const subsystemDevelopers = new Set();
-          
-          for (const [repoName, repoData] of Object.entries(monthSummary.repositories)) {
-            const developers = repoData.developers || {};
-            for (const devSlug of Object.keys(developers)) {
-              subsystemDevelopers.add(devSlug);
-            }
-          }
-          
-          // For each developer, fetch their actual daily commit data for this month
-          const fromDate = monthSummary.from;
-          const toDate = monthSummary.to;
-          
-          for (const devSlug of subsystemDevelopers) {
-            try {
-              const userMonthData = await fetchJSON(`/api/users/${encodeURIComponent(devSlug)}/month/${encodeURIComponent(fromDate)}/${encodeURIComponent(toDate)}`);
-              
-              // Get per_date data and filter for commits to this subsystem's repos
-              const perDate = userMonthData.per_date || {};
-              const perRepo = userMonthData.per_repo || {};
-              
-              // Get list of repos in this subsystem
-              const subsystemRepos = Object.keys(monthSummary.repositories);
-              
-              // Check if user has commits in any of the subsystem repos
-              const hasSubsystemWork = subsystemRepos.some(repo => perRepo[repo] && perRepo[repo].commits > 0);
-              
-              if (hasSubsystemWork) {
-                // Add this user's daily commits (approximation: count all their daily commits for this month)
-                for (const [dateStr, dateData] of Object.entries(perDate)) {
-                  if (dateData.commits > 0) {
-                    if (!dailyCommits[dateStr]) {
-                      dailyCommits[dateStr] = { commits: 0 };
-                    }
-                    // Add a proportional share based on subsystem repos vs total repos
-                    const subsystemCommits = subsystemRepos.reduce((sum, repo) => {
-                      return sum + (perRepo[repo]?.commits || 0);
-                    }, 0);
-                    const totalMonthCommits = userMonthData.total_commits || 1;
-                    const proportion = subsystemCommits / totalMonthCommits;
-                    dailyCommits[dateStr].commits += Math.round(dateData.commits * proportion);
-                  }
-                }
-              }
-            } catch (error) {
-              console.warn(`Could not fetch daily data for ${devSlug}:`, error);
-            }
-          }
-        }
+      monthlyData.forEach((monthSummary) => accumulatePerDate(monthSummary?.per_date));
+      if (!Object.keys(dailyCommits).length && summaryData?.per_date) {
+        accumulatePerDate(summaryData.per_date, { from: summaryData.from, to: summaryData.to });
       }
     } else {
-      // For monthly view, get real daily data from users
       monthlyData = await collectSubsystemMonthlyData(subsystemName, dataCollectionYear);
-      
-      // Process only the month that matches our selected period
-      for (const monthSummary of monthlyData) {
-        if (monthSummary.repositories && monthSummary.from >= period.from && monthSummary.to <= period.to) {
-          // Collect all developers who worked in this subsystem this month
-          const subsystemDevelopers = new Set();
-          
-          for (const [repoName, repoData] of Object.entries(monthSummary.repositories)) {
-            const developers = repoData.developers || {};
-            for (const devSlug of Object.keys(developers)) {
-              subsystemDevelopers.add(devSlug);
-            }
-          }
-          
-          // For each developer, fetch their actual daily commit data
-          const fromDate = monthSummary.from;
-          const toDate = monthSummary.to;
-          
-          for (const devSlug of subsystemDevelopers) {
-            try {
-              const userMonthData = await fetchJSON(`/api/users/${encodeURIComponent(devSlug)}/month/${encodeURIComponent(fromDate)}/${encodeURIComponent(toDate)}`);
-              
-              const perDate = userMonthData.per_date || {};
-              const perRepo = userMonthData.per_repo || {};
-              
-              // Get list of repos in this subsystem
-              const subsystemRepos = Object.keys(monthSummary.repositories);
-              
-              // Check if user has commits in any of the subsystem repos
-              const hasSubsystemWork = subsystemRepos.some(repo => perRepo[repo] && perRepo[repo].commits > 0);
-              
-              if (hasSubsystemWork) {
-                // Add this user's daily commits (proportional to subsystem work)
-                for (const [dateStr, dateData] of Object.entries(perDate)) {
-                  if (dateData.commits > 0) {
-                    if (!dailyCommits[dateStr]) {
-                      dailyCommits[dateStr] = { commits: 0, isHighlighted: true };
-                    }
-                    // Calculate proportion of work in this subsystem
-                    const subsystemCommits = subsystemRepos.reduce((sum, repo) => {
-                      return sum + (perRepo[repo]?.commits || 0);
-                    }, 0);
-                    const totalMonthCommits = userMonthData.total_commits || 1;
-                    const proportion = subsystemCommits / totalMonthCommits;
-                    dailyCommits[dateStr].commits += Math.round(dateData.commits * proportion);
-                  }
-                }
-              }
-            } catch (error) {
-              console.warn(`Could not fetch daily data for ${devSlug}:`, error);
-            }
-          }
-        }
+      const highlightRange = {
+        from: (summaryData && summaryData.from) || period.from,
+        to: (summaryData && summaryData.to) || period.to
+      };
+      const targetSummary = summaryData?.per_date
+        ? summaryData
+        : monthlyData.find((monthSummary) => highlightRange.from === monthSummary?.from && highlightRange.to === monthSummary?.to);
+      if (targetSummary?.per_date) {
+        accumulatePerDate(targetSummary.per_date, highlightRange);
       }
     }
-    
+
     console.log("Collected daily commit data for", Object.keys(dailyCommits).length, "days");
     
     if (Object.keys(dailyCommits).length === 0) {
