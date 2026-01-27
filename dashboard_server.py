@@ -943,6 +943,72 @@ def _pick_number(data: Optional[Dict[str, Any]], *keys: str, default: int = 0) -
     return default
 
 
+def _build_member_contribution_entry(member_data: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    if not isinstance(member_data, dict):
+        member_data = {}
+    commits = _safe_int(member_data.get("total_commits"), 0)
+    additions = _pick_number(member_data, "total_lines_added", "total_additions")
+    deletions = _pick_number(member_data, "total_lines_deleted", "total_deletions")
+    per_repo = member_data.get("per_repo") if isinstance(member_data, dict) else {}
+    languages = member_data.get("languages") if isinstance(member_data, dict) else {}
+
+    subsystems_touched = 0
+    if isinstance(per_repo, dict):
+        for repo_data in per_repo.values():
+            if not isinstance(repo_data, dict):
+                continue
+            if (
+                _safe_int(repo_data.get("commits"), 0)
+                or _safe_int(repo_data.get("additions"), 0)
+                or _safe_int(repo_data.get("deletions"), 0)
+            ):
+                subsystems_touched += 1
+
+    languages_used = 0
+    if isinstance(languages, dict):
+        for lang_data in languages.values():
+            if not isinstance(lang_data, dict):
+                continue
+            if (
+                _safe_int(lang_data.get("net_lines"), 0)
+                or _safe_int(lang_data.get("additions"), 0)
+                or _safe_int(lang_data.get("deletions"), 0)
+            ):
+                languages_used += 1
+
+    return {
+        "commits": commits,
+        "additions": additions,
+        "deletions": deletions,
+        "lines_changed": additions + deletions,
+        "net_lines": additions - deletions,
+        "subsystems_touched": subsystems_touched,
+        "languages_used": languages_used,
+    }
+
+
+def _ensure_member_contributions(
+    members: List[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    existing: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    contributions: Dict[str, Dict[str, Any]] = dict(existing or {})
+    if not members or not from_date or not to_date:
+        return contributions
+    for member in members:
+        try:
+            member_data = aggregate_user_data_for_period(member, from_date, to_date)
+        except Exception:
+            member_data = {}
+        computed_entry = _build_member_contribution_entry(member_data)
+        previous_entry = contributions.get(member, {})
+        merged_entry = dict(previous_entry)
+        merged_entry.update(computed_entry)
+        contributions[member] = merged_entry
+    return contributions
+
+
 def _extract_ownership_lines(dev_data: Any) -> int:
     if isinstance(dev_data, dict):
         return _safe_int(dev_data.get("lines"), 0)
@@ -5725,6 +5791,12 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
                         payload["from"] = rank_from
                     if rank_to and not payload.get("to"):
                         payload["to"] = rank_to
+                    payload["member_contributions"] = _ensure_member_contributions(
+                        payload.get("members", []),
+                        payload.get("from"),
+                        payload.get("to"),
+                        payload.get("member_contributions", {}),
+                    )
                     target_metrics = _extract_team_metrics(payload)
                     if rank_from and rank_to:
                         peer_rankings = compute_team_peer_rankings(team_id, rank_from, rank_to, target_metrics)
@@ -5833,17 +5905,14 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
         # Use the same aggregation method as the teams overview for consistency
         member_data = aggregate_user_data_for_period(member, from_date, to_date)
         if member_data:
+            contribution_entry = _build_member_contribution_entry(member_data)
             # Aggregate basic stats
-            aggregated_data["total_commits"] += member_data.get("total_commits", 0)
-            aggregated_data["total_additions"] += member_data.get("total_lines_added", 0)
-            aggregated_data["total_deletions"] += member_data.get("total_lines_deleted", 0)
+            aggregated_data["total_commits"] += contribution_entry["commits"]
+            aggregated_data["total_additions"] += contribution_entry["additions"]
+            aggregated_data["total_deletions"] += contribution_entry["deletions"]
             
-            # Store individual member contribution
-            aggregated_data["member_contributions"][member] = {
-                "commits": member_data.get("total_commits", 0),
-                "additions": member_data.get("total_lines_added", 0),
-                "deletions": member_data.get("total_lines_deleted", 0)
-            }
+            # Store individual member contribution with comparison metrics
+            aggregated_data["member_contributions"][member] = contribution_entry
             
             # Aggregate files changed
             # Note: files_changed doesn't exist in user summaries, skip this aggregation
@@ -6676,6 +6745,12 @@ def api_team_year(team_id: str, year: int):
                 payload["total_lines_changed"] = payload.get("total_additions", 0) + payload.get("total_deletions", 0)
                 payload.setdefault("from", f"{year:04d}-01-01")
                 payload.setdefault("to", f"{year:04d}-12-31")
+                payload["member_contributions"] = _ensure_member_contributions(
+                    payload.get("members", []),
+                    payload.get("from"),
+                    payload.get("to"),
+                    payload.get("member_contributions", {}),
+                )
                 target_metrics = _extract_team_metrics(payload)
                 peer_rankings = compute_team_peer_rankings(team_id, payload["from"], payload["to"], target_metrics)
                 if peer_rankings:

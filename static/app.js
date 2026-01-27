@@ -1752,6 +1752,14 @@ function navigateToTeam(teamId) {
   selectTeam(team);
 }
 
+function getUserDisplayName(developerSlug) {
+  const user = (state.users || []).find((entry) => entry.slug === developerSlug);
+  if (user) {
+    return user.display_name || developerSlug;
+  }
+  return developerSlug;
+}
+
 function createClickableDeveloperName(developerSlug, displayName, style = "block") {
   const nameElement = document.createElement("span");
   
@@ -1786,6 +1794,30 @@ function createClickableDeveloperName(developerSlug, displayName, style = "block
   }
   
   return nameElement;
+}
+
+async function openPagerDutyForUser(userSlug) {
+  if (!isPagerDutyConfigured()) {
+    alert("Configure a PagerDuty API token under Integrations to open responder dashboards.");
+    return;
+  }
+  try {
+    const overview = await ensurePagerDutyOverview(false);
+    const responders = overview?.responders?.entries || [];
+    const responderEntry = responders.find((entry) => entry?.github_user?.slug === userSlug);
+    if (responderEntry) {
+      selectPagerDutyResponder(responderEntry);
+      return;
+    }
+    if (state.mode !== "alerts") {
+      setMode("alerts", false);
+    }
+    await showAlertsOverviewDashboard(false);
+    alert(`${getUserDisplayName(userSlug)} is not linked to a PagerDuty responder yet.`);
+  } catch (error) {
+    console.error("Failed to open PagerDuty responder for", userSlug, error);
+    alert(error?.message || "Failed to open PagerDuty data for this user.");
+  }
 }
 
 async function loadUserBadges(userSlug) {
@@ -6061,6 +6093,262 @@ async function renderTeamDashboard(team, period, summary) {
     descContainer.style.borderRadius = "8px";
     descContainer.innerHTML = '<strong>Team Description:</strong> ' + summary.description;
     main.appendChild(descContainer);
+  }
+
+  const uniqueMembers = Array.isArray(summary.members) ? Array.from(new Set(summary.members)) : [];
+  if (uniqueMembers.length > 0) {
+    const hasPagerDuty = isPagerDutyConfigured();
+    const membersCard = document.createElement("div");
+    membersCard.className = "card team-members-card";
+    membersCard.innerHTML = createTitleWithTooltip(
+      "👥 Team members",
+      "View who is on this team and jump directly to developer or PagerDuty details.",
+      "h2"
+    );
+
+    const memberStats = summary.member_contributions || {};
+    const toNumber = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const formatNumber = (value) => (Number(value) || 0).toLocaleString();
+
+    const membersData = uniqueMembers.map((memberSlug) => {
+      const stats = memberStats[memberSlug] || {};
+      const displayName = getUserDisplayName(memberSlug);
+      const additions = toNumber(stats.additions ?? stats.total_additions ?? stats.total_lines_added ?? 0);
+      const deletions = toNumber(stats.deletions ?? stats.total_deletions ?? stats.total_lines_deleted ?? 0);
+      const commits = toNumber(stats.commits ?? stats.total_commits ?? 0);
+      const netLines = toNumber(stats.net_lines ?? (additions - deletions));
+      return {
+        slug: memberSlug,
+        displayName,
+        subsystems_touched: toNumber(stats.subsystems_touched),
+        languages_used: toNumber(stats.languages_used),
+        commits,
+        additions,
+        deletions,
+        net_lines: netLines
+      };
+    });
+
+    const totals = membersData.reduce((acc, member) => {
+      acc.subsystems_touched += member.subsystems_touched;
+      acc.languages_used += member.languages_used;
+      acc.commits += member.commits;
+      acc.additions += member.additions;
+      acc.deletions += member.deletions;
+      acc.net_lines += member.net_lines;
+      return acc;
+    }, {
+      subsystems_touched: 0,
+      languages_used: 0,
+      commits: 0,
+      additions: 0,
+      deletions: 0,
+      net_lines: 0
+    });
+
+    const columns = [
+      { key: "displayName", label: "Member", sortable: true, type: "string", defaultDirection: "asc" },
+      { key: "subsystems_touched", label: "Subsystems touched", sortable: true, type: "number", defaultDirection: "desc" },
+      { key: "languages_used", label: "Languages", sortable: true, type: "number", defaultDirection: "desc" },
+      { key: "commits", label: "Commits", sortable: true, type: "number", defaultDirection: "desc" },
+      { key: "additions", label: "Lines added", sortable: true, type: "number", defaultDirection: "desc" },
+      { key: "deletions", label: "Lines deleted", sortable: true, type: "number", defaultDirection: "desc" },
+      { key: "net_lines", label: "Net lines", sortable: true, type: "number", defaultDirection: "desc" }
+    ];
+
+    let sortState = { key: "commits", direction: "desc" };
+    const columnMap = columns.reduce((acc, column) => {
+      acc[column.key] = column;
+      return acc;
+    }, {});
+
+    const membersTable = document.createElement("table");
+    membersTable.className = "data-table team-members-table sortable-table";
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    const columnIndicators = {};
+
+    columns.forEach((column) => {
+      const th = document.createElement("th");
+      th.textContent = column.label;
+      if (column.sortable) {
+        th.dataset.sortKey = column.key;
+        th.style.cursor = "pointer";
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+        indicator.style.marginLeft = "6px";
+        indicator.style.fontSize = "0.8em";
+        indicator.style.opacity = "0.7";
+        indicator.style.visibility = "hidden";
+        columnIndicators[column.key] = indicator;
+        th.appendChild(indicator);
+        th.addEventListener("click", () => {
+          if (sortState.key === column.key) {
+            sortState.direction = sortState.direction === "asc" ? "desc" : "asc";
+          } else {
+            sortState = {
+              key: column.key,
+              direction: column.defaultDirection || (column.type === "string" ? "asc" : "desc")
+            };
+          }
+          renderRows();
+        });
+      }
+      headerRow.appendChild(th);
+    });
+
+    const detailsTh = document.createElement("th");
+    detailsTh.textContent = "Developer details";
+    headerRow.appendChild(detailsTh);
+
+    if (hasPagerDuty) {
+      const pdTh = document.createElement("th");
+      pdTh.textContent = "PagerDuty";
+      headerRow.appendChild(pdTh);
+    }
+
+    thead.appendChild(headerRow);
+    membersTable.appendChild(thead);
+
+    const tableBody = document.createElement("tbody");
+    membersTable.appendChild(tableBody);
+
+    const tfoot = document.createElement("tfoot");
+    const totalsRow = document.createElement("tr");
+    totalsRow.style.fontWeight = "bold";
+    totalsRow.style.borderTop = "2px solid var(--border)";
+
+    const totalLabelCell = document.createElement("td");
+    totalLabelCell.textContent = "Total";
+    totalsRow.appendChild(totalLabelCell);
+
+    columns.slice(1).forEach((column) => {
+      const cell = document.createElement("td");
+      const totalValue = totals[column.key] || 0;
+      cell.textContent = formatNumber(totalValue);
+      if (column.key === "additions" || (column.key === "net_lines" && totalValue >= 0)) {
+        cell.style.color = "#22c55e";
+      } else if (column.key === "deletions" || (column.key === "net_lines" && totalValue < 0)) {
+        cell.style.color = "#ef4444";
+      }
+      totalsRow.appendChild(cell);
+    });
+
+    const totalActionsCell = document.createElement("td");
+    totalActionsCell.colSpan = hasPagerDuty ? 2 : 1;
+    totalsRow.appendChild(totalActionsCell);
+
+    tfoot.appendChild(totalsRow);
+    membersTable.appendChild(tfoot);
+
+    function compareMembers(a, b) {
+      const column = columnMap[sortState.key] || columns[0];
+      let valueA;
+      let valueB;
+      if (column.type === "string") {
+        valueA = (a[column.key] || "").toLowerCase();
+        valueB = (b[column.key] || "").toLowerCase();
+      } else {
+        valueA = Number(a[column.key]) || 0;
+        valueB = Number(b[column.key]) || 0;
+      }
+      if (valueA === valueB) {
+        return a.displayName.localeCompare(b.displayName);
+      }
+      const direction = sortState.direction === "asc" ? 1 : -1;
+      return valueA < valueB ? -1 * direction : 1 * direction;
+    }
+
+    function updateSortIndicators() {
+      Object.entries(columnIndicators).forEach(([key, indicator]) => {
+        if (!indicator) {
+          return;
+        }
+        if (sortState.key === key) {
+          indicator.textContent = sortState.direction === "asc" ? "↑" : "↓";
+          indicator.style.visibility = "visible";
+        } else {
+          indicator.textContent = "";
+          indicator.style.visibility = "hidden";
+        }
+      });
+    }
+
+    function renderRows() {
+      const sortedMembers = [...membersData].sort(compareMembers);
+      tableBody.innerHTML = "";
+      sortedMembers.forEach((member) => {
+        const row = document.createElement("tr");
+        row.className = "clickable-row";
+        row.dataset.member = member.slug;
+        row.addEventListener("click", (event) => {
+          if (event.target.closest("button")) {
+            return;
+          }
+          navigateToUser(member.slug, period);
+        });
+
+        const nameCell = document.createElement("td");
+        nameCell.appendChild(createClickableDeveloperName(member.slug, member.displayName, "inline"));
+        row.appendChild(nameCell);
+
+        columns.slice(1).forEach((column) => {
+          const cell = document.createElement("td");
+          const value = member[column.key] || 0;
+          cell.textContent = formatNumber(value);
+          if (column.key === "additions" || (column.key === "net_lines" && value >= 0)) {
+            cell.style.color = "#22c55e";
+          } else if (column.key === "deletions" || (column.key === "net_lines" && value < 0)) {
+            cell.style.color = "#ef4444";
+          }
+          row.appendChild(cell);
+        });
+
+        const detailsCell = document.createElement("td");
+        detailsCell.className = "team-member-action-cell";
+        const detailsButton = document.createElement("button");
+        detailsButton.type = "button";
+        detailsButton.className = "btn-link team-member-action";
+        detailsButton.textContent = "Open user";
+        detailsButton.title = "Open developer dashboard";
+        detailsButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          navigateToUser(member.slug, period);
+        });
+        detailsCell.appendChild(detailsButton);
+        row.appendChild(detailsCell);
+
+        if (hasPagerDuty) {
+          const pdCell = document.createElement("td");
+          pdCell.className = "team-member-action-cell";
+          const pdButton = document.createElement("button");
+          pdButton.type = "button";
+          pdButton.className = "btn-link team-member-action";
+          pdButton.textContent = "PagerDuty";
+          pdButton.title = "Open PagerDuty responder dashboard";
+          pdButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openPagerDutyForUser(member.slug);
+          });
+          pdCell.appendChild(pdButton);
+          row.appendChild(pdCell);
+        }
+
+        tableBody.appendChild(row);
+      });
+      updateSortIndicators();
+    }
+
+    renderRows();
+
+    membersCard.appendChild(membersTable);
+    main.appendChild(membersCard);
   }
 
   // Team responsibilities with detailed line counts (only for yearly view)
