@@ -14024,6 +14024,8 @@ async function removeRepository(repoName) {
       if (result.async) {
         console.log("Removal started in background, polling for completion...");
         const loadingDiv = document.getElementById('removal-loading');
+        const startTime = Date.now();
+        let removalTimeout;
         
         // Poll every 2 seconds to check if repository is removed
         const pollInterval = setInterval(async () => {
@@ -14036,6 +14038,7 @@ async function removeRepository(repoName) {
               if (!stillExists) {
                 // Repository removed!
                 clearInterval(pollInterval);
+                clearTimeout(removalTimeout);
                 console.log("Repository successfully removed");
                 
                 // Update local data
@@ -14080,8 +14083,7 @@ async function removeRepository(repoName) {
         }, 2000);
         
         // Set a max timeout of 10 minutes
-        const startTime = Date.now();
-        setTimeout(() => {
+        removalTimeout = setTimeout(() => {
           clearInterval(pollInterval);
           const loadingDiv = document.getElementById('removal-loading');
           if (loadingDiv) {
@@ -15642,14 +15644,26 @@ function createUserOwnershipChart(canvasId, subsystemName, timelineData) {
     return;
   }
   
-  // Calculate dynamic Y-axis range
-  const values = timelineData.ownership;
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
+  const values = Array.isArray(timelineData.ownership) ? timelineData.ownership : [];
+  if (!values.length) {
+    console.warn("No ownership data for", subsystemName);
+    return;
+  }
   
-  // Add 10% padding above and below for better visualization
+  // Calculate dynamic Y-axis range with safe padding for flat datasets
+  let minValue = Math.min(...values);
+  let maxValue = Math.max(...values);
+  if (!isFinite(minValue) || !isFinite(maxValue)) {
+    minValue = 0;
+    maxValue = 0;
+  }
+  if (maxValue === minValue) {
+    const delta = Math.max(1, maxValue * 0.05 || 1);
+    minValue = Math.max(0, minValue - delta);
+    maxValue = Math.min(100, maxValue + delta);
+  }
   const range = maxValue - minValue;
-  const padding = range * 0.1;
+  const padding = Math.max(0.5, range * 0.1);
   const yMin = Math.max(0, minValue - padding);
   const yMax = Math.min(100, maxValue + padding);
   

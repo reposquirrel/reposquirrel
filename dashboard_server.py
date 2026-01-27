@@ -2774,7 +2774,19 @@ def api_user_ownership_timeline(user_slug: str):
                 # Calculate backward timeline
                 all_months = sorted(set(month for dev_data in monthly_net_changes.values() for month in dev_data.keys()))
                 if not all_months:
-                    continue
+                    fallback_months = set()
+                    for period_dir in os.listdir(subsystem_path):
+                        if period_dir == 'languages.json' or '_12-31' in period_dir:
+                            continue
+                        try:
+                            from_date_str = period_dir.split('_')[0]
+                            period_date = datetime.strptime(from_date_str, "%Y-%m-%d")
+                            fallback_months.add(period_date.strftime("%Y-%m"))
+                        except Exception:
+                            continue
+                    if not fallback_months:
+                        fallback_months.add(datetime.utcnow().strftime("%Y-%m"))
+                    all_months = sorted(fallback_months)
                 
                 percentages = []
                 dev_lines = current_ownership_lines
