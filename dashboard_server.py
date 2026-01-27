@@ -1345,6 +1345,130 @@ def compute_user_year_peer_rankings(user_slug: str, year: int) -> Dict[str, Dict
 
 TEAM_METRIC_FIELDS = ("total_commits", "total_lines_changed", "subsystems_touched")
 
+SUBSYSTEM_METRIC_FIELDS = (
+    "total_commits",
+    "total_lines_added",
+    "total_lines_deleted",
+    "net_lines",
+    "total_changed_lines",
+)
+
+
+def _extract_subsystem_metrics(summary: Dict[str, Any]) -> Dict[str, int]:
+    total_commits = _safe_int(summary.get("total_commits"), _safe_int(summary.get("commits"), 0))
+    additions = _pick_number(
+        summary,
+        "total_lines_added",
+        "total_additions",
+        "lines_added",
+        default=0,
+    )
+    deletions = _pick_number(
+        summary,
+        "total_lines_deleted",
+        "total_deletions",
+        "lines_deleted",
+        default=0,
+    )
+    net_lines = additions - deletions
+    changed_lines_value = summary.get("total_changed_lines")
+    if changed_lines_value is None:
+        changed_lines = additions + deletions
+    else:
+        changed_lines = _safe_int(changed_lines_value, additions + deletions)
+    return {
+        "total_commits": total_commits,
+        "total_lines_added": additions,
+        "total_lines_deleted": deletions,
+        "net_lines": net_lines,
+        "total_changed_lines": changed_lines,
+    }
+
+
+def _load_subsystem_rows_for_period(
+    from_date: str,
+    to_date: str,
+    target_subsystem: Optional[str] = None,
+    target_metrics: Optional[Dict[str, int]] = None,
+) -> List[Tuple[str, Dict[str, int]]]:
+    folder = f"{from_date}_{to_date}"
+    subsystems_root = os.path.join(STATS_ROOT, "subsystems")
+    rows: List[Tuple[str, Dict[str, int]]] = []
+    if not os.path.isdir(subsystems_root):
+        return rows
+    for subsystem_name in os.listdir(subsystems_root):
+        subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+        if not os.path.isdir(subsystem_dir):
+            continue
+        metrics: Optional[Dict[str, int]] = None
+        if subsystem_name == target_subsystem and target_metrics is not None:
+            metrics = target_metrics
+        else:
+            summary_path = os.path.join(subsystem_dir, folder, "summary.json")
+            if not os.path.isfile(summary_path):
+                continue
+            try:
+                summary_data = load_json(summary_path)
+            except Exception:
+                continue
+            metrics = _extract_subsystem_metrics(summary_data)
+        if metrics is None:
+            continue
+        rows.append((subsystem_name, metrics))
+    return rows
+
+
+def _build_subsystem_peer_rankings(
+    rows: List[Tuple[str, Dict[str, int]]],
+    target_subsystem: str,
+) -> Dict[str, Dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return {}
+    rows_map = {subsystem: metrics for subsystem, metrics in rows}
+    if target_subsystem not in rows_map:
+        return {}
+    rankings: Dict[str, Dict[str, Any]] = {}
+    for metric in SUBSYSTEM_METRIC_FIELDS:
+        metric_values: List[Tuple[str, float]] = [
+            (subsystem, float(metrics.get(metric, 0))) for subsystem, metrics in rows
+        ]
+        metric_values.sort(key=lambda item: item[1], reverse=True)
+        prev_value: Optional[float] = None
+        current_rank = 0
+        for index, (subsystem_key, value) in enumerate(metric_values, start=1):
+            if prev_value is None or value != prev_value:
+                current_rank = index
+                prev_value = value
+            if subsystem_key == target_subsystem:
+                percentile = 100.0 if total == 0 else round((current_rank / total) * 100, 1)
+                rankings[metric] = {
+                    "rank": current_rank,
+                    "value": value,
+                    "total": total,
+                    "percentile": percentile,
+                }
+                break
+    return rankings
+
+
+def compute_subsystem_peer_rankings(
+    subsystem_name: str,
+    from_date: Optional[str],
+    to_date: Optional[str],
+    target_metrics: Optional[Dict[str, int]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if not from_date and not to_date:
+        return {}
+    if not from_date:
+        from_date = to_date
+    if not to_date:
+        to_date = from_date
+    if not from_date or not to_date:
+        return {}
+    rows = _load_subsystem_rows_for_period(from_date, to_date, subsystem_name, target_metrics)
+    return _build_subsystem_peer_rankings(rows, subsystem_name)
+
 
 def _load_teams_config() -> Dict[str, Any]:
     teams_file_path = os.path.join(BASE_DIR, "configuration", "teams.json")
@@ -3101,6 +3225,11 @@ def api_subsystem_month(subsystem_name: str, from_date: str, to_date: str):
             data["dead_status"] = dead_status[subsystem_name]
         else:
             data["dead_status"] = {"is_dead": False, "last_activity_date": None, "months_since_activity": None}
+
+        metrics = _extract_subsystem_metrics(data)
+        peer_rankings = compute_subsystem_peer_rankings(subsystem_name, from_date, to_date, metrics)
+        if peer_rankings:
+            data["peer_rankings"] = peer_rankings
         
         return jsonify(data)
     
@@ -3125,6 +3254,11 @@ def api_subsystem_year(subsystem_name: str, year: int):
             data["dead_status"] = dead_status[subsystem_name]
         else:
             data["dead_status"] = {"is_dead": False, "last_activity_date": None, "months_since_activity": None}
+
+        metrics = _extract_subsystem_metrics(data)
+        peer_rankings = compute_subsystem_peer_rankings(subsystem_name, from_date, to_date, metrics)
+        if peer_rankings:
+            data["peer_rankings"] = peer_rankings
         
         return jsonify(data)
     

@@ -69,6 +69,19 @@ body {
   flex-direction: column;
 }
 
+#sidebar-alerts {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+#sidebar-alerts .sidebar-list.primary {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .sidebar-section h2 {
   flex-shrink: 0;
   font-size: 13px;

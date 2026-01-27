@@ -701,7 +701,7 @@ function updateAlertsModeVisibility() {
     }
   }
   if (alertsSidebar) {
-    alertsSidebar.style.display = configured && state.mode === "alerts" ? "block" : "none";
+    alertsSidebar.style.display = configured && state.mode === "alerts" ? "flex" : "none";
   }
   if (!configured) {
     state.alerts.overview = null;
@@ -1447,7 +1447,7 @@ function setMode(mode, showOverview = true) {
     subsystemSidebar.style.display = mode === "subsystems" ? "block" : "none";
   }
   if (alertsSidebar) {
-    alertsSidebar.style.display = mode === "alerts" && isPagerDutyConfigured() ? "block" : "none";
+    alertsSidebar.style.display = mode === "alerts" && isPagerDutyConfigured() ? "flex" : "none";
   }
   
   // Clear main content when switching modes
@@ -5907,19 +5907,46 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
     const kpiContainer = document.createElement("div");
     kpiContainer.className = "kpi-grid";
 
-    // Use unified service data structure for all subsystems
+    const kpiRankings = summary.peer_rankings || {};
+
+    const totalCommits = Number(summary.total_commits ?? summary.commits ?? 0);
+    const linesAdded = Number(
+      summary.total_lines_added ?? summary.total_additions ?? summary.lines_added ?? 0
+    );
+    const linesDeleted = Number(
+      summary.total_lines_deleted ?? summary.total_deletions ?? summary.lines_deleted ?? 0
+    );
+    const netLines = linesAdded - linesDeleted;
+    const changedLines = Number(
+      summary.total_changed_lines ?? summary.total_lines_changed ?? linesAdded + linesDeleted
+    );
+
     const kpis = [
-      { label: "Total commits", value: summary.total_commits || 0 },
-      { label: "Lines added", value: summary.total_lines_added || 0 },
-      { label: "Lines deleted", value: summary.total_lines_deleted || 0 },
-      { label: "Net lines", value: (summary.total_lines_added || 0) - (summary.total_lines_deleted || 0) },
-      { label: "Changed lines", value: summary.total_changed_lines || 0 }
+      { label: "Total commits", value: totalCommits, metric: "total_commits" },
+      { label: "Lines added", value: linesAdded, metric: "total_lines_added", emphasize: "positive" },
+      { label: "Lines deleted", value: linesDeleted, metric: "total_lines_deleted", emphasize: "negative" },
+      { label: "Net lines", value: netLines, metric: "net_lines" },
+      { label: "Changed lines", value: changedLines, metric: "total_changed_lines" }
     ];
 
     kpis.forEach((k) => {
       const card = document.createElement("div");
       card.className = "kpi-card";
-      card.innerHTML = '<div class="kpi-label">' + k.label + '</div><div class="kpi-value">' + k.value + '</div>';
+      const displayValue = typeof k.value === "number" ? k.value.toLocaleString() : k.value;
+      const rankText = k.metric ? formatRankSummary(kpiRankings[k.metric]) : "";
+      card.innerHTML = `
+        <div class="kpi-label">${k.label}</div>
+        <div class="kpi-value">${displayValue}</div>
+        ${rankText ? `<div class="kpi-rank">${rankText}</div>` : ""}
+      `;
+      const valueElement = card.querySelector(".kpi-value");
+      if (valueElement) {
+        if (k.emphasize === "positive" || (k.label === "Net lines" && Number(k.value) >= 0)) {
+          valueElement.style.color = "#22c55e";
+        } else if (k.emphasize === "negative" || (k.label === "Net lines" && Number(k.value) < 0)) {
+          valueElement.style.color = "#ef4444";
+        }
+      }
       kpiContainer.appendChild(card);
     });
 
