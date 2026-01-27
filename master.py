@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import multiprocessing
 from collections import defaultdict
 import importlib
+import threading
 from typing import Any, Optional, List, Tuple
 
 try:
@@ -329,39 +330,65 @@ def git_pull_repositories(repos_root: str, timeout: int = 300) -> bool:
     for idx, (repo_name, repo_path) in enumerate(repos, start=1):
         logger.info("(%s/%s) git pull %s", idx, total, repo_name)
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["git", "-C", repo_path, "pull", "--ff-only"],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout,
-                check=False,
+                bufsize=1,
                 env=git_env,
             )
         except FileNotFoundError:
             logger.info("ERROR: git executable not found while updating %s", repo_name)
             return False
+
+        last_line: str = ""
+
+        def _stream_output(pipe: Optional[Any]) -> None:
+            nonlocal last_line
+            if pipe is None:
+                return
+            for raw_line in iter(pipe.readline, ""):
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                last_line = line
+                logger.info("    %s", line)
+            pipe.close()
+
+        reader_thread = threading.Thread(target=_stream_output, args=(process.stdout,))
+        reader_thread.daemon = True
+        reader_thread.start()
+
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            timed_out = True
+            success = False
+            process.kill()
             logger.info(
                 "WARNING: git pull timed out for %s after %s seconds (continuing with existing data)",
                 repo_name,
                 timeout,
             )
-            success = False
+        finally:
+            reader_thread.join()
+
+        if timed_out:
             continue
-        if result.returncode != 0:
+
+        if process.returncode != 0:
             success = False
-            stderr = (result.stderr or "").strip()
-            stdout = (result.stdout or "").strip()
-            if stderr:
-                logger.info("    git pull failed: %s", stderr.splitlines()[-1])
-            elif stdout:
-                logger.info("    git pull output: %s", stdout.splitlines()[-1])
+            if last_line:
+                logger.info("    git pull failed: %s", last_line)
             else:
-                logger.info("    git pull failed with exit code %s", result.returncode)
+                logger.info("    git pull failed with exit code %s", process.returncode)
             continue
-        output_lines = (result.stdout or "").strip().splitlines()
-        summary = output_lines[-1] if output_lines else "Already up to date."
-        logger.info("    %s", summary)
+
+        if not last_line:
+            last_line = "Already up to date."
+            logger.info("    %s", last_line)
 
     return success
 
