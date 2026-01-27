@@ -2285,7 +2285,8 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
     month_labels = [f"{year:04d}-{month:02d}" for month in range(1, 13)]
     series_map: dict[str, dict[str, dict]] = {
         subsystem_name: {
-            label: {"month": label, "code_lines": 0, "files": 0} for label in month_labels
+            label: {"month": label, "code_lines": 0, "files": 0, "recorded": False}
+            for label in month_labels
         }
         for subsystem_name, _, _, _, _ in prepared_subsystems
     }
@@ -2316,6 +2317,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
         until = f"{year + 1:04d}-01-01" if month == 12 else f"{year:04d}-{month + 1:02d}-01"
         month_label = f"{year:04d}-{month:02d}"
 
+    
         try:
             rev_list_cmd = [
                 "git", "-C", repo_path, "rev-list",
@@ -2342,7 +2344,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                     rl.returncode,
                     (rl.stderr or "").strip(),
                 )
-                return subsystem_name, month_label, 0, 0
+                return subsystem_name, month_label, 0, 0, False
 
             revs = [line.strip() for line in rl.stdout.splitlines() if line.strip()]
             if not revs:
@@ -2352,7 +2354,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                     since,
                     until,
                 )
-                return subsystem_name, month_label, 0, 0
+                return subsystem_name, month_label, 0, 0, False
 
             rev = revs[0]
 
@@ -2373,7 +2375,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                         ls.returncode,
                         (ls.stderr or "").strip(),
                     )
-                    return subsystem_name, month_label, 0, 0
+                    return subsystem_name, month_label, 0, 0, False
 
                 present_files = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
                 if not present_files:
@@ -2383,7 +2385,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                         rev,
                         filtered_list,
                     )
-                    return subsystem_name, month_label, 0, 0
+                    return subsystem_name, month_label, 0, 0, False
 
             tmpdir = tempfile.mkdtemp(prefix="loc-precompute-")
             try:
@@ -2406,7 +2408,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                         rev,
                         ar.returncode,
                     )
-                    return subsystem_name, month_label, 0, 0
+                    return subsystem_name, month_label, 0, 0, False
 
                 with open(tar_path, "wb") as tf:
                     tf.write(ar.stdout)
@@ -2433,7 +2435,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                         subsystem_name,
                         rev,
                     )
-                    return subsystem_name, month_label, 0, 0
+                    return subsystem_name, month_label, 0, 0, False
 
                 total_data = data.get("Total") or {}
                 total_code = int(total_data.get("code") or 0)
@@ -2452,7 +2454,7 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                     total_code,
                     total_files,
                 )
-                return subsystem_name, month_label, total_code, total_files
+                return subsystem_name, month_label, total_code, total_files, True
 
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2464,7 +2466,19 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
                 month_label,
                 e,
             )
-            return subsystem_name, month_label, 0, 0
+            return subsystem_name, month_label, 0, 0, False
+
+    def _carry_forward_series(entries: dict[str, dict]):
+        last_lines = None
+        last_files = None
+        for label in month_labels:
+            entry = entries[label]
+            if entry.get("recorded"):
+                last_lines = entry.get("code_lines")
+                last_files = entry.get("files")
+            elif last_lines is not None:
+                entry["code_lines"] = last_lines
+                entry["files"] = last_files
 
     if max_workers > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2473,29 +2487,32 @@ def precompute_loc_evolution(year: int, repos_root: str, services_file: str, out
             }
             for future in as_completed(future_map):
                 try:
-                    subsystem_name, month_label, code_lines, total_files = future.result()
-                    series_map[subsystem_name][month_label] = {
-                        "month": month_label,
-                        "code_lines": code_lines,
-                        "files": total_files,
-                    }
+                    subsystem_name, month_label, code_lines, total_files, recorded = future.result()
+                    entry = series_map[subsystem_name][month_label]
+                    entry["code_lines"] = code_lines
+                    entry["files"] = total_files
+                    entry["recorded"] = recorded
                 except Exception as exc:
                     subsystem_name, _ = future_map[future]
                     logger.warning("[loc-precompute] Unexpected failure for %s: %s", subsystem_name, exc)
     else:
         for task in tasks:
-            subsystem_name, month_label, code_lines, total_files = process_month_task(*task)
-            series_map[subsystem_name][month_label] = {
-                "month": month_label,
-                "code_lines": code_lines,
-                "files": total_files,
-            }
+            subsystem_name, month_label, code_lines, total_files, recorded = process_month_task(*task)
+            entry = series_map[subsystem_name][month_label]
+            entry["code_lines"] = code_lines
+            entry["files"] = total_files
+            entry["recorded"] = recorded
 
     for subsystem_name, _, _, _, _ in prepared_subsystems:
         out_dir = os.path.join(subsystems_root, subsystem_name, "monthly")
         os.makedirs(out_dir, exist_ok=True)
         out_file = os.path.join(out_dir, f"{year:04d}.json")
-        ordered_series = [series_map[subsystem_name][label] for label in month_labels]
+        _carry_forward_series(series_map[subsystem_name])
+        ordered_series = []
+        for label in month_labels:
+            entry = series_map[subsystem_name][label]
+            entry.pop("recorded", None)
+            ordered_series.append(entry)
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(
                 {"generated_at": datetime.utcnow().isoformat() + "Z", "series": ordered_series},
