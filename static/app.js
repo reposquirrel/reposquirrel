@@ -6349,18 +6349,33 @@ async function renderTeamDashboard(team, period, summary) {
     primaryLanguage = correctPrimary || "None detected";
   }
 
+  const totalCommits = summary.total_commits || summary.commits || 0;
+  const totalAdditions = summary.total_additions || summary.lines_added || 0;
+  const totalDeletions = summary.total_deletions || summary.lines_deleted || 0;
+  const totalLinesChanged = summary.total_lines_changed || (totalAdditions + totalDeletions);
+  const subsystemsTouched = summary.subsystems_touched || Object.keys(summary.subsystems || {}).length || 0;
+  const teamPeerRankings = summary.peer_rankings || {};
+ 
   const kpis = [
     { label: "Team Members", value: summary.members?.length || 0 },
-    { label: "Total Commits", value: summary.total_commits || summary.commits || 0 },
-    { label: "Lines Added", value: summary.total_additions || summary.lines_added || 0 },
-    { label: "Lines Deleted", value: summary.total_deletions || summary.lines_deleted || 0 },
-    { label: "Primary Language", value: primaryLanguage }
+    { label: "Total Commits", value: totalCommits, metric: "total_commits" },
+    { label: "Lines Changed", value: totalLinesChanged, metric: "total_lines_changed" },
+    { label: "Subsystems Touched", value: subsystemsTouched, metric: "subsystems_touched" },
+    { label: "Primary Language", value: primaryLanguage },
+    { label: "Lines Added", value: totalAdditions },
+    { label: "Lines Deleted", value: totalDeletions }
   ];
 
   kpis.forEach((k) => {
     const card = document.createElement("div");
     card.className = "kpi-card";
-    card.innerHTML = '<div class="kpi-label">' + k.label + '</div><div class="kpi-value">' + k.value + '</div>';
+    const rankText = k.metric ? formatRankSummary(teamPeerRankings[k.metric]) : "";
+    const displayValue = typeof k.value === "number" ? k.value.toLocaleString() : k.value;
+    card.innerHTML = `
+      <div class="kpi-label">${k.label}</div>
+      <div class="kpi-value">${displayValue}</div>
+      ${rankText ? `<div class="kpi-rank">${rankText}</div>` : ""}
+    `;
     kpiContainer.appendChild(card);
   });
 

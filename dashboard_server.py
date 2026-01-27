@@ -14,6 +14,7 @@ import multiprocessing
 import shutil
 import tempfile
 import copy
+import calendar
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Tuple, Optional, Set
 from collections import defaultdict, Counter
@@ -933,6 +934,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _pick_number(data: Optional[Dict[str, Any]], *keys: str, default: int = 0) -> int:
+    if not isinstance(data, dict):
+        return default
+    for key in keys:
+        if key in data and data[key] is not None:
+            return _safe_int(data[key], default)
+    return default
+
+
 def _extract_ownership_lines(dev_data: Any) -> int:
     if isinstance(dev_data, dict):
         return _safe_int(dev_data.get("lines"), 0)
@@ -1255,6 +1265,198 @@ def compute_user_year_peer_rankings(user_slug: str, year: int) -> Dict[str, Dict
     if subsystem_rank:
         rankings["subsystems_touched"] = subsystem_rank
     return rankings
+
+
+TEAM_METRIC_FIELDS = ("total_commits", "total_lines_changed", "subsystems_touched")
+
+
+def _load_teams_config() -> Dict[str, Any]:
+    teams_file_path = os.path.join(BASE_DIR, "configuration", "teams.json")
+    if not os.path.isfile(teams_file_path):
+        return {}
+    try:
+        data = load_json(teams_file_path)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _load_alias_map() -> Dict[str, Any]:
+    alias_file = os.path.join(BASE_DIR, "configuration", "alias.json")
+    if not os.path.isfile(alias_file):
+        return {}
+    try:
+        data = load_json(alias_file)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _canonicalize_team_members(members: List[str], alias_map: Dict[str, Any]) -> List[str]:
+    canonical_members: List[str] = []
+    for member in members or []:
+        canonical = member
+        for canonical_slug, aliases in alias_map.items():
+            if isinstance(aliases, list) and member in aliases:
+                canonical = canonical_slug
+                break
+            if isinstance(aliases, str) and member == aliases:
+                canonical = canonical_slug
+                break
+        if canonical:
+            canonical_members.append(canonical)
+    unique_members: List[str] = []
+    seen: Set[str] = set()
+    for slug in canonical_members:
+        if slug and slug not in seen:
+            seen.add(slug)
+            unique_members.append(slug)
+    return unique_members
+
+
+def _extract_team_metrics(summary: Dict[str, Any]) -> Dict[str, int]:
+    total_commits = _safe_int(summary.get("total_commits"), _safe_int(summary.get("commits"), 0))
+    additions = _safe_int(summary.get("total_additions"), _safe_int(summary.get("lines_added"), 0))
+    deletions = _safe_int(summary.get("total_deletions"), _safe_int(summary.get("lines_deleted"), 0))
+    subsystems_value = summary.get("subsystems_touched")
+    if subsystems_value is None:
+        subsystems_value = len((summary.get("subsystems") or {}))
+    subsystems_touched = _safe_int(subsystems_value, 0)
+    total_lines_changed = additions + deletions
+    return {
+        "total_commits": total_commits,
+        "total_additions": additions,
+        "total_deletions": deletions,
+        "total_lines_changed": total_lines_changed,
+        "subsystems_touched": subsystems_touched,
+    }
+
+
+def _aggregate_team_metrics_for_period(
+    team_id: str,
+    team_info: Optional[Dict[str, Any]],
+    alias_map: Dict[str, Any],
+    from_date: str,
+    to_date: str,
+) -> Dict[str, int]:
+    if not from_date and not to_date:
+        return {
+            "total_commits": 0,
+            "total_additions": 0,
+            "total_deletions": 0,
+            "total_lines_changed": 0,
+            "subsystems_touched": 0,
+        }
+    if not from_date:
+        from_date = to_date or ""
+    if not to_date:
+        to_date = from_date or ""
+    if not from_date or not to_date:
+        return {
+            "total_commits": 0,
+            "total_additions": 0,
+            "total_deletions": 0,
+            "total_lines_changed": 0,
+            "subsystems_touched": 0,
+        }
+    members = team_info.get("members", []) if team_info else []
+    canonical_members = _canonicalize_team_members(members, alias_map)
+    stats = {
+        "total_commits": 0,
+        "total_additions": 0,
+        "total_deletions": 0,
+        "total_lines_changed": 0,
+        "subsystems_touched": 0,
+    }
+    subsystem_set: Set[str] = set()
+    for member in canonical_members:
+        member_data = aggregate_user_data_for_period(member, from_date, to_date)
+        if not member_data:
+            continue
+        stats["total_commits"] += _safe_int(member_data.get("total_commits"), 0)
+        additions = _pick_number(member_data, "total_lines_added", "total_additions")
+        deletions = _pick_number(member_data, "total_lines_deleted", "total_deletions")
+        stats["total_additions"] += additions
+        stats["total_deletions"] += deletions
+        for repo in (member_data.get("per_repo") or {}).keys():
+            subsystem_set.add(repo)
+    stats["total_lines_changed"] = stats["total_additions"] + stats["total_deletions"]
+    stats["subsystems_touched"] = len(subsystem_set)
+    return stats
+
+
+def _build_team_peer_rankings(
+    rows: List[Tuple[str, Dict[str, Any]]],
+    target_team_id: str,
+) -> Dict[str, Dict[str, Any]]:
+    total = len(rows)
+    if total == 0:
+        return {}
+    rows_map = {team_id: metrics for team_id, metrics in rows}
+    if target_team_id not in rows_map:
+        return {}
+    rankings: Dict[str, Dict[str, Any]] = {}
+    for metric in TEAM_METRIC_FIELDS:
+        metric_values: List[Tuple[str, float]] = [
+            (team_id, float(metrics.get(metric, 0))) for team_id, metrics in rows
+        ]
+        metric_values.sort(key=lambda item: item[1], reverse=True)
+        prev_value: Optional[float] = None
+        current_rank = 0
+        for index, (team_key, value) in enumerate(metric_values, start=1):
+            if prev_value is None or value != prev_value:
+                current_rank = index
+                prev_value = value
+            if team_key == target_team_id:
+                percentile = 100.0 if total == 0 else round((current_rank / total) * 100, 1)
+                rankings[metric] = {
+                    "rank": current_rank,
+                    "value": value,
+                    "total": total,
+                    "percentile": percentile,
+                }
+                break
+    return rankings
+
+
+def compute_team_peer_rankings(
+    team_id: str,
+    from_date: Optional[str],
+    to_date: Optional[str],
+    target_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if not from_date and not to_date:
+        return {}
+    if not from_date:
+        from_date = to_date
+    if not to_date:
+        to_date = from_date
+    if not from_date or not to_date:
+        return {}
+    teams_config = _load_teams_config()
+    if not teams_config:
+        return {}
+    alias_map = _load_alias_map()
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    for other_team_id, team_info in teams_config.items():
+        if other_team_id == team_id and target_metrics is not None:
+            metrics = target_metrics
+        else:
+            metrics = _aggregate_team_metrics_for_period(
+                other_team_id,
+                team_info,
+                alias_map,
+                from_date,
+                to_date,
+            )
+        rows.append((other_team_id, metrics))
+    if team_id not in teams_config and target_metrics is not None:
+        rows.append((team_id, target_metrics))
+    return _build_team_peer_rankings(rows, team_id)
 
 
 def list_repos_with_blame() -> List[str]:
@@ -5486,8 +5688,7 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
             try:
                 with open(team_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # Convert to expected format
-                    return jsonify({
+                    payload = {
                         "type": "team",
                         "team_id": team_id,
                         "team_name": team_name,
@@ -5503,7 +5704,33 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
                         "subsystems": data.get("subsystems", {}),
                         "per_date": data.get("per_date", {}),
                         "member_contributions": data.get("member_contributions", {})
-                    })
+                    }
+                    payload["subsystems_touched"] = len(payload.get("subsystems", {}))
+                    payload["total_lines_changed"] = payload.get("total_additions", 0) + payload.get("total_deletions", 0)
+                    rank_from = data.get("from")
+                    rank_to = data.get("to")
+                    month_label = data.get("month") or month_str
+                    if month_label and (not rank_from or not rank_to):
+                        try:
+                            year_part = int(month_label[:4])
+                            month_part = int(month_label[5:7])
+                            last_day = calendar.monthrange(year_part, month_part)[1]
+                            if not rank_from:
+                                rank_from = f"{year_part:04d}-{month_part:02d}-01"
+                            if not rank_to:
+                                rank_to = f"{year_part:04d}-{month_part:02d}-{last_day:02d}"
+                        except (ValueError, IndexError):
+                            pass
+                    if rank_from and not payload.get("from"):
+                        payload["from"] = rank_from
+                    if rank_to and not payload.get("to"):
+                        payload["to"] = rank_to
+                    target_metrics = _extract_team_metrics(payload)
+                    if rank_from and rank_to:
+                        peer_rankings = compute_team_peer_rankings(team_id, rank_from, rank_to, target_metrics)
+                        if peer_rankings:
+                            payload["peer_rankings"] = peer_rankings
+                    return jsonify(payload)
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Error loading team file {team_file}: {e}")
     
@@ -5683,6 +5910,14 @@ def api_team_month(team_id: str, from_date: str, to_date: str = None):
     
     aggregated_data["responsible_subsystem_details"] = responsible_subsystem_details
     aggregated_data["total_responsible_lines"] = total_responsible_lines
+    aggregated_data["subsystems_touched"] = len(aggregated_data.get("subsystems", {}))
+    aggregated_data["total_lines_changed"] = aggregated_data.get("total_additions", 0) + aggregated_data.get("total_deletions", 0)
+    aggregated_data["from"] = from_date
+    aggregated_data["to"] = to_date
+    target_metrics = _extract_team_metrics(aggregated_data)
+    peer_rankings = compute_team_peer_rankings(team_id, from_date, to_date, target_metrics)
+    if peer_rankings:
+        aggregated_data["peer_rankings"] = peer_rankings
     
     return jsonify(aggregated_data)
 
@@ -6418,7 +6653,7 @@ def api_team_year(team_id: str, year: int):
                     if "deletions" not in stats and "lines_deleted" in stats:
                         stats["deletions"] = stats.get("lines_deleted", 0)
                 # Convert to expected format
-                return jsonify({
+                payload = {
                     "type": "team",
                     "team_id": team_id,
                     "team_name": team_name,
@@ -6436,7 +6671,16 @@ def api_team_year(team_id: str, year: int):
                     "member_contributions": data.get("member_contributions", {}),
                     "capacity_analysis": capacity_analysis,
                     "developer_capacity_profiles": developer_capacity_profiles
-                })
+                }
+                payload["subsystems_touched"] = len(payload.get("subsystems", {}))
+                payload["total_lines_changed"] = payload.get("total_additions", 0) + payload.get("total_deletions", 0)
+                payload.setdefault("from", f"{year:04d}-01-01")
+                payload.setdefault("to", f"{year:04d}-12-31")
+                target_metrics = _extract_team_metrics(payload)
+                peer_rankings = compute_team_peer_rankings(team_id, payload["from"], payload["to"], target_metrics)
+                if peer_rankings:
+                    payload["peer_rankings"] = peer_rankings
+                return jsonify(payload)
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error loading team file {team_file}: {e}")
     
