@@ -516,3 +516,73 @@ def compute_subsystem_size_rankings(stats_root: str) -> Dict[str, Any]:
 
     result["rankings"] = rankings
     return result
+
+
+def _build_manifest_entry(repo_rel: str, base_dir: str, display_name: Optional[str]) -> Optional[Dict[str, Any]]:
+    summary_dir = os.path.join(base_dir, "summary")
+    languages_dir = os.path.join(base_dir, "languages")
+    blame_dir = os.path.join(base_dir, "blame")
+    if not any(os.path.isdir(path) for path in (summary_dir, languages_dir, blame_dir)):
+        return None
+    entry = {
+        "display_name": display_name or repo_rel.split("/")[-1],
+        "repo_rel": repo_rel,
+        "summary_dir": summary_dir,
+        "languages_dir": languages_dir,
+        "blame_dir": blame_dir,
+        "subsystem_dir": base_dir,
+    }
+    return entry
+
+
+def _collect_repo_subsystem_entries(stats_root: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    repos_root = os.path.join(stats_root, "repos")
+    if not os.path.isdir(repos_root):
+        return entries
+
+    reserved = {"summary", "languages", "blame", "logs", "__pycache__"}
+    for owner in sorted(os.listdir(repos_root)):
+        owner_dir = os.path.join(repos_root, owner)
+        if not os.path.isdir(owner_dir):
+            continue
+        for repo in sorted(os.listdir(owner_dir)):
+            repo_dir = os.path.join(owner_dir, repo)
+            if not os.path.isdir(repo_dir):
+                continue
+            repo_rel = f"{owner}/{repo}"
+            base_entry = _build_manifest_entry(repo_rel, repo_dir, repo)
+            if base_entry:
+                entries.append(base_entry)
+            for child in sorted(os.listdir(repo_dir)):
+                if child.startswith(".") or child in reserved:
+                    continue
+                child_dir = os.path.join(repo_dir, child)
+                if not os.path.isdir(child_dir):
+                    continue
+                child_entry = _build_manifest_entry(repo_rel, child_dir, child)
+                if child_entry:
+                    entries.append(child_entry)
+    return entries
+
+
+def _get_subsystem_entries(stats_root: str) -> Dict[str, Any]:
+    stats_root = stats_root or ""
+    entries = _collect_repo_subsystem_entries(stats_root)
+    manifest: Dict[str, Any] = {
+        "entries": entries,
+        "by_name": {},
+        "by_repo": {},
+    }
+    for entry in entries:
+        name = entry.get("display_name")
+        repo_rel = entry.get("repo_rel")
+        if name:
+            bucket = manifest["by_name"].setdefault(name, [])
+            bucket.append(entry)
+            lowered = name.lower()
+            if lowered != name:
+                manifest["by_name"].setdefault(lowered, []).append(entry)
+        if repo_rel:
+            manifest["by_repo"].setdefault(repo_rel, []).append(entry)
+    return manifest
