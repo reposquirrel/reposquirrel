@@ -7,6 +7,7 @@ const READ_ONLY_MODE = !!(APP_CONFIG && APP_CONFIG.readOnly);
 let state = {
   mode: "subsystems", // "users", "teams", or "subsystems"
   users: [],
+  userSlugIndex: {},
   teams: [],
   subsystems: [], // Unified subsystems (services and standalone repos)
   selectedUser: null,
@@ -42,6 +43,69 @@ let state = {
     currentView: "overview"
   }
 };
+
+function slugifyUserIdentifier(text) {
+  if (!text) {
+    return "";
+  }
+  const normalized = typeof text.normalize === "function" ? text.normalize("NFD") : text;
+  return normalized
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function normalizeUserSlugKey(value) {
+  return slugifyUserIdentifier(value || "");
+}
+
+function registerUserSlugIndexEntry(index, key, user) {
+  if (!key || !user) {
+    return;
+  }
+  if (!index[key]) {
+    index[key] = user;
+  }
+}
+
+function buildUserSlugIndex(users = []) {
+  const index = Object.create(null);
+  users.forEach(user => {
+    if (!user) {
+      return;
+    }
+    const slug = user.slug || "";
+    const displayName = user.display_name || "";
+    registerUserSlugIndexEntry(index, slug, user);
+    registerUserSlugIndexEntry(index, slug.toLowerCase(), user);
+    registerUserSlugIndexEntry(index, normalizeUserSlugKey(slug), user);
+    registerUserSlugIndexEntry(index, normalizeUserSlugKey(displayName), user);
+  });
+  return index;
+}
+
+function findLoadedUser(slug) {
+  if (!slug) {
+    return null;
+  }
+  if (!state.userSlugIndex || Object.keys(state.userSlugIndex).length === 0) {
+    state.userSlugIndex = buildUserSlugIndex(state.users || []);
+  }
+  if (state.userSlugIndex[slug]) {
+    return state.userSlugIndex[slug];
+  }
+  if (typeof slug === "string") {
+    const lowerKey = slug.toLowerCase();
+    if (state.userSlugIndex[lowerKey]) {
+      return state.userSlugIndex[lowerKey];
+    }
+  }
+  const normalized = normalizeUserSlugKey(slug);
+  return state.userSlugIndex[normalized] || null;
+}
 
 
 const VISUALIZATION_DEFINITIONS = [
@@ -1145,6 +1209,7 @@ async function loadUsersAndSubsystems() {
     
     console.log("Updating state...");
     state.users = userData.users || [];
+    state.userSlugIndex = buildUserSlugIndex(state.users);
     state.teams = teamsData.teams || [];
     state.subsystems = subsystemData.subsystems || [];
     state.subsystemDeadStatus = deadStatusData.subsystem_status || {};
@@ -1511,7 +1576,7 @@ function navigateToUser(userSlug, currentPeriod = null) {
     );
   }
   
-  const user = state.users.find(u => u.slug === userSlug);
+  const user = findLoadedUser(userSlug);
   if (!user) {
     console.warn('User ' + userSlug + ' not found in loaded users');
     console.log('Available users:', state.users.map(u => u.slug));
@@ -1762,19 +1827,18 @@ function getUserDisplayName(developerSlug) {
 
 function createClickableDeveloperName(developerSlug, displayName, style = "block") {
   const nameElement = document.createElement("span");
+  const resolvedUser = findLoadedUser(developerSlug);
+  const label = displayName || resolvedUser?.display_name || developerSlug;
   
-  // Check if user is active (exists in current user list)
-  const isActive = state.users.some(user => user.slug === developerSlug);
-  
-  if (isActive) {
+  if (resolvedUser) {
     // Active user - make it clickable
     nameElement.className = "developer-name clickable" + (style === "inline" ? " inline" : "");
-    nameElement.textContent = displayName || developerSlug;
+    nameElement.textContent = label;
     nameElement.style.cursor = "pointer";
     nameElement.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      console.log('Navigating to user:', developerSlug);
+      console.log('Navigating to user:', resolvedUser.slug, 'from alias:', developerSlug);
       
       // Ensure we have the data loaded
       if (state.users.length === 0) {
@@ -1782,12 +1846,12 @@ function createClickableDeveloperName(developerSlug, displayName, style = "block
         return;
       }
       
-      navigateToUser(developerSlug);
+      navigateToUser(resolvedUser.slug);
     };
   } else {
     // Inactive user - mark as red, not clickable
     nameElement.className = "developer-name inactive" + (style === "inline" ? " inline" : "");
-    nameElement.textContent = displayName || developerSlug;
+    nameElement.textContent = label;
     nameElement.style.color = "#dc2626"; // Red color for inactive users
     nameElement.style.cursor = "default";
     nameElement.title = "Inactive contributor (no recent activity in analysis period)";
@@ -1830,11 +1894,19 @@ async function loadUserBadges(userSlug) {
     const badgesPromise = fetchJSON("/api/users/" + encodeURIComponent(userSlug) + "/badges");
     
     const response = await Promise.race([badgesPromise, timeoutPromise]);
-    console.log("Loaded badges for", userSlug, ":", response.badges?.length || 0, "badges");
-    return response.badges || [];
+    const badges = response.badges || [];
+    badges.summary = response.stats || null;
+    badges.typeCounts = response.stats?.type_counts || {};
+    badges.totalHolders = response.stats?.total_holders ?? null;
+    console.log("Loaded badges for", userSlug, ":", badges.length, "badges");
+    return badges;
   } catch (err) {
     console.error("Failed to load user badges for", userSlug, ":", err);
-    return [];
+    const emptyBadges = [];
+    emptyBadges.summary = null;
+    emptyBadges.typeCounts = {};
+    emptyBadges.totalHolders = null;
+    return emptyBadges;
   }
 }
 
@@ -2125,6 +2197,121 @@ async function loadUserMonth(user, month) {
   }
 }
 
+function normalizeSubsystemSummary(summaryData, period, subsystemName = null) {
+  if (!summaryData || typeof summaryData !== "object") {
+    return summaryData;
+  }
+
+  const totalsSource = (() => {
+    if (summaryData.summary && typeof summaryData.summary === "object") {
+      const summarySection = summaryData.summary;
+      if (summarySection.totals && typeof summarySection.totals === "object") {
+        return summarySection.totals;
+      }
+      return summarySection;
+    }
+    return null;
+  })();
+
+  const toNumber = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
+  const getMetric = (keys, fallback = null) => {
+    for (const key of keys) {
+      if (totalsSource && totalsSource[key] != null) {
+        const parsed = toNumber(totalsSource[key]);
+        if (parsed != null) {
+          return parsed;
+        }
+      }
+      if (summaryData[key] != null) {
+        const parsed = toNumber(summaryData[key]);
+        if (parsed != null) {
+          return parsed;
+        }
+      }
+    }
+    return fallback;
+  };
+
+  const commits = getMetric(["total_commits", "commits"], summaryData.total_commits ?? summaryData.commits ?? 0) || 0;
+  const additions = getMetric(["total_lines_added", "total_additions", "lines_added", "additions"], summaryData.total_lines_added ?? summaryData.total_additions ?? summaryData.lines_added ?? 0) || 0;
+  const deletions = getMetric(["total_lines_deleted", "total_deletions", "lines_deleted", "deletions"], summaryData.total_lines_deleted ?? summaryData.total_deletions ?? summaryData.lines_deleted ?? 0) || 0;
+  const changedLinesCandidate = getMetric(["total_changed_lines", "total_lines_changed", "lines_changed"], summaryData.total_changed_lines ?? summaryData.total_lines_changed ?? null);
+  const netLinesCandidate = getMetric(["net_lines", "lines_net"], summaryData.net_lines ?? summaryData.lines_net ?? null);
+
+  const resolvedNetLines = netLinesCandidate != null ? netLinesCandidate : additions - deletions;
+  const resolvedChangedLines = changedLinesCandidate != null ? changedLinesCandidate : additions + deletions;
+
+  summaryData.total_commits = commits;
+  summaryData.commits = summaryData.commits ?? commits;
+
+  summaryData.total_lines_added = additions;
+  summaryData.total_additions = summaryData.total_additions ?? additions;
+  summaryData.lines_added = summaryData.lines_added ?? additions;
+
+  summaryData.total_lines_deleted = deletions;
+  summaryData.total_deletions = summaryData.total_deletions ?? deletions;
+  summaryData.lines_deleted = summaryData.lines_deleted ?? deletions;
+
+  summaryData.net_lines = resolvedNetLines;
+  summaryData.lines_net = summaryData.lines_net ?? resolvedNetLines;
+
+  summaryData.total_changed_lines = resolvedChangedLines;
+  summaryData.total_lines_changed = summaryData.total_lines_changed ?? resolvedChangedLines;
+
+  if (!summaryData.from) {
+    summaryData.from = summaryData.period?.from || period?.from || null;
+  }
+  if (!summaryData.to) {
+    summaryData.to = summaryData.period?.to || period?.to || null;
+  }
+  if (!summaryData.service && (summaryData.subsystem || subsystemName)) {
+    summaryData.service = summaryData.subsystem || subsystemName;
+  }
+
+  if (!summaryData.top_developer) {
+    const derivedTop = deriveTopDeveloperFromDevelopers(summaryData.developers);
+    if (derivedTop) {
+      summaryData.top_developer = derivedTop;
+    }
+  }
+
+  return summaryData;
+}
+
+function deriveTopDeveloperFromDevelopers(developers) {
+  if (!developers || typeof developers !== "object") {
+    return null;
+  }
+  let best = null;
+  Object.entries(developers).forEach(([slug, developer]) => {
+    if (!developer || typeof developer !== "object") {
+      return;
+    }
+    const commits = Number(developer.commits) || 0;
+    const changedLines =
+      typeof developer.changed_lines === "number"
+        ? Number(developer.changed_lines)
+        : (Number(developer.lines_added) || 0) + (Number(developer.lines_deleted) || 0);
+    if (
+      !best ||
+      commits > best.commits ||
+      (commits === best.commits && changedLines > best.changed_lines)
+    ) {
+      best = {
+        slug,
+        display_name: developer.display_name || slug,
+        commits,
+        changed_lines: changedLines,
+      };
+    }
+  });
+  return best;
+}
+
 async function loadSubsystemPeriod(subsystem, period) {
   try {
     let url;
@@ -2136,7 +2323,8 @@ async function loadSubsystemPeriod(subsystem, period) {
       url = "/api/subsystems/" + encodeURIComponent(subsystem.name) + "/month/" + encodeURIComponent(period.from) + "/" + encodeURIComponent(period.to);
     }
     const data = await fetchJSON(url);
-    await renderSubsystemDashboard(subsystem, period, data);
+    const normalized = normalizeSubsystemSummary(data, period, subsystem?.name);
+    await renderSubsystemDashboard(subsystem, period, normalized);
   } catch (err) {
     clearMain();
     setViewHeader("Error", "Failed to load subsystem stats: " + err.message, "Error");
@@ -2229,16 +2417,305 @@ function formatRankSummary(rankInfo) {
   return text;
 }
 
-function computeCommitsPerWeek(summary) {
-  if (!summary) {
-    return 0;
+function buildBadgeKpiElements() {
+  const card = document.createElement("div");
+  card.className = "kpi-card badge-kpi-card";
+  card.innerHTML = `
+    <div class="kpi-label">Badges</div>
+    <div class="kpi-value">--</div>
+    <div class="kpi-rank">Loading badge data…</div>
+  `;
+  return {
+    card,
+    valueEl: card.querySelector(".kpi-value"),
+    rankEl: card.querySelector(".kpi-rank")
+  };
+}
+
+function applyBadgeKpiStats(kpiElements, stats) {
+  if (!kpiElements) {
+    return;
   }
-  const commits = Number(summary.total_commits) || 0;
-  const fromDate = summary.from ? new Date(summary.from) : null;
-  const toDate = summary.to ? new Date(summary.to) : null;
-  if (!fromDate || !toDate || Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+  const { valueEl, rankEl } = kpiElements;
+  if (!valueEl) {
+    return;
+  }
+  if (!stats) {
+    valueEl.textContent = "--";
+    if (rankEl) {
+      rankEl.textContent = "Unable to load badge data";
+    }
+    return;
+  }
+  const count = Number(
+    stats.count ??
+    stats.badge_count ??
+    stats.total_count ??
+    stats.total_badges ??
+    0
+  ) || 0;
+  valueEl.textContent = count.toLocaleString();
+  if (!rankEl) {
+    return;
+  }
+  if (count === 0) {
+    const totalHolders = Number(stats.total_holders ?? stats.total ?? 0);
+    rankEl.textContent = totalHolders > 0 ? "No badges yet" : "No badge data";
+    return;
+  }
+  const hasRank = typeof stats.rank === "number" && typeof stats.total === "number" && stats.total > 0;
+  if (hasRank) {
+    const rankSummary = formatRankSummary({
+      rank: stats.rank,
+      total: stats.total,
+      percentile: stats.percentile
+    });
+    rankEl.textContent = rankSummary || "Ranking unavailable";
+  } else {
+    rankEl.textContent = "Ranking unavailable";
+  }
+}
+
+let activeMetricModal = null;
+
+function prepareMetricDistributionData(distribution, currentSlug) {
+  const MAX_BUCKETS = 20;
+  const sanitized = (distribution || [])
+    .map((entry, index) => ({
+      slug: entry.slug,
+      value: Number(entry.value) || 0,
+      rank: index + 1
+    }))
+    .filter((entry) => Number.isFinite(entry.value))
+    .sort((a, b) => b.value - a.value)
+    .map((entry, index) => ({ ...entry, rank: index + 1 }));
+
+  if (sanitized.length === 0) {
+    return { data: [], note: null };
+  }
+
+  const bucketSize = Math.max(1, Math.ceil(sanitized.length / MAX_BUCKETS));
+  const data = [];
+  for (let i = 0; i < sanitized.length; i += bucketSize) {
+    const chunk = sanitized.slice(i, i + bucketSize);
+    if (!chunk.length) {
+      continue;
+    }
+    const averageValue = chunk.reduce((sum, entry) => sum + entry.value, 0) / chunk.length;
+    data.push({
+      value: Math.round(averageValue),
+      highlight: chunk.some((entry) => entry.slug === currentSlug),
+    });
+  }
+
+  const currentEntry = sanitized.find((entry) => entry.slug === currentSlug);
+  const noteParts = [];
+  if (data.length) {
+    noteParts.push(`Showing ${data.length} distribution groups (~${bucketSize} developers each).`);
+  }
+  return {
+    data,
+    note: noteParts.join(" ") || null,
+    userValue: currentEntry?.value ?? null,
+    userRank: currentEntry?.rank ?? null,
+  };
+}
+
+function openMetricDistributionModal({ metric, label, distribution, currentSlug }) {
+  if (!distribution || distribution.length === 0) {
+    return;
+  }
+  closeMetricDistributionModal();
+  const { data, note, userValue, userRank } = prepareMetricDistributionData(distribution, currentSlug);
+  if (data.length === 0) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "metric-modal-overlay";
+
+  const modal = document.createElement("div");
+  modal.className = "metric-modal";
+
+  const header = document.createElement("div");
+  header.className = "metric-modal-header";
+  const title = document.createElement("h3");
+  title.textContent = `${label} · Peer comparison`;
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "metric-modal-close";
+  closeBtn.setAttribute("aria-label", "Close comparison chart");
+  closeBtn.innerHTML = "&times;";
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "metric-modal-body";
+  const canvas = document.createElement("canvas");
+  body.appendChild(canvas);
+  const noteParts = [];
+  if (note) {
+    noteParts.push(note);
+  }
+  if (typeof userRank === "number" && userValue != null) {
+    noteParts.push(`This user is #${userRank} with ${Number(userValue).toLocaleString()} commits.`);
+  }
+  if (noteParts.length) {
+    const noteEl = document.createElement("p");
+    noteEl.className = "metric-modal-note";
+    noteEl.textContent = noteParts.join(" ");
+    body.appendChild(noteEl);
+  }
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const labels = data.map(() => "");
+  const values = data.map((entry) => entry.value || 0);
+  const colors = data.map((entry) => (entry.highlight ? "#f97316" : "#94a3b8"));
+
+  const chart = new Chart(canvas.getContext("2d"), {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: label,
+          data: values,
+          backgroundColor: colors,
+          borderColor: colors,
+          borderWidth: 1.5
+        }
+      ]
+    },
+    options: {
+      indexAxis: "x",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (context) => `${context.parsed.y?.toLocaleString?.() || context.parsed.y || 0} commits`
+          }
+        }
+      },
+      layout: {
+        padding: { top: 8, right: 12, bottom: 8, left: 8 }
+      },
+      scales: {
+        x: {
+          ticks: {
+            autoSkip: false,
+            color: "#e5e7eb",
+            font: { size: 11 }
+          },
+          grid: {
+            display: false
+          }
+        },
+        y: {
+          beginAtZero: true,
+          grid: {
+            color: "rgba(148, 163, 184, 0.15)"
+          },
+          ticks: {
+            color: "#e5e7eb",
+            callback: (value) => Number(value).toLocaleString()
+          }
+        }
+      }
+    }
+  });
+
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") {
+      closeMetricDistributionModal();
+    }
+  };
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeMetricDistributionModal();
+    }
+  });
+  closeBtn.addEventListener("click", () => closeMetricDistributionModal());
+  document.addEventListener("keydown", onKeyDown);
+
+  activeMetricModal = { overlay, chart, onKeyDown };
+}
+
+function closeMetricDistributionModal() {
+  if (!activeMetricModal) {
+    return;
+  }
+  if (activeMetricModal.chart) {
+    activeMetricModal.chart.destroy();
+  }
+  if (activeMetricModal.overlay?.parentElement) {
+    activeMetricModal.overlay.remove();
+  }
+  if (activeMetricModal.onKeyDown) {
+    document.removeEventListener("keydown", activeMetricModal.onKeyDown);
+  }
+  activeMetricModal = null;
+}
+
+function computeCommitsPerWeek(summary, fallbackPeriod = null) {
+  const commits = Number(summary?.total_commits) || 0;
+
+  const parseDate = (value) => {
+    if (!value) {
+      return null;
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  let fromDate =
+    parseDate(summary?.from) ||
+    parseDate(summary?.period?.from) ||
+    parseDate(summary?.period?.start) ||
+    parseDate(fallbackPeriod?.from);
+
+  let toDate =
+    parseDate(summary?.to) ||
+    parseDate(summary?.period?.to) ||
+    parseDate(summary?.period?.end) ||
+    parseDate(fallbackPeriod?.to);
+
+  const year = Number(summary?.year) || null;
+  const month = Number(summary?.month) || null;
+  const isYearly = Boolean(summary?.is_yearly);
+
+  if ((!fromDate || !toDate) && year) {
+    if (isYearly || !month || Number.isNaN(month)) {
+      fromDate = fromDate || parseDate(`${year}-01-01`);
+      toDate = toDate || parseDate(`${year}-12-31`);
+    } else if (month >= 1 && month <= 12) {
+      const lastDay = new Date(year, month, 0).getDate();
+      fromDate = fromDate || parseDate(`${year}-${String(month).padStart(2, "0")}-01`);
+      toDate = toDate || parseDate(`${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`);
+    }
+  }
+
+  if (!fromDate || !toDate) {
+    const perDate = summary?.per_date;
+    if (perDate && typeof perDate === "object") {
+      const validDates = Object.keys(perDate)
+        .map((dateStr) => parseDate(dateStr))
+        .filter((dateValue) => dateValue instanceof Date && !Number.isNaN(dateValue.getTime()))
+        .sort((a, b) => a - b);
+      if (validDates.length > 0) {
+        fromDate = fromDate || validDates[0];
+        toDate = toDate || validDates[validDates.length - 1];
+      }
+    }
+  }
+
+  if (!fromDate || !toDate) {
     return commits;
   }
+
   const msPerDay = 24 * 60 * 60 * 1000;
   const daySpan = Math.max(1, Math.round((toDate - fromDate) / msPerDay) + 1);
   const weeks = daySpan / 7;
@@ -4816,6 +5293,228 @@ function getSubsystemLanguageStats(languageData) {
   return { labels, values };
 }
 
+function formatUserSubsystemLabel(repo, subsystem) {
+  if (!repo && !subsystem) {
+    return null;
+  }
+  const repoPart = (repo || "").split("/").pop() || repo || "Unknown repo";
+  if (!subsystem || subsystem === repoPart) {
+    return repoPart || subsystem || "Unknown subsystem";
+  }
+  return `${repoPart}/${subsystem}`;
+}
+
+function buildUserLocEvolutionSeries(summary) {
+  if (!summary || typeof summary !== "object" || !summary.months) {
+    return null;
+  }
+  const months = summary.months;
+  const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const labels = monthLabels.slice();
+  const knownSubsystems = new Set();
+  const perSubsystemSeries = {};
+  const runningTotals = {};
+  const totalSeries = new Array(12).fill(0);
+  let runningTotalAll = 0;
+
+  for (let idx = 0; idx < 12; idx += 1) {
+    const monthNumber = idx + 1;
+    const key = monthNumber.toString().padStart(2, "0");
+    const fallbackKey = String(monthNumber);
+    const monthEntry = months[key] || months[fallbackKey];
+
+    // Carry forward previous values for known subsystems so lines stay continuous
+    knownSubsystems.forEach((name) => {
+      const series = perSubsystemSeries[name];
+      if (!series) {
+        return;
+      }
+      const previousValue = idx === 0 ? 0 : series[idx - 1];
+      series[idx] = typeof previousValue === "number" ? previousValue : 0;
+    });
+
+    const contributions = {};
+    if (monthEntry && Array.isArray(monthEntry.subsystems)) {
+      monthEntry.subsystems.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return;
+        }
+        const label = formatUserSubsystemLabel(entry.repo, entry.subsystem);
+        if (!label) {
+          return;
+        }
+        let net = Number(entry.lines_net);
+        if (!Number.isFinite(net)) {
+          const additions = Number(entry.lines_added ?? entry.additions ?? 0);
+          const deletions = Number(entry.lines_removed ?? entry.lines_deleted ?? entry.deletions ?? 0);
+          net = additions - deletions;
+        }
+        if (!Number.isFinite(net)) {
+          return;
+        }
+        contributions[label] = (contributions[label] || 0) + net;
+      });
+    }
+
+    runningTotalAll += Object.values(contributions).reduce((sum, value) => sum + value, 0);
+    totalSeries[idx] = runningTotalAll;
+
+    Object.entries(contributions).forEach(([name, delta]) => {
+      if (!knownSubsystems.has(name)) {
+        knownSubsystems.add(name);
+        perSubsystemSeries[name] = new Array(12).fill(0);
+        runningTotals[name] = 0;
+      }
+      runningTotals[name] = (runningTotals[name] || 0) + delta;
+      perSubsystemSeries[name][idx] = runningTotals[name];
+    });
+  }
+
+  const ranked = Object.entries(perSubsystemSeries)
+    .map(([name, series]) => ({
+      name,
+      series,
+      maxAbs: series.reduce((max, value) => Math.max(max, Math.abs(value || 0)), 0),
+    }))
+    .filter((entry) => entry.maxAbs > 0);
+
+  const hasTotals = totalSeries.some((value) => value !== 0);
+  if (!ranked.length && !hasTotals) {
+    return null;
+  }
+
+  ranked.sort((a, b) => b.maxAbs - a.maxAbs);
+  const datasets = ranked.slice(0, 5).map((entry) => ({
+    label: entry.name,
+    data: entry.series,
+  }));
+  const allDatasets = ranked.map((entry) => ({
+    label: entry.name,
+    data: entry.series,
+  }));
+
+  return {
+    labels,
+    datasets,
+    totalSeries,
+    allDatasets,
+  };
+}
+
+function renderUserLocSubsystemGrid(container, locSeries, datasetColorMap = null) {
+  if (!container || !locSeries || !Array.isArray(locSeries.datasets) || locSeries.datasets.length === 0) {
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "card loc-subsystem-multi-card";
+  card.innerHTML = createTitleWithTooltip(
+    "🧩 LOC evolution by subsystem",
+    "Mini charts showing cumulative net lines for each subsystem this developer contributed to during the selected year.",
+    "h2"
+  );
+
+  const grid = document.createElement("div");
+  grid.className = "loc-subsystem-grid";
+  card.appendChild(grid);
+
+  const fallbackPalette = [
+    "#3b82f6", "#ec4899", "#10b981", "#f97316", "#a855f7",
+    "#06b6d4", "#facc15", "#14b8a6", "#f43f5e", "#6366f1"
+  ];
+
+  const getLatestValue = (series = []) => {
+    for (let idx = series.length - 1; idx >= 0; idx -= 1) {
+      const value = Number(series[idx]);
+      if (Number.isFinite(value)) {
+        return value;
+      }
+    }
+    return 0;
+  };
+
+  const subsystemSeries = Array.isArray(locSeries.allDatasets) && locSeries.allDatasets.length
+    ? locSeries.allDatasets
+    : locSeries.datasets;
+
+  subsystemSeries.forEach((dataset, idx) => {
+    const tile = document.createElement("div");
+    tile.className = "loc-subsystem-tile";
+
+    const header = document.createElement("div");
+    header.className = "loc-subsystem-header";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "loc-subsystem-name";
+    nameEl.textContent = dataset.label;
+
+    const latestValue = getLatestValue(dataset.data);
+    const totalEl = document.createElement("div");
+    totalEl.className = "loc-subsystem-total";
+    totalEl.textContent = `${latestValue.toLocaleString()} net`;
+
+    header.appendChild(nameEl);
+    header.appendChild(totalEl);
+    tile.appendChild(header);
+
+    const chartWrapper = document.createElement("div");
+    chartWrapper.className = "loc-subsystem-chart";
+    const canvas = document.createElement("canvas");
+    canvas.height = 90;
+    chartWrapper.appendChild(canvas);
+    tile.appendChild(chartWrapper);
+
+    grid.appendChild(tile);
+
+    const chartKey = `userLocEvolutionSub${idx}`;
+    if (state.charts[chartKey]) {
+      try {
+        state.charts[chartKey].destroy();
+      } catch (error) {
+        console.warn("Failed to destroy LOC subsystem chart", chartKey, error);
+      }
+      delete state.charts[chartKey];
+    }
+
+    const color = dataset.color || (datasetColorMap ? datasetColorMap.get(dataset.label) : undefined) || fallbackPalette[idx % fallbackPalette.length];
+    const ctx = canvas.getContext("2d");
+    state.charts[chartKey] = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: locSeries.labels,
+        datasets: [{
+          data: dataset.data,
+          borderColor: color,
+          backgroundColor: hexToRgba(color, 0.2),
+          borderWidth: 1.5,
+          fill: true,
+          tension: 0.35,
+          pointRadius: 0,
+          spanGaps: true,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (context) => `${context.label}: ${Number(context.parsed.y ?? context.parsed ?? 0).toLocaleString()} lines`,
+            },
+          },
+        },
+        scales: {
+          x: { display: false },
+          y: { display: false },
+        },
+      },
+    });
+  });
+
+  container.appendChild(card);
+}
+
 function getWeekdayStats(summary) {
   const weekdays = summary.per_weekday || {};
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -4835,8 +5534,9 @@ function getHourStats(summary) {
   const labels = [];
   const values = [];
   for (let h = 0; h < 24; h++) {
-    labels.push(h.toString().padStart(2, "0") + ":00");
-    const hourData = hours[h.toString()] || {};
+    const paddedKey = h.toString().padStart(2, "0");
+    labels.push(paddedKey + ":00");
+    const hourData = hours[paddedKey] || hours[h.toString()] || {};
     values.push(hourData.commits || 0);
   }
   return { labels, values };
@@ -5220,6 +5920,7 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
   if (!isActiveUserRender(renderToken)) {
     return;
   }
+  closeMetricDistributionModal();
   clearMain();
 
   const periodType = month.is_yearly ? "Yearly" : "Monthly";
@@ -5274,8 +5975,33 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
       <div class="kpi-value">${displayValue}</div>
       ${rankText ? `<div class="kpi-rank">${rankText}</div>` : ""}
     `;
+    const rankEl = card.querySelector(".kpi-rank");
+    if (
+      rankEl &&
+      k.metric === "total_commits" &&
+      month.is_yearly &&
+      Array.isArray(summary.peer_rankings_detail?.total_commits) &&
+      summary.peer_rankings_detail.total_commits.length > 0
+    ) {
+      rankEl.classList.add("clickable-rank");
+      rankEl.title = "Click to compare all developers for this metric";
+      rankEl.addEventListener("click", () =>
+        openMetricDistributionModal({
+          metric: k.metric,
+          label: k.label,
+          distribution: summary.peer_rankings_detail.total_commits,
+          currentSlug: user.slug
+        })
+      );
+    }
     kpiContainer.appendChild(card);
   });
+
+  let badgeKpiElements = null;
+  if (month.is_yearly) {
+    badgeKpiElements = buildBadgeKpiElements();
+    kpiContainer.appendChild(badgeKpiElements.card);
+  }
 
   main.appendChild(kpiContainer);
   tagVisualization(kpiContainer, "user-kpis", vizContext);
@@ -5302,6 +6028,10 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
         return;
       }
       try {
+        const badgeStats = badges?.summary || null;
+        if (badgeKpiElements) {
+          applyBadgeKpiStats(badgeKpiElements, badgeStats);
+        }
         console.log("Rendering badges for user", user.slug, ":", badges?.length || 0, "badges");
         if (badges && badges.length > 0) {
           renderUserBadges(badges, main);
@@ -5313,6 +6043,9 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
         if (!isActiveUserRender(renderToken)) {
           return;
         }
+        if (badgeKpiElements) {
+          applyBadgeKpiStats(badgeKpiElements, null);
+        }
         const errorDiv = document.createElement("div");
         errorDiv.className = "error";
         errorDiv.textContent = "Error loading badges: " + error.message;
@@ -5323,6 +6056,9 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
         return;
       }
       console.error("Error loading user badges:", error);
+      if (badgeKpiElements) {
+        applyBadgeKpiStats(badgeKpiElements, null);
+      }
     });
     
     // Load and render ownership timelines for subsystems where user is top maintainer
@@ -5571,7 +6307,7 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
     const commitsPerWeekRank = kpiRankings.commits_per_week;
     const commitsPerWeekValue = commitsPerWeekRank && typeof commitsPerWeekRank.value === "number"
       ? commitsPerWeekRank.value
-      : computeCommitsPerWeek(summary);
+      : computeCommitsPerWeek(summary, month);
     if (Number.isFinite(commitsPerWeekValue)) {
       const frequencyBlock = document.createElement("div");
       frequencyBlock.className = "contribution-frequency";
@@ -5700,6 +6436,9 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
     createDailyChart("chart-daily-activity", user.slug, chartYear, chartMonth, false);
   }, 100);
 
+  const langStats = getLanguageStats(summary);
+  const hasLanguageData = langStats.labels.length > 0;
+
   // Chart containers
   const chartRow = document.createElement("div");
   chartRow.className = "chart-grid";
@@ -5707,11 +6446,28 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
   // Languages
   const langCard = document.createElement("div");
   langCard.className = "card";
-  langCard.innerHTML = createTitleWithTooltip(
+  const langTitle = createTitleWithTooltip(
     "Lines changed per language", 
     "Shows the total lines added and deleted by this developer for each programming language. Calculated by analyzing file extensions and content of all commits.",
     "h2"
-  ) + '<canvas id="chart-languages"></canvas>';
+  );
+  if (hasLanguageData) {
+    if (month.is_yearly) {
+      langCard.innerHTML = langTitle + `
+        <div class="language-chart-flex" style="display:flex; flex-wrap:wrap; gap:16px;">
+          <div style="flex:1 1 240px; min-height:260px;">
+            <canvas id="chart-language-donut"></canvas>
+          </div>
+          <div style="flex:2 1 300px;">
+            <canvas id="chart-languages"></canvas>
+          </div>
+        </div>`;
+    } else {
+      langCard.innerHTML = langTitle + '<canvas id="chart-languages"></canvas>';
+    }
+  } else {
+    langCard.innerHTML = langTitle + '<div class="no-data">Language-level changes are not available for this period.</div>';
+  }
   chartRow.appendChild(langCard);
 
   // Weekday
@@ -5737,14 +6493,13 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
   main.appendChild(chartRow);
 
   // Build charts
-  const langStats = getLanguageStats(summary);
-  if (langStats.labels.length > 0) {
+  if (hasLanguageData) {
     try {
       const ctx = document.getElementById("chart-languages");
       if (ctx) {
-        // Destroy existing chart if it exists
         if (state.charts.languages) {
           state.charts.languages.destroy();
+          delete state.charts.languages;
         }
         state.charts.languages = new Chart(ctx, {
           type: "bar",
@@ -5753,7 +6508,8 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
             datasets: [
               {
                 label: "Lines changed (add+del)",
-                data: langStats.values
+                data: langStats.values,
+                backgroundColor: "#38bdf8"
               }
             ]
           },
@@ -5771,6 +6527,64 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
       }
     } catch (error) {
       console.error("Error creating languages chart:", error);
+    }
+
+    if (month.is_yearly) {
+      try {
+        const donutCtx = document.getElementById("chart-language-donut");
+        if (donutCtx) {
+          if (state.charts.languageDonut) {
+            state.charts.languageDonut.destroy();
+            delete state.charts.languageDonut;
+          }
+          const donutColors = [
+            "#3b82f6", "#ec4899", "#10b981", "#f97316", "#a855f7",
+            "#06b6d4", "#facc15", "#14b8a6", "#f43f5e", "#94a3b8",
+            "#22d3ee", "#f472b6"
+          ];
+          state.charts.languageDonut = new Chart(donutCtx, {
+            type: "doughnut",
+            data: {
+              labels: langStats.labels,
+              datasets: [
+                {
+                  data: langStats.values,
+                  backgroundColor: langStats.labels.map((_, idx) => donutColors[idx % donutColors.length]),
+                  borderWidth: 1
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  position: "bottom",
+                  labels: {
+                    boxWidth: 10,
+                    padding: 8,
+                    font: { size: 11 }
+                  }
+                }
+              }
+            }
+          });
+        }
+      } catch (error) {
+        console.error("Error creating language doughnut chart:", error);
+      }
+    } else if (state.charts.languageDonut) {
+      state.charts.languageDonut.destroy();
+      delete state.charts.languageDonut;
+    }
+  } else {
+    if (state.charts.languages) {
+      state.charts.languages.destroy();
+      delete state.charts.languages;
+    }
+    if (state.charts.languageDonut) {
+      state.charts.languageDonut.destroy();
+      delete state.charts.languageDonut;
     }
   }
 
@@ -5840,6 +6654,120 @@ async function renderUserDashboard(user, month, summary, renderToken = null) {
     console.error("Error creating hour chart:", error);
   }
 
+  if (month.is_yearly) {
+    const locSeries = buildUserLocEvolutionSeries(summary);
+    const locCard = document.createElement("div");
+    locCard.className = "card";
+    const locTitle = createTitleWithTooltip(
+      "📈 Lines of Code Evolution",
+      "Cumulative net lines added or removed by this developer across each subsystem they touched this year.",
+      "h2"
+    );
+
+    if (locSeries) {
+      locCard.innerHTML = locTitle + '<div style="height:320px;"><canvas id="chart-user-loc-evolution"></canvas></div>';
+      main.appendChild(locCard);
+
+      try {
+        const locCtx = document.getElementById("chart-user-loc-evolution");
+        if (locCtx) {
+          if (state.charts.userLocEvolution) {
+            state.charts.userLocEvolution.destroy();
+            delete state.charts.userLocEvolution;
+          }
+
+          const palettes = [
+            "#3b82f6", "#ec4899", "#10b981", "#f97316", "#a855f7",
+            "#06b6d4", "#facc15", "#14b8a6", "#f43f5e", "#6366f1"
+          ];
+          const datasetColorMap = new Map();
+
+          const datasets = [];
+          if (locSeries.totalSeries?.some((value) => value !== 0)) {
+            datasets.push({
+              label: "Total net lines",
+              data: locSeries.totalSeries,
+              borderColor: "#fde047",
+              backgroundColor: "rgba(253, 224, 71, 0.2)",
+              borderWidth: 2,
+              fill: false,
+              tension: 0.25,
+              pointRadius: 0,
+              spanGaps: true,
+            });
+          }
+
+          locSeries.datasets.forEach((dataset, idx) => {
+            const color = palettes[idx % palettes.length];
+            datasetColorMap.set(dataset.label, color);
+            if (!dataset.color) {
+              dataset.color = color;
+            }
+            datasets.push({
+              label: dataset.label,
+              data: dataset.data,
+              borderColor: color,
+              borderWidth: 1.5,
+              fill: false,
+              tension: 0.25,
+              pointRadius: 0,
+              spanGaps: true,
+            });
+          });
+
+          state.charts.userLocEvolution = new Chart(locCtx, {
+            type: "line",
+            data: {
+              labels: locSeries.labels,
+              datasets,
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: { position: "bottom" },
+                tooltip: {
+                  mode: "nearest",
+                  intersect: false,
+                  callbacks: {
+                    label: (context) => {
+                      const value = context.parsed.y ?? context.parsed;
+                      return `${context.dataset.label}: ${Number(value || 0).toLocaleString()} lines`;
+                    },
+                  },
+                },
+              },
+              scales: {
+                x: { ticks: { autoSkip: false } },
+                y: {
+                  ticks: {
+                    callback: (value) => Number(value).toLocaleString(),
+                  },
+                  title: { display: true, text: "Cumulative net lines" },
+                },
+              },
+            },
+          });
+
+          renderUserLocSubsystemGrid(main, locSeries, datasetColorMap);
+        }
+      } catch (error) {
+        console.error("Error creating user LOC evolution chart:", error);
+        locCard.innerHTML = locTitle + '<div class="no-data">Unable to render LOC evolution right now.</div>';
+      }
+    } else {
+      locCard.innerHTML = locTitle + '<div class="no-data">Not enough subsystem activity to chart LOC evolution for this year.</div>';
+      main.appendChild(locCard);
+      if (state.charts.userLocEvolution) {
+        state.charts.userLocEvolution.destroy();
+        delete state.charts.userLocEvolution;
+      }
+    }
+  } else if (state.charts.userLocEvolution) {
+    state.charts.userLocEvolution.destroy();
+    delete state.charts.userLocEvolution;
+  }
+
   autoTagVisualizations("user", vizContext);
 }
 
@@ -5857,7 +6785,16 @@ async function renderSubsystemDashboard(subsystem, period, summary) {
     clearMain();
 
     const periodType = period.is_yearly ? "Yearly" : "Monthly";
-    const periodLabel = period.is_yearly ? period.label : period.label + " (" + summary.from + " → " + summary.to + ")";
+    const summaryFrom = summary.from || summary.period?.from || period.from || "";
+    const summaryTo = summary.to || summary.period?.to || period.to || "";
+    let periodLabel = period.label;
+    if (!period.is_yearly) {
+      if (summaryFrom && summaryTo) {
+        periodLabel += ` (${summaryFrom} → ${summaryTo})`;
+      } else if (summaryFrom || summaryTo) {
+        periodLabel += ` (${summaryFrom || summaryTo})`;
+      }
+    }
 
     setViewHeader(
       "Subsystem: " + (summary.service || subsystem.name),
@@ -6597,7 +7534,7 @@ async function renderTeamDashboard(team, period, summary) {
     main.appendChild(capacityContainer);
   }
 
-  if (period.is_yearly && Array.isArray(summary.developer_capacity_profiles) && summary.developer_capacity_profiles.length > 0) {
+  if (Array.isArray(summary.developer_capacity_profiles) && summary.developer_capacity_profiles.length > 0) {
     const developerWorthCard = document.createElement("div");
     developerWorthCard.className = "card";
     developerWorthCard.innerHTML = createTitleWithTooltip(
@@ -7382,116 +8319,123 @@ function createMaintainerTimelineChart(canvasId, maintainerName, timelineData) {
 }
 
 async function addSubsystemLanguageSection(container, subsystemName) {
+  const languageCard = document.createElement("div");
+  languageCard.className = "card";
+  languageCard.innerHTML = '<h2>Programming Languages</h2>';
+  const languageBody = document.createElement("div");
+  languageBody.className = "language-card-body";
+  languageCard.appendChild(languageBody);
+  container.appendChild(languageCard);
+
   try {
     console.log("Loading language statistics for subsystem:", subsystemName);
-    
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Language statistics loading timeout')), 10000)
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Language statistics loading timeout")), 10000)
     );
-    
+
     const languagePromise = fetchJSON(`/api/subsystems/${encodeURIComponent(subsystemName)}/languages`);
     const languageData = await Promise.race([languagePromise, timeoutPromise]);
-    
-    if (languageData.languages && Object.keys(languageData.languages).length > 0) {
-      const languageCard = document.createElement("div");
-      languageCard.className = "card";
-      languageCard.innerHTML = '<h2>Programming Languages</h2>';
-      
-      // Create language chart
-      const chartContainer = document.createElement("div");
-      chartContainer.className = "chart-container language-chart";
-      chartContainer.innerHTML = '<canvas id="subsystem-languages-chart"></canvas>';
-      languageCard.appendChild(chartContainer);
-      
-      container.appendChild(languageCard);
-      
-      // Create the chart after the element is in the DOM
-      setTimeout(() => {
-        try {
-          const langStats = getSubsystemLanguageStats(languageData);
-          if (langStats.labels.length > 0) {
-            const ctx = document.getElementById("subsystem-languages-chart");
-            if (ctx) {
-              // Destroy existing chart if it exists
-              if (state.charts.subsystemLanguages) {
-                state.charts.subsystemLanguages.destroy();
-              }
-              state.charts.subsystemLanguages = new Chart(ctx, {
-                type: "doughnut",
-                data: {
-                  labels: langStats.labels,
-                  datasets: [{
-                    label: "Lines of Code",
-                    data: langStats.values,
-                    backgroundColor: langStats.labels.map((label, index) => {
-                      // Use a more visible color for "Others" 
-                      if (label === 'Others') {
-                        return '#4B5563'; // Dark gray for better visibility against white
-                      }
-                      // Use vibrant colors for programming languages
-                      const colors = [
-                        '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
-                        '#FF9F40', '#FF6384', '#C9CBCF', '#4BC0C0', '#FF6384',
-                        '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
-                      ];
-                      return colors[index % colors.length];
-                    })
-                  }]
-                },
-                options: {
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: {
-                    legend: {
-                      position: 'bottom',
-                      labels: {
-                        boxWidth: 10,
-                        padding: 8,
-                        font: { size: 11 }
-                      }
-                    },
-                    tooltip: {
-                      callbacks: {
-                        label: function(context) {
-                          const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                          const percentage = ((context.parsed * 100) / total).toFixed(1);
-                          let label = context.label + ': ' + context.parsed.toLocaleString() + ' lines (' + percentage + '%)';
-                          
-                          // Add explanation for "Others"
-                          if (context.label === 'Others') {
-                            label += ' (Config/Markup/Styles)';
-                          }
-                          
-                          return label;
-                        }
-                      }
+    const hasLanguages = languageData.languages && Object.keys(languageData.languages).length > 0;
+
+    if (!hasLanguages) {
+      console.log("No language statistics available for", subsystemName);
+      languageBody.innerHTML = '<div class="no-data">No language statistics available for this subsystem yet.</div>';
+      return;
+    }
+
+    languageBody.innerHTML = "";
+    const chartContainer = document.createElement("div");
+    chartContainer.className = "chart-container language-chart";
+    chartContainer.innerHTML = '<canvas id="subsystem-languages-chart"></canvas>';
+    languageBody.appendChild(chartContainer);
+
+    setTimeout(() => {
+      try {
+        const langStats = getSubsystemLanguageStats(languageData);
+        if (langStats.labels.length === 0) {
+          languageBody.innerHTML = '<div class="no-data">No qualifying programming languages detected for this subsystem.</div>';
+          return;
+        }
+        const canvas = chartContainer.querySelector("#subsystem-languages-chart");
+        if (!canvas) {
+          return;
+        }
+        if (state.charts.subsystemLanguages) {
+          state.charts.subsystemLanguages.destroy();
+        }
+        state.charts.subsystemLanguages = new Chart(canvas, {
+          type: "doughnut",
+          data: {
+            labels: langStats.labels,
+            datasets: [{
+              label: "Lines of Code",
+              data: langStats.values,
+              backgroundColor: langStats.labels.map((label, index) => {
+                if (label === "Others") {
+                  return "#4B5563";
+                }
+                const colors = [
+                  "#FF6384", "#36A2EB", "#FFCE56", "#4BC0C0", "#9966FF",
+                  "#FF9F40", "#FF6384", "#C9CBCF", "#4BC0C0", "#FF6384",
+                  "#36A2EB", "#FFCE56", "#4BC0C0", "#9966FF", "#FF9F40"
+                ];
+                return colors[index % colors.length];
+              })
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                position: "bottom",
+                labels: {
+                  boxWidth: 10,
+                  padding: 8,
+                  font: { size: 11 }
+                }
+              },
+              tooltip: {
+                callbacks: {
+                  label: function (context) {
+                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                    const percentage = total ? ((context.parsed * 100) / total).toFixed(1) : "0.0";
+                    let label = `${context.label}: ${context.parsed.toLocaleString()} lines (${percentage}%)`;
+                    if (context.label === "Others") {
+                      label += " (Config/Markup/Styles)";
                     }
+                    return label;
                   }
                 }
-              });
+              }
             }
           }
-        } catch (error) {
-          console.error("Error creating subsystem languages chart:", error);
-        }
-      }, 100);
-      
-      // Add summary information
-      if (languageData.totals) {
-        const summaryDiv = document.createElement("div");
-        summaryDiv.className = "language-summary";
-        summaryDiv.innerHTML = `
-          <p><strong>Total:</strong> ${languageData.totals.files} files, 
-          ${languageData.totals.code_lines.toLocaleString()} lines of code</p>
-        `;
-        languageCard.appendChild(summaryDiv);
+        });
+      } catch (error) {
+        console.error("Error creating subsystem languages chart:", error);
+        languageBody.innerHTML = '<div class="no-data">Unable to render language statistics right now.</div>';
       }
-    } else {
-      console.log("No language statistics available for", subsystemName);
+    }, 100);
+
+    if (languageData.totals) {
+      const totals = languageData.totals;
+      const files = totals.files != null ? Number(totals.files).toLocaleString() : "—";
+      const codeLinesRaw = totals.code_lines ?? totals.lines ?? totals.code ?? 0;
+      const codeLines = Number(codeLinesRaw).toLocaleString();
+      const comments = Number(totals.comments || 0).toLocaleString();
+      const blanks = Number(totals.blanks || 0).toLocaleString();
+      const summaryDiv = document.createElement("div");
+      summaryDiv.className = "language-summary";
+      summaryDiv.innerHTML = `
+        <p><strong>Total:</strong> ${files} files, ${codeLines} lines of code</p>
+        <p><strong>Comments:</strong> ${comments} lines, <strong>Blanks:</strong> ${blanks}</p>
+      `;
+      languageBody.appendChild(summaryDiv);
     }
   } catch (error) {
     console.error("Failed to load language statistics for", subsystemName, ":", error);
-    // Don't show error to user, just skip this section
+    languageBody.innerHTML = `<div class="no-data">Unable to load language statistics. ${error.message || "Please try again later."}</div>`;
   }
 }
 
@@ -7713,52 +8657,62 @@ async function addSubsystemContributionHeatmap(container, subsystemName, period,
     
     // LOC evolution chart for yearly view
     if (period.is_yearly) {
+      const locCard = document.createElement("div");
+      locCard.className = "card";
+      const locTitle = createTitleWithTooltip(
+        "📈 Lines of Code Evolution",
+        "Monthly total code lines for this subsystem across the selected year.",
+        "h2"
+      );
+      const ensureCardAttached = () => {
+        if (!locCard.parentElement) {
+          container.appendChild(locCard);
+        }
+      };
+      const renderNoData = (message) => {
+        locCard.innerHTML = locTitle + `<div class="no-data">${message}</div>`;
+        ensureCardAttached();
+      };
+
       try {
         const year = period.label;
         const loc = await fetchJSON(`/api/subsystems/${encodeURIComponent(subsystemName)}/loc-evolution/${year}`);
         const series = loc.series || [];
-        const locCard = document.createElement("div");
-        locCard.className = "card";
         if (series.length > 0) {
-          locCard.innerHTML = createTitleWithTooltip(
-            "📈 Lines of Code Evolution", 
-            "Monthly total code lines for this subsystem across the selected year.",
-            "h2"
-          ) + '<div style="height: 260px;"><canvas id="chart-loc-evolution"></canvas></div>';
-          container.appendChild(locCard);
-          const ctx = document.getElementById("chart-loc-evolution").getContext("2d");
-          const labels = series.map(s => s.month);
-          const values = series.map(s => s.code_lines);
-          new Chart(ctx, {
-            type: "line",
-            data: {
-              labels,
-              datasets: [{
-                label: "Code lines",
-                data: values,
-                borderColor: "#3b82f6",
-                backgroundColor: "rgba(59,130,246,0.15)",
-                tension: 0.2,
-                fill: true,
-              }]
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: { legend: { display: false } },
-              scales: { x: { display: true }, y: { display: true } }
-            }
-          });
+          locCard.innerHTML = locTitle + '<div style="height: 260px;"><canvas id="chart-loc-evolution"></canvas></div>';
+          ensureCardAttached();
+          const canvas = locCard.querySelector("#chart-loc-evolution");
+          if (canvas) {
+            const ctx = canvas.getContext("2d");
+            const labels = series.map((s) => s.month);
+            const values = series.map((s) => s.code_lines);
+            new Chart(ctx, {
+              type: "line",
+              data: {
+                labels,
+                datasets: [{
+                  label: "Code lines",
+                  data: values,
+                  borderColor: "#3b82f6",
+                  backgroundColor: "rgba(59,130,246,0.15)",
+                  tension: 0.2,
+                  fill: true,
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: { x: { display: true }, y: { display: true } }
+              }
+            });
+          }
         } else {
-          locCard.innerHTML = createTitleWithTooltip(
-            "📈 Lines of Code Evolution", 
-            "Monthly total code lines for this subsystem across the selected year.",
-            "h2"
-          ) + '<div class="no-data">No LOC data available for this year.</div>';
-          container.appendChild(locCard);
+          renderNoData("No LOC data available for this year.");
         }
       } catch (e) {
         console.warn("LOC evolution fetch failed:", e);
+        renderNoData("Unable to load LOC data right now. Please try again later.");
       }
     }
     
@@ -7773,7 +8727,7 @@ function renderSubsystemLineChangeTimeline(container, monthlyData, subsystemName
     return;
   }
 
-  const entries = monthlyData
+  const allEntries = monthlyData
     .map((summary) => {
       if (!summary || !summary.from) {
         return null;
@@ -7788,6 +8742,28 @@ function renderSubsystemLineChangeTimeline(container, monthlyData, subsystemName
     })
     .filter(Boolean)
     .sort((a, b) => (a.monthKey || "").localeCompare(b.monthKey || ""));
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const entries = allEntries.filter((entry) => {
+    if (!entry || !entry.monthKey) {
+      return false;
+    }
+    const [yearStr, monthStr] = entry.monthKey.split("-");
+    const yearNum = parseInt(yearStr, 10);
+    const monthNum = parseInt(monthStr, 10);
+    if (Number.isNaN(yearNum) || Number.isNaN(monthNum)) {
+      return true;
+    }
+    if (yearNum > currentYear) {
+      return false;
+    }
+    if (yearNum === currentYear && monthNum > currentMonth) {
+      return false;
+    }
+    return true;
+  });
 
   const hasActivity = entries.some((entry) => entry.additions > 0 || entry.deletions > 0);
   if (!hasActivity) {
@@ -7937,10 +8913,21 @@ function formatSubsystemMonthLabel(dateStr) {
 async function collectSubsystemMonthlyData(subsystemName, year) {
   try {
     const monthlyData = [];
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1;
+
+    if (year > currentYear) {
+      return [];
+    }
+
+    let lastMonth = 12;
+    if (year === currentYear) {
+      lastMonth = currentMonth;
+    }
     
-    // Try to fetch monthly summaries for the year
-    // We'll try all 12 months and collect what's available
-    for (let month = 1; month <= 12; month++) {
+    // Try to fetch monthly summaries for the year up to the newest available month
+    for (let month = 1; month <= lastMonth; month++) {
       try {
         const monthStr = month.toString().padStart(2, '0');
         const fromDate = `${year}-${monthStr}-01`;
@@ -7952,7 +8939,8 @@ async function collectSubsystemMonthlyData(subsystemName, year) {
         const response = await fetchJSON(`/api/subsystems/${encodeURIComponent(subsystemName)}/month/${fromDate}/${toDate}`);
         
         if (response && !response.error) {
-          monthlyData.push(response);
+          const normalized = normalizeSubsystemSummary(response, { from: fromDate, to: toDate }, subsystemName);
+          monthlyData.push(normalized || response);
         }
       } catch (error) {
         // Month data not available, skip
@@ -7988,14 +8976,24 @@ async function showSubsystemsOverviewDashboard() {
     clearMain();
     setViewHeader("Subsystems Overview", "System-wide subsystem statistics and rankings", "Subsystems");
     
+    const sizeData = overviewData.size_data || {};
+    const deadSubsystemsPayload = overviewData.dead_subsystems || {};
+    const rawDeadSubsystemList = Array.isArray(deadSubsystemsPayload.subsystems)
+      ? deadSubsystemsPayload.subsystems
+      : Object.entries(deadSubsystemsPayload.details || {}).map(([name, info = {}]) => ({ name, ...info }));
+    const deadSubsystemList = rawDeadSubsystemList.filter((subsystem) => subsystem && subsystem.is_dead);
+    const deadSubsystemCount = deadSubsystemsPayload.count != null
+      ? deadSubsystemsPayload.count
+      : deadSubsystemList.length;
+    
     // System statistics KPI cards
     const kpiContainer = document.createElement("div");
     kpiContainer.className = "kpi-grid";
     
-    const totalSystemLines = overviewData.size_data?.total_system_lines || 0;
-    const totalGitLines = overviewData.size_data?.total_git_lines || 0;
+    const totalSystemLines = sizeData.total_system_lines || 0;
+    const totalGitLines = sizeData.total_git_lines || 0;
     const totalSubsystems = overviewData.total_subsystems || 0;
-    const deadSubsystems = overviewData.dead_subsystems?.count || 0;
+    const deadSubsystems = deadSubsystemCount || 0;
     const averageLinesPerSubsystem = totalSubsystems > 0 ? Math.round(totalSystemLines / totalSubsystems) : 0;
     const ratio = totalSystemLines > 0 ? (totalGitLines / totalSystemLines).toFixed(1) : 0;
     
@@ -8041,7 +9039,7 @@ async function showSubsystemsOverviewDashboard() {
       "h2"
     );
     
-    const rankings = overviewData.size_data?.rankings || {};
+    const rankings = sizeData.rankings || {};
     const topSubsystems = Object.entries(rankings)
       .sort((a, b) => a[1].rank - b[1].rank)
       .slice(0, 10);
@@ -8113,11 +9111,15 @@ async function showSubsystemsOverviewDashboard() {
     }
     
     // Activity section
-    if (overviewData.activity) {
+    const activityData = overviewData.activity;
+    const activityMostCommits = Array.isArray(activityData?.most_commits) ? activityData.most_commits : [];
+    const activityMostChanges = Array.isArray(activityData?.most_changes) ? activityData.most_changes : [];
+    if (activityData && (activityMostCommits.length || activityMostChanges.length)) {
       const activitySection = document.createElement("div");
       activitySection.className = "card";
+      const activityPeriodLabel = activityData.period || "Recent activity";
       activitySection.innerHTML = createTitleWithTooltip(
-        `🔥 Most Active (${overviewData.activity.period})`, 
+        `🔥 Most Active (${activityPeriodLabel})`, 
         "Subsystems and developers ranked by activity level during the specified period. Shows both commit frequency and lines changed to identify the most active areas of development.",
         "h2"
       );
@@ -8133,18 +9135,19 @@ async function showSubsystemsOverviewDashboard() {
       const commitsList = document.createElement("div");
       commitsList.className = "activity-list";
       
-      overviewData.activity.most_commits.slice(0, 10).forEach((subsystem, index) => {
-        if (subsystem.commits > 0) {
-          const item = document.createElement("div");
-          item.className = "activity-item clickable";
-          item.onclick = () => navigateToSubsystem(subsystem.name);
-          item.innerHTML = `
-            <span class="activity-rank">${index + 1}.</span>
-            <span class="activity-name">${subsystem.name}</span>
-            <span class="activity-value">${subsystem.commits} commits</span>
-          `;
-          commitsList.appendChild(item);
+      activityMostCommits.slice(0, 10).forEach((subsystem, index) => {
+        if (!subsystem || subsystem.commits <= 0) {
+          return;
         }
+        const item = document.createElement("div");
+        item.className = "activity-item clickable";
+        item.onclick = () => navigateToSubsystem(subsystem.name);
+        item.innerHTML = `
+          <span class="activity-rank">${index + 1}.</span>
+          <span class="activity-name">${subsystem.name}</span>
+          <span class="activity-value">${subsystem.commits} commits</span>
+        `;
+        commitsList.appendChild(item);
       });
       
       commitsCard.appendChild(commitsList);
@@ -8158,18 +9161,19 @@ async function showSubsystemsOverviewDashboard() {
       const changesList = document.createElement("div");
       changesList.className = "activity-list";
       
-      overviewData.activity.most_changes.slice(0, 10).forEach((subsystem, index) => {
-        if (subsystem.lines_changed > 0) {
-          const item = document.createElement("div");
-          item.className = "activity-item clickable";
-          item.onclick = () => navigateToSubsystem(subsystem.name);
-          item.innerHTML = `
-            <span class="activity-rank">${index + 1}.</span>
-            <span class="activity-name">${subsystem.name}</span>
-            <span class="activity-value">${subsystem.lines_changed.toLocaleString()} lines</span>
-          `;
-          changesList.appendChild(item);
+      activityMostChanges.slice(0, 10).forEach((subsystem, index) => {
+        if (!subsystem || subsystem.lines_changed <= 0) {
+          return;
         }
+        const item = document.createElement("div");
+        item.className = "activity-item clickable";
+        item.onclick = () => navigateToSubsystem(subsystem.name);
+        item.innerHTML = `
+          <span class="activity-rank">${index + 1}.</span>
+          <span class="activity-name">${subsystem.name}</span>
+          <span class="activity-value">${subsystem.lines_changed.toLocaleString()} lines</span>
+        `;
+        changesList.appendChild(item);
       });
       
       changesCard.appendChild(changesList);
@@ -8180,16 +9184,16 @@ async function showSubsystemsOverviewDashboard() {
     }
     
     // Dead subsystems section
-    if (overviewData.dead_subsystems && overviewData.dead_subsystems.count > 0) {
+    if (deadSubsystemList.length > 0) {
       const deadSection = document.createElement("div");
       deadSection.className = "card";
-      deadSection.innerHTML = `<h2>⚠️ Potentially Dead Subsystems (${overviewData.dead_subsystems.count})</h2>`;
+      deadSection.innerHTML = `<h2>⚠️ Potentially Dead Subsystems (${deadSubsystemCount})</h2>`;
       
       const deadList = document.createElement("div");
       deadList.className = "dead-subsystems-list";
       
       // Sort dead subsystems by months since activity (descending)
-      const sortedDeadSubsystems = overviewData.dead_subsystems.subsystems
+      const sortedDeadSubsystems = deadSubsystemList
         .slice()
         .sort((a, b) => (b.months_since_activity || 999) - (a.months_since_activity || 999))
         .slice(0, 10); // Show top 10
@@ -9777,10 +10781,12 @@ async function showTeamsOverviewDashboard() {
             <strong>Members:</strong> ${
               team.members && team.members.length > 0
                 ? team.members.map(memberSlug => {
-                    const isActive = state.users.some(user => user.slug === memberSlug);
-                    return isActive 
-                      ? `<span class="member-name">${memberSlug}</span>`
-                      : `<span class="member-name inactive" style="color: #dc2626; font-style: italic;" title="Inactive contributor">${memberSlug}</span>`;
+                    const userEntry = state.users.find(user => user.slug === memberSlug);
+                    const displayName = userEntry?.display_name || memberSlug;
+                    if (userEntry) {
+                      return `<span class="member-name" title="${memberSlug}">${displayName}</span>`;
+                    }
+                    return `<span class="member-name inactive" style="color: #dc2626; font-style: italic;" title="Inactive contributor">${displayName}</span>`;
                   }).join(', ')
                 : 'No members assigned'
             }
@@ -13272,6 +14278,109 @@ function resetAliases() {
 
 // Teams Management Functions
 
+function normalizeUserIdentifier(value) {
+  if (!value) return "";
+  return String(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .replace(/(.)\1+/g, "$1");
+}
+
+function buildUserLookupMap(users) {
+  const lookup = new Map();
+  const register = (variant, slug) => {
+    if (!variant || !slug) return;
+    const value = String(variant);
+    lookup.set(value, slug);
+    const lowered = value.toLowerCase();
+    if (!lookup.has(lowered)) {
+      lookup.set(lowered, slug);
+    }
+  };
+
+  (users || []).forEach(user => {
+    const slugValue = typeof user?.slug === "string" ? user.slug : (user?.slug ? String(user.slug) : "");
+    if (!slugValue) return;
+    const slug = slugValue;
+    register(slug, slug);
+    register(slug.toLowerCase(), slug);
+    register(slug.replace(/\s+/g, ""), slug);
+    register(slug.replace(/\s+/g, "-"), slug);
+    register(normalizeUserIdentifier(slug), slug);
+
+    const displayRaw = typeof user.display_name === "string" ? user.display_name : (user.display_name ? String(user.display_name) : "");
+    if (displayRaw) {
+      const display = displayRaw;
+      register(display, slug);
+      register(display.toLowerCase(), slug);
+      register(display.replace(/\s+/g, ""), slug);
+      register(normalizeUserIdentifier(display), slug);
+    }
+  });
+
+  return lookup;
+}
+
+function findCanonicalMemberSlug(member, lookup) {
+  if (!member || !lookup) return null;
+  const value = String(member);
+  if (lookup.has(value)) return lookup.get(value);
+  const lowered = value.toLowerCase();
+  if (lookup.has(lowered)) return lookup.get(lowered);
+  const noSpaces = value.replace(/\s+/g, "");
+  if (lookup.has(noSpaces)) return lookup.get(noSpaces);
+  const slugified = value.replace(/\s+/g, "-");
+  if (lookup.has(slugified)) return lookup.get(slugified);
+  const normalized = normalizeUserIdentifier(value);
+  if (lookup.has(normalized)) return lookup.get(normalized);
+  return null;
+}
+
+function canonicalizeTeamMembersData() {
+  if (!window.teamsData || !window.availableUsersData) return;
+  const lookup = buildUserLookupMap(window.availableUsersData);
+  Object.entries(window.teamsData).forEach(([teamId, team]) => {
+    if (!Array.isArray(team.members)) return;
+    const seen = new Set();
+    const canonicalMembers = [];
+    team.members.forEach(member => {
+      const canonical = findCanonicalMemberSlug(member, lookup) || String(member || "");
+      if (!canonical || seen.has(canonical)) {
+        return;
+      }
+      seen.add(canonical);
+      canonicalMembers.push(canonical);
+    });
+    team.members = canonicalMembers;
+  });
+}
+
+function ensureAvailableUsersIncludeAppStateUsers() {
+  if (!Array.isArray(window.availableUsersData)) {
+    window.availableUsersData = [];
+  }
+  const knownSlugs = new Set(
+    window.availableUsersData
+      .map((user) => (user && typeof user.slug === "string" ? user.slug : null))
+      .filter(Boolean)
+  );
+  const appUsers = Array.isArray(state?.users) ? state.users : [];
+  appUsers.forEach((user) => {
+    const slug = user?.slug || user?.user_slug;
+    if (!slug || knownSlugs.has(slug)) {
+      return;
+    }
+    window.availableUsersData.push({
+      slug,
+      display_name: user.display_name || user.name || slug,
+      active: user.active !== undefined ? user.active : true,
+    });
+    knownSlugs.add(slug);
+  });
+}
+
 async function loadTeamsUI() {
   try {
     const response = await fetchJSON("/api/settings/teams");
@@ -13284,11 +14393,18 @@ async function loadTeamsUI() {
     
     // Store for use in rendering team member display names
     window.availableUsersData = availableUsers;
+    ensureAvailableUsersIncludeAppStateUsers();
+
+    // Align legacy member identifiers with available user slugs
+    canonicalizeTeamMembersData();
     
     // Set up filter checkbox handler
     const hideAssignedCheckbox = $("hide-assigned-users");
     if (hideAssignedCheckbox) {
-      hideAssignedCheckbox.onchange = renderTeamMemberSelector;
+      hideAssignedCheckbox.onchange = () => {
+        const editingId = $("add-team")?.getAttribute('data-editing') || null;
+        renderTeamMemberSelector(editingId);
+      };
     }
     
     // Initial render
@@ -13308,6 +14424,7 @@ function renderTeamMemberSelector(editingTeamId = null) {
   if (!memberSelector) return;
   
   const availableUsers = window.availableUsersData || [];
+  const userLookup = availableUsers.length ? buildUserLookupMap(availableUsers) : null;
   const hideAssigned = $("hide-assigned-users")?.checked || false;
   
   // Get all users already in teams (excluding the team being edited)
@@ -13325,8 +14442,12 @@ function renderTeamMemberSelector(editingTeamId = null) {
   }
   
   memberSelector.innerHTML = '';
+  const renderedMembers = new Set();
   
   availableUsers.forEach(user => {
+    if (!user?.slug) {
+      return;
+    }
     // Skip if user is already in a team and filter is enabled
     if (hideAssigned && usersInTeams.has(user.slug)) {
       return;
@@ -13345,7 +14466,33 @@ function renderTeamMemberSelector(editingTeamId = null) {
       </label>
     `;
     memberSelector.appendChild(checkbox);
+    renderedMembers.add(user.slug);
   });
+  
+  if (editingTeamId && window.teamsData?.[editingTeamId]) {
+    const editingTeam = window.teamsData[editingTeamId];
+    (editingTeam.members || []).forEach(member => {
+      if (!member) {
+        return;
+      }
+      const canonical = userLookup ? findCanonicalMemberSlug(member, userLookup) : null;
+      const normalized = canonical || String(member);
+      if (!normalized || renderedMembers.has(normalized)) {
+        return;
+      }
+      const fallbackItem = document.createElement("div");
+      fallbackItem.className = "member-checkbox missing-member";
+      const displayLabel = typeof member === "string" && member.trim() ? member : normalized;
+      fallbackItem.innerHTML = `
+        <label>
+          <input type="checkbox" value="${normalized}" name="team-member">
+          <span>${displayLabel} <span class="missing-member-badge" title="User not found in available contributors list">Unknown</span></span>
+        </label>
+      `;
+      memberSelector.appendChild(fallbackItem);
+      renderedMembers.add(normalized);
+    });
+  }
 }
 
 function renderTeamsList() {
@@ -13421,10 +14568,23 @@ function editTeam(teamId) {
   // Re-render member selector with editing context (to show all members of this team)
   renderTeamMemberSelector(teamId);
   
-  // Check the appropriate members
+  // Check the appropriate members (normalize against available user slugs)
+  const availableUsers = window.availableUsersData || [];
+  const lookup = availableUsers.length ? buildUserLookupMap(availableUsers) : null;
+  const canonicalMembers = new Set();
+  (teamData.members || []).forEach(member => {
+    if (!member) {
+      return;
+    }
+    const canonical = lookup ? findCanonicalMemberSlug(member, lookup) : null;
+    const normalized = canonical || String(member);
+    if (normalized) {
+      canonicalMembers.add(normalized);
+    }
+  });
   const memberCheckboxes = document.querySelectorAll('input[name="team-member"]');
   memberCheckboxes.forEach(checkbox => {
-    checkbox.checked = (teamData.members || []).includes(checkbox.value);
+    checkbox.checked = canonicalMembers.has(checkbox.value);
   });
   
   // Update the button text
@@ -15233,23 +16393,70 @@ function renderUserOwnershipTimelines(userSlug, timelines, container) {
   timelineCard.innerHTML = '<h2>📈 Ownership Evolution</h2><p style="margin-bottom: 16px; color: #94a3b8;">Your ownership trends in subsystems where you are a top maintainer</p>';
   
   const timelinesContainer = document.createElement("div");
-  timelinesContainer.style.display = "grid";
-  timelinesContainer.style.gap = "20px";
+  timelinesContainer.className = "ownership-timeline-grid";
   
-  Object.entries(timelines).forEach(([subsystemName, timelineData], index) => {
+  const timelineEntries = Object.entries(timelines).sort(([, dataA], [, dataB]) => {
+    const labelA = (dataA.display_label || dataA.subsystem || "").toLowerCase();
+    const labelB = (dataB.display_label || dataB.subsystem || "").toLowerCase();
+    return labelA.localeCompare(labelB);
+  });
+
+  const filteredEntries = timelineEntries.filter(([, timelineData]) => {
+    const ownershipSeries = Array.isArray(timelineData.ownership)
+      ? timelineData.ownership
+          .map((value) => (typeof value === "number" ? value : Number(value)))
+          .filter((value) => Number.isFinite(value))
+      : [];
+    const latestOwnership = typeof timelineData.current_ownership === "number"
+      ? timelineData.current_ownership
+      : (ownershipSeries.length ? ownershipSeries[ownershipSeries.length - 1] : null);
+
+    let maxOwnership = ownershipSeries.length ? Math.max(...ownershipSeries) : -Infinity;
+    if (Number.isFinite(latestOwnership)) {
+      maxOwnership = Math.max(maxOwnership, latestOwnership);
+    }
+
+    if (!Number.isFinite(maxOwnership)) {
+      return false;
+    }
+    return maxOwnership >= 0.5;
+  });
+
+  if (!filteredEntries.length) {
+    return;
+  }
+  
+  filteredEntries.forEach(([subsystemKey, timelineData], index) => {
     const subsystemContainer = document.createElement("div");
-    subsystemContainer.style.marginBottom = "10px";
+    subsystemContainer.className = "ownership-timeline-item";
+    const displayName = timelineData.display_label || timelineData.subsystem || subsystemKey;
+    const repoLabel = timelineData.repo_label || timelineData.repo || "";
+    const colorKey = timelineData.color_key || timelineData.subsystem || subsystemKey;
+    const accentColor = getOwnershipColor(colorKey);
+    subsystemContainer.style.borderLeft = `4px solid ${accentColor}`;
     
-    // Subsystem title with current ownership
     const titleDiv = document.createElement("div");
-    titleDiv.style.marginBottom = "8px";
-    titleDiv.innerHTML = `<strong style="color: #e2e8f0;">${subsystemName}</strong> <span style="color: #94a3b8; font-size: 0.9em;">(Current: ${timelineData.current_ownership}%)</span>`;
+    titleDiv.className = "ownership-timeline-heading";
+    const currentOwnershipValue = typeof timelineData.current_ownership === "number"
+      ? timelineData.current_ownership
+      : (Array.isArray(timelineData.ownership) && timelineData.ownership.length > 0
+        ? timelineData.ownership[timelineData.ownership.length - 1]
+        : 0);
+    titleDiv.innerHTML = `
+      <div class="ownership-timeline-title">
+        <span class="ownership-color-dot" style="background:${accentColor};"></span>
+        <div>
+          <strong>${displayName}</strong>
+          ${repoLabel ? `<div style="font-size: 0.85rem; color: #94a3b8;">${repoLabel}</div>` : ""}
+        </div>
+      </div>
+      <span class="ownership-current">Current: ${Number(currentOwnershipValue || 0).toFixed(1)}%</span>
+    `;
     subsystemContainer.appendChild(titleDiv);
     
-    // Chart container
     const chartContainer = document.createElement("div");
     chartContainer.className = "maintainer-timeline-chart";
-    chartContainer.style.height = "200px";
+    chartContainer.style.height = "210px";
     
     const canvas = document.createElement("canvas");
     canvas.id = `user-ownership-timeline-${userSlug}-${index}`;
@@ -15258,9 +16465,8 @@ function renderUserOwnershipTimelines(userSlug, timelines, container) {
     
     timelinesContainer.appendChild(subsystemContainer);
     
-    // Create chart
     setTimeout(() => {
-      createUserOwnershipChart(canvas.id, subsystemName, timelineData);
+      createUserOwnershipChart(canvas.id, colorKey, timelineData, accentColor);
     }, 100);
   });
   
@@ -15701,7 +16907,39 @@ function renderTeamSubsystemTimeline(team, activityData, mountPoint) {
   mountPoint.appendChild(card);
 }
 
-function createUserOwnershipChart(canvasId, subsystemName, timelineData) {
+const OWNERSHIP_COLOR_PALETTE = ["#3B82F6", "#a855f7", "#10B981", "#F97316", "#EF4444", "#06B6D4", "#FACC15", "#14B8A6", "#F43F5E", "#6366F1"];
+
+function ownershipColorHash(input) {
+  if (!input) {
+    return 0;
+  }
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function hexToRgba(hex, alpha = 1) {
+  const sanitized = (hex || "").replace("#", "");
+  if (sanitized.length !== 6) {
+    return `rgba(59, 130, 246, ${alpha})`;
+  }
+  const bigint = parseInt(sanitized, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function getOwnershipColor(subsystemName, alpha = 1) {
+  const palette = OWNERSHIP_COLOR_PALETTE;
+  const index = ownershipColorHash(subsystemName || "") % palette.length;
+  const baseColor = palette[index];
+  return alpha >= 1 ? baseColor : hexToRgba(baseColor, alpha);
+}
+
+function createUserOwnershipChart(canvasId, subsystemName, timelineData, customColor = null) {
   const ctx = document.getElementById(canvasId);
   if (!ctx) {
     console.error("Canvas not found:", canvasId);
@@ -15709,43 +16947,51 @@ function createUserOwnershipChart(canvasId, subsystemName, timelineData) {
   }
   
   const values = Array.isArray(timelineData.ownership) ? timelineData.ownership : [];
+  const labels = Array.isArray(timelineData.months) && timelineData.months.length === values.length
+    ? timelineData.months
+    : (timelineData.months || values.map((_, idx) => `Month ${idx + 1}`));
   if (!values.length) {
     console.warn("No ownership data for", subsystemName);
     return;
   }
+
+  const sanitizedValues = values.map((value) => {
+    const numericValue = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(numericValue) ? numericValue : 0;
+  });
+  const minValue = Math.min(...sanitizedValues);
+  const maxValue = Math.max(...sanitizedValues);
+  let yMin = Math.max(0, Math.min(minValue, maxValue));
+  let yMax = Math.min(100, Math.max(minValue, maxValue));
+
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    yMin = 0;
+    yMax = 100;
+  } else if (yMax - yMin < 0.5) {
+    const buffer = 0.5;
+    yMin = Math.max(0, yMin - buffer);
+    yMax = Math.min(100, yMax + buffer);
+  }
   
-  // Calculate dynamic Y-axis range with safe padding for flat datasets
-  let minValue = Math.min(...values);
-  let maxValue = Math.max(...values);
-  if (!isFinite(minValue) || !isFinite(maxValue)) {
-    minValue = 0;
-    maxValue = 0;
-  }
-  if (maxValue === minValue) {
-    const delta = Math.max(1, maxValue * 0.05 || 1);
-    minValue = Math.max(0, minValue - delta);
-    maxValue = Math.min(100, maxValue + delta);
-  }
-  const range = maxValue - minValue;
-  const padding = Math.max(0.5, range * 0.1);
-  const yMin = Math.max(0, minValue - padding);
-  const yMax = Math.min(100, maxValue + padding);
+  const borderColor = customColor || getOwnershipColor(subsystemName);
+  const fillColor = getOwnershipColor(subsystemName, 0.18);
+  const pointColor = getOwnershipColor(subsystemName, 0.95);
   
   new Chart(ctx, {
     type: "line",
     data: {
-      labels: timelineData.months,
+      labels,
       datasets: [{
         label: "Ownership %",
-        data: timelineData.ownership,
-        backgroundColor: "rgba(75, 192, 192, 0.1)",
-        borderColor: "rgba(75, 192, 192, 1)",
+        data: sanitizedValues,
+        backgroundColor: fillColor,
+        borderColor,
         borderWidth: 2,
         fill: true,
-        tension: 0.4,
+        tension: 0.35,
         pointRadius: 4,
-        pointBackgroundColor: "rgba(75, 192, 192, 1)",
-        pointBorderColor: "#fff",
+        pointBackgroundColor: pointColor,
+        pointBorderColor: "#0f172a",
         pointBorderWidth: 2,
         pointHoverRadius: 6
       }]
@@ -15774,14 +17020,14 @@ function createUserOwnershipChart(canvasId, subsystemName, timelineData) {
           max: yMax,
           ticks: {
             callback: function(value) {
-              return value.toFixed(1) + '%';
+              return `${Number(value).toFixed(0)}%`;
             },
             font: {
               size: 11
             }
           },
           grid: {
-            color: 'rgba(0, 0, 0, 0.05)'
+            color: 'rgba(148, 163, 184, 0.12)'
           }
         },
         x: {
