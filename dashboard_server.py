@@ -17,6 +17,7 @@ import copy
 import calendar
 import configparser
 import unicodedata
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Any, List, Tuple, Optional, Set, Iterable
 from collections import defaultdict, Counter, deque
@@ -48,6 +49,12 @@ IGNORE_USERS_FILE = os.path.join(CONFIG_DIR, "ignore_user.txt")
 TEAMS_CONFIG_FILE = os.path.join(CONFIG_DIR, "teams.json")
 SERVICES_CONFIG_FILE = os.path.join(CONFIG_DIR, "services.json")
 CAPACITY_CONFIG_FILE = os.path.join(CONFIG_DIR, "capacity_config.json")
+
+REPO_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+CLONE_TASK_RETENTION_SECONDS = 1800
+
+_repo_clone_tasks: Dict[str, Dict[str, Any]] = {}
+_repo_clone_lock = threading.Lock()
 
 TEAM_METRIC_FIELDS = [
     "total_commits",
@@ -2814,6 +2821,210 @@ def _list_local_repositories() -> List[Dict[str, Any]]:
     return repos
 
 
+def _validate_repo_name_value(name: Any) -> str:
+    value = (name or "").strip()
+    if not value:
+        raise ValueError("Repository name is required.")
+    if not REPO_NAME_PATTERN.match(value):
+        raise ValueError("Repository name must be in 'owner/repo' format.")
+    return value
+
+
+def _validate_repo_url_value(url: Any) -> str:
+    value = (url or "").strip()
+    if not value:
+        raise ValueError("Repository URL is required.")
+    if value.startswith(('-')):
+        raise ValueError("Repository URL cannot start with '-'.")
+    if value.lower().startswith("file://"):
+        raise ValueError("file:// URLs are not allowed.")
+    return value
+
+
+def _repo_path_for_name(name: str) -> str:
+    owner, repo = name.split('/', 1)
+    return os.path.join(REPO_ROOT, owner, repo)
+
+
+def _append_clone_message(progress_id: str, message: str) -> None:
+    clean = (message or "").strip()
+    if not clean:
+        return
+    with _repo_clone_lock:
+        task = _repo_clone_tasks.get(progress_id)
+        if not task:
+            return
+        messages = task.setdefault("messages", [])
+        messages.append(clean)
+
+
+def _update_clone_task(progress_id: str, **updates: Any) -> None:
+    with _repo_clone_lock:
+        task = _repo_clone_tasks.get(progress_id)
+        if not task:
+            return
+        task.update(updates)
+
+
+def _start_clone_task(repo_name: str, repo_url: str, target_path: str) -> str:
+    progress_id = uuid.uuid4().hex
+    payload = {
+        "id": progress_id,
+        "repo_name": repo_name,
+        "repo_url": repo_url,
+        "target_path": target_path,
+        "status": "starting",
+        "messages": [],
+        "error": None,
+        "started_at": time.time(),
+        "last_sent_index": 0,
+    }
+    with _repo_clone_lock:
+        _repo_clone_tasks[progress_id] = payload
+    thread = threading.Thread(
+        target=_clone_repository_worker,
+        args=(progress_id,),
+        name=f"repo-clone-{repo_name.replace('/', '-')}",
+        daemon=True,
+    )
+    thread.start()
+    return progress_id
+
+
+def _clone_repository_worker(progress_id: str) -> None:
+    process: Optional[subprocess.Popen] = None
+    with _repo_clone_lock:
+        task = _repo_clone_tasks.get(progress_id)
+        if not task:
+            return
+        repo_name = task.get("repo_name")
+        repo_url = task.get("repo_url")
+        target_path = task.get("target_path")
+    if not repo_name or not repo_url or not target_path:
+        _update_clone_task(progress_id, status="failed", error="Invalid clone parameters.", completed_at=time.time())
+        return
+
+    parent_dir = os.path.dirname(target_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+
+    command = ["git", "clone", "--progress", repo_url, target_path]
+    last_line = ""
+    try:
+        _append_clone_message(progress_id, f"Starting git clone for {repo_name}")
+        _update_clone_task(progress_id, status="cloning")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        if process.stdout:
+            for line in process.stdout:
+                clean = line.strip()
+                if not clean:
+                    continue
+                last_line = clean
+                _append_clone_message(progress_id, clean)
+        returncode = process.wait()
+        if returncode == 0:
+            _append_clone_message(progress_id, f"✅ Finished cloning {repo_name}")
+            _update_clone_task(progress_id, status="completed", completed_at=time.time())
+        else:
+            error_message = last_line or f"git clone exited with status {returncode}"
+            _append_clone_message(progress_id, f"❌ {error_message}")
+            _update_clone_task(progress_id, status="failed", error=error_message, completed_at=time.time())
+            if os.path.isdir(target_path):
+                shutil.rmtree(target_path, ignore_errors=True)
+    except Exception as exc:
+        error_message = str(exc)
+        _append_clone_message(progress_id, f"❌ {error_message}")
+        _update_clone_task(progress_id, status="failed", error=error_message, completed_at=time.time())
+        if os.path.isdir(target_path):
+            shutil.rmtree(target_path, ignore_errors=True)
+    finally:
+        if process and process.stdout:
+            process.stdout.close()
+        _cleanup_clone_tasks()
+
+
+def _clone_progress_payload(progress_id: str) -> Optional[Dict[str, Any]]:
+    with _repo_clone_lock:
+        task = _repo_clone_tasks.get(progress_id)
+        if not task:
+            return None
+        messages = task.get("messages", [])
+        last_sent = task.get("last_sent_index", 0)
+        new_messages = messages[last_sent:]
+        task["last_sent_index"] = len(messages)
+        payload = {
+            "status": task.get("status", "starting"),
+            "error": task.get("error"),
+            "progress_messages": new_messages,
+            "elapsed_time": int(time.time() - task.get("started_at", time.time())),
+        }
+    return payload
+
+
+def _cleanup_clone_tasks() -> None:
+    now = time.time()
+    with _repo_clone_lock:
+        expired = [
+            task_id
+            for task_id, payload in _repo_clone_tasks.items()
+            if payload.get("status") in {"completed", "failed"}
+            and payload.get("completed_at")
+            and now - payload["completed_at"] > CLONE_TASK_RETENTION_SECONDS
+        ]
+        for task_id in expired:
+            _repo_clone_tasks.pop(task_id, None)
+
+
+def _api_clone_repository(body: Dict[str, Any]):
+    try:
+        repo_name = _validate_repo_name_value(body.get("name"))
+        repo_url = _validate_repo_url_value(body.get("url"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    target_path = _repo_path_for_name(repo_name)
+    if os.path.exists(target_path):
+        return jsonify({"error": "Repository already exists locally."}), 400
+
+    if shutil.which("git") is None:
+        return jsonify({"error": "git is not available on the server."}), 500
+
+    progress_id = _start_clone_task(repo_name, repo_url, target_path)
+    return jsonify({"progress_id": progress_id})
+
+
+def _api_remove_repository(body: Dict[str, Any]):
+    try:
+        repo_name = _validate_repo_name_value(body.get("name"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    repo_path = _repo_path_for_name(repo_name)
+    if not os.path.isdir(repo_path):
+        return jsonify({"error": "Repository not found."}), 404
+
+    try:
+        shutil.rmtree(repo_path)
+        owner_dir = os.path.dirname(repo_path)
+        if owner_dir.startswith(REPO_ROOT) and os.path.isdir(owner_dir) and not os.listdir(owner_dir):
+            os.rmdir(owner_dir)
+    except Exception as exc:
+        logger.error("Failed to remove repository %s: %s", repo_name, exc)
+        return jsonify({"error": f"Failed to remove repository: {exc}"}), 500
+
+    return jsonify({"success": True, "async": False})
+
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
 
@@ -2829,9 +3040,30 @@ def root_index():
 
 @app.route("/api/settings/repositories", methods=["GET", "POST"])
 def api_settings_repositories():
-    if request.method == "POST":
-        return jsonify({"error": "Repository management is not available in this environment."}), 400
-    return jsonify({"repositories": _list_local_repositories()})
+    if request.method == "GET":
+        return jsonify({"repositories": _list_local_repositories()})
+
+    if app.config.get("READ_ONLY_MODE", False):
+        return jsonify({"error": "Repository management is disabled in read-only mode."}), 403
+
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").strip().lower()
+
+    if action == "clone":
+        return _api_clone_repository(body)
+    if action == "remove":
+        return _api_remove_repository(body)
+
+    return jsonify({"error": "Unsupported repository action."}), 400
+
+
+@app.route("/api/settings/repositories/clone-progress/<progress_id>")
+def api_repository_clone_progress(progress_id: str):
+    payload = _clone_progress_payload(progress_id)
+    if payload is None:
+        abort(404)
+    _cleanup_clone_tasks()
+    return jsonify(payload)
 
 
 @app.route("/api/settings/integrations", methods=["GET", "POST"])
