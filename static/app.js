@@ -44,6 +44,32 @@ let state = {
   }
 };
 
+function resetPagerDutyDataCache(options = {}) {
+  if (!state.alerts) {
+    return;
+  }
+  const previousView = state.alerts.currentView || "overview";
+  state.alerts.overview = null;
+  state.alerts.error = null;
+  state.alerts.selectedResponder = null;
+  state.alerts.responderIncidents = {};
+  state.alerts.responderIncidentFilters = null;
+  state.alerts.overviewOpenFilters = null;
+  state.alerts.allIncidentsFilters = null;
+  state.alerts.allIncidentsData = null;
+  state.alerts.currentView = "overview";
+  const shouldReload = Boolean(options.reloadView);
+  if (shouldReload && state.mode === "alerts") {
+    if (previousView === "all-incidents") {
+      showAllPagerDutyIncidentsView(true);
+    } else {
+      showAlertsOverviewDashboard(true);
+    }
+    return;
+  }
+  renderPagerDutyResponderList();
+}
+
 function slugifyUserIdentifier(text) {
   if (!text) {
     return "";
@@ -768,16 +794,7 @@ function updateAlertsModeVisibility() {
     alertsSidebar.style.display = configured && state.mode === "alerts" ? "flex" : "none";
   }
   if (!configured) {
-    state.alerts.overview = null;
-    state.alerts.error = null;
-    state.alerts.selectedResponder = null;
-    state.alerts.responderIncidents = {};
-    state.alerts.responderIncidentFilters = null;
-    state.alerts.overviewOpenFilters = null;
-    state.alerts.allIncidentsFilters = null;
-    state.alerts.allIncidentsData = null;
-    state.alerts.currentView = "overview";
-    renderPagerDutyResponderList();
+    resetPagerDutyDataCache();
   }
   if (!configured && state.mode === "alerts") {
     suppressAlertsModeWarning = true;
@@ -13486,8 +13503,7 @@ async function clearPagerDutyToken() {
 
     state.integrations = data || state.integrations;
     renderPagerDutyIntegration(data?.pagerduty || {});
-    state.alerts.overview = null;
-    state.alerts.error = null;
+    resetPagerDutyDataCache();
     updateAlertsModeVisibility();
     alert("PagerDuty token removed.");
   } catch (error) {
@@ -16099,6 +16115,7 @@ async function runUpdate() {
               addUpdateLogMessage("🎉 Update process completed successfully!", "success");
               refreshLastUpdateBanner();
               scheduleLastUpdateRefresh();
+              resetPagerDutyDataCache({ reloadView: true });
               
               // Show completion actions
               const actions = $("update-actions");

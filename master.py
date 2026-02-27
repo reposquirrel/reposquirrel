@@ -320,11 +320,19 @@ def _load_pagerduty_sync() -> Tuple[Optional[Callable[..., Any]], Optional[Any]]
         return _PAGERDUTY_MODULE_CACHE
     if _PAGERDUTY_LOAD_FAILED:
         return None, None
-    module_path = Path(__file__).with_name("legacy") / "pagerduty_sync.py"
-    if not module_path.is_file():
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "pagerduty_sync.py",
+        script_dir / "legacy" / "pagerduty_sync.py",
+    ]
+    module_path = next((path for path in candidates if path.is_file()), None)
+    if module_path is None:
         _PAGERDUTY_LOAD_FAILED = True
         return None, None
-    spec = importlib.util.spec_from_file_location("legacy_pagerduty_sync", module_path)
+    module_name = "pagerduty_sync_loader"
+    if "legacy" in module_path.parts:
+        module_name = "legacy_pagerduty_sync"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         _PAGERDUTY_LOAD_FAILED = True
         return None, None
