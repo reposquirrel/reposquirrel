@@ -1,10 +1,5 @@
 # Git Repository Squirrel 🐿️
 
-> 🆕 **Live Demo**: https://demo.reposquirrel.com:8443 — Explore RepoSquirrel using a couple public HashiCorp repositories. The demo omits team-specific setup (since we don’t know their org structure) but showcases what you can expect before installing locally.
-
-> ⚠️ Demo environment is for viewing only (read-only) and uses real Git history from open-source HashiCorp projects. Access it via HTTPS at https://demo.reposquirrel.com:8443.
-
-
 **🐳 Quick Docker Run**
 ```bash
 docker run -p 5000:5000 -v repos:/app/repos -v stats:/app/stats -v configuration:/app/configuration ghcr.io/reposquirrel/reposquirrel:latest
