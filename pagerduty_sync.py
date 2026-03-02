@@ -352,21 +352,38 @@ def _fetch_pagerduty_users(token: str) -> List[Dict[str, Any]]:
 
 
 def _find_latest_user_summary(user_dir: str) -> Optional[str]:
+    candidates: List[str] = []
+
     year_dir = os.path.join(user_dir, "year")
     if os.path.isdir(year_dir):
-        for filename in sorted(os.listdir(year_dir), reverse=True):
-            if not filename.endswith(".json"):
-                continue
-            path = os.path.join(year_dir, filename)
-            if os.path.isfile(path):
-                return path
-    for entry in sorted(os.listdir(user_dir), reverse=True):
+        for filename in os.listdir(year_dir):
+            if filename.endswith(".json"):
+                path = os.path.join(year_dir, filename)
+                if os.path.isfile(path):
+                    candidates.append(path)
+
+    for entry in os.listdir(user_dir):
+        entry_path = os.path.join(user_dir, entry)
+        if not os.path.isdir(entry_path):
+            continue
         if entry == "year":
             continue
-        summary_path = os.path.join(user_dir, entry, "summary.json")
+        yearly_path = os.path.join(entry_path, "yearly.json")
+        if os.path.isfile(yearly_path):
+            candidates.append(yearly_path)
+        for filename in os.listdir(entry_path):
+            if filename.endswith(".json"):
+                path = os.path.join(entry_path, filename)
+                if os.path.isfile(path):
+                    candidates.append(path)
+        summary_path = os.path.join(entry_path, "summary.json")
         if os.path.isfile(summary_path):
-            return summary_path
-    return None
+            candidates.append(summary_path)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return candidates[0]
 
 
 def _build_github_user_lookup(stats_root: str) -> Dict[str, List[Dict[str, str]]]:

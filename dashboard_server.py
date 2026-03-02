@@ -36,13 +36,15 @@ from subsystem_metrics import (
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, "configuration")
-STATS_ROOT = os.path.join(BASE_DIR, "stats")
+STATS_ROOT = os.environ.get("REPO_SQUIRREL_STATS_ROOT") or os.path.join(BASE_DIR, "stats")
 REPO_ROOT = os.path.join(BASE_DIR, "repos")
 CLOC_CACHE_FILE = os.path.join(STATS_ROOT, "cloc_cache.json")
 BADGE_CACHE_FILE = os.path.join(STATS_ROOT, "badges_summary.json")
 PAGERDUTY_STATS_DIR = os.path.join(STATS_ROOT, "pagerduty")
 PAGERDUTY_OVERVIEW_FILE = os.path.join(PAGERDUTY_STATS_DIR, "overview.json")
 PAGERDUTY_INCIDENTS_FILE = os.path.join(PAGERDUTY_STATS_DIR, "incidents_last_year.json")
+OWNERSHIP_DISTRIBUTION_FILE = os.path.join(STATS_ROOT, "ownership_distribution.json")
+TEAM_OVERVIEW_CACHE_FILE = os.path.join(STATS_ROOT, "team_overview_overall.json")
 SSH_KNOWN_HOSTS_FILE = os.path.join(CONFIG_DIR, "known_hosts")
 ALIASES_FILE = os.path.join(CONFIG_DIR, "alias.json")
 IGNORE_USERS_FILE = os.path.join(CONFIG_DIR, "ignore_user.txt")
@@ -109,7 +111,7 @@ _BADGE_CACHE_DATA: Optional[Dict[str, Any]] = None
 _BADGE_CACHE_MTIME: Optional[float] = None
 
 _SUBSYSTEM_TOUCH_COUNT_CACHE: Dict[int, Dict[str, int]] = {}
-_OWNERSHIP_DATA_CACHE: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+_OWNERSHIP_DATA_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _SUBSYSTEM_MANIFEST: Optional[Dict[str, Any]] = None
 _ALIAS_VARIANTS_CACHE: Optional[Dict[str, List[str]]] = None
 _LANGUAGE_DISTRIBUTION_CACHE: Dict[Tuple[str, int, int], Optional[Dict[str, int]]] = {}
@@ -1152,10 +1154,11 @@ def _find_latest_blame_snapshot(blame_dir: str) -> Optional[str]:
     return newest_path
 
 
-def _build_ownership_data() -> Dict[str, Dict[str, Dict[str, Any]]]:
+def _build_ownership_data(stats_root: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Any]]]:
     repo_entries: Dict[str, Dict[str, Any]] = {}
     service_entries: Dict[str, Dict[str, Any]] = {}
-    repos_path = os.path.join(STATS_ROOT, "repos")
+    stats_root = os.path.abspath(stats_root or STATS_ROOT)
+    repos_path = os.path.join(stats_root, "repos")
     if not os.path.isdir(repos_path):
         return {"repo": repo_entries, "service": service_entries}
 
@@ -1218,11 +1221,15 @@ def _build_ownership_data() -> Dict[str, Dict[str, Dict[str, Any]]]:
     return {"repo": repo_entries, "service": service_entries}
 
 
-def _get_ownership_data() -> Dict[str, Dict[str, Dict[str, Any]]]:
+def _get_ownership_data(
+    stats_root: Optional[str] = None,
+    force_refresh: bool = False,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
     global _OWNERSHIP_DATA_CACHE
-    if _OWNERSHIP_DATA_CACHE is None:
-        _OWNERSHIP_DATA_CACHE = _build_ownership_data()
-    return _OWNERSHIP_DATA_CACHE
+    root = os.path.abspath(stats_root or STATS_ROOT)
+    if force_refresh or root not in _OWNERSHIP_DATA_CACHE:
+        _OWNERSHIP_DATA_CACHE[root] = _build_ownership_data(root)
+    return _OWNERSHIP_DATA_CACHE[root]
 
 
 def _get_ownership_entry(subsystem_name: str) -> Optional[Dict[str, Any]]:
@@ -1241,6 +1248,102 @@ def _get_ownership_entry(subsystem_name: str) -> Optional[Dict[str, Any]]:
             if target in (candidate.get("name") or "").lower():
                 return candidate
     return None
+
+
+def build_ownership_distribution_snapshot(
+    stats_root: Optional[str] = None,
+    threshold: float = 0.10,
+) -> Dict[str, Any]:
+    root = os.path.abspath(stats_root or STATS_ROOT)
+    ownership_data = _get_ownership_data(root) or {}
+    owners: Dict[str, Dict[str, Any]] = {}
+    covered_subsystems: Set[str] = set()
+    total_subsystems: Set[str] = set()
+    total_relationships = 0
+
+    for bucket_name in ("service", "repo"):
+        bucket = ownership_data.get(bucket_name, {}) or {}
+        for entry in bucket.values():
+            if not isinstance(entry, dict):
+                continue
+            subsystem_name = entry.get("name") or entry.get("repo_path")
+            if not subsystem_name:
+                continue
+            total_subsystems.add(subsystem_name)
+            developers = entry.get("developers") or {}
+            total_lines = _safe_int(entry.get("total_lines"))
+            if total_lines <= 0:
+                total_lines = sum(_extract_ownership_lines(dev) for dev in developers.values())
+            if total_lines <= 0:
+                continue
+            subsystem_had_owner = False
+            for slug, payload in developers.items():
+                lines = _extract_ownership_lines(payload)
+                if lines <= 0:
+                    continue
+                share = lines / total_lines if total_lines else 0
+                if share <= threshold:
+                    continue
+                if isinstance(payload, dict):
+                    display_name = payload.get("display_name") or slug
+                else:
+                    display_name = slug
+
+                owner_entry = owners.setdefault(
+                    slug,
+                    {
+                        "slug": slug,
+                        "display_name": display_name,
+                        "ownerships": [],
+                        "total_percentage": 0.0,
+                        "total_lines": 0,
+                        "ownership_count": 0,
+                    },
+                )
+                owner_entry["display_name"] = owner_entry.get("display_name") or display_name
+                owner_entry["ownerships"].append(
+                    {
+                        "subsystem": subsystem_name,
+                        "lines": lines,
+                        "percentage": round(share * 100, 1),
+                        "share": share,
+                        "repo_path": entry.get("repo_path"),
+                        "source": bucket_name,
+                    }
+                )
+                owner_entry["total_percentage"] += share * 100
+                owner_entry["total_lines"] += lines
+                owner_entry["ownership_count"] += 1
+                total_relationships += 1
+                subsystem_had_owner = True
+            if subsystem_had_owner:
+                covered_subsystems.add(subsystem_name)
+
+    owner_list: List[Dict[str, Any]] = []
+    for owner in owners.values():
+        owner["ownerships"].sort(key=lambda item: item["percentage"], reverse=True)
+        owner["total_percentage"] = round(owner["total_percentage"], 1)
+        owner_list.append(owner)
+
+    owner_list.sort(
+        key=lambda item: (item.get("ownership_count", 0), item.get("total_percentage", 0)),
+        reverse=True,
+    )
+
+    totals = {
+        "threshold": threshold,
+        "users_with_ownership": len(owner_list),
+        "total_ownerships": total_relationships,
+        "covered_subsystems": len(covered_subsystems),
+        "total_subsystems": len(total_subsystems) or len(covered_subsystems),
+        "avg_per_owner": (total_relationships / len(owner_list)) if owner_list else 0.0,
+    }
+
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "owners": owner_list,
+        "totals": totals,
+    }
 
 
 def _find_top_developer(entry: Dict[str, Any]) -> Tuple[Optional[str], int, float]:
@@ -3027,6 +3130,7 @@ def _api_remove_repository(body: Dict[str, Any]):
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["READ_ONLY_MODE"] = False
+app.config["SHOW_LOGO"] = True
 
 
 @app.route("/")
@@ -3035,6 +3139,7 @@ def root_index():
         "index.html",
         read_only=bool(app.config.get("READ_ONLY_MODE", False)),
         kiosk_mode=False,
+        show_logo=bool(app.config.get("SHOW_LOGO", True)),
     )
 
 
@@ -3156,6 +3261,16 @@ def api_users_badges_overview():
         "top_ownership_holders": cache.get("top_ownership_holders", []),
         "generated_at": cache.get("generated_at"),
     })
+
+
+@app.route("/api/users/ownership-distribution")
+def api_users_ownership_distribution():
+    snapshot = load_json(OWNERSHIP_DISTRIBUTION_FILE, default={})
+    if snapshot.get("owners"):
+        return jsonify(snapshot)
+    payload = build_ownership_distribution_snapshot()
+    save_json(OWNERSHIP_DISTRIBUTION_FILE, payload)
+    return jsonify(payload)
 
 
 @app.route("/api/users/<user_slug>/badges")
@@ -4514,7 +4629,9 @@ def run_git_pull_all(force_update=False):
 def launch_background_scheduler():
     start_background_scheduler()
 
-launch_background_scheduler()
+if not os.environ.get("DISABLE_DASHBOARD_SCHEDULER"):
+    launch_background_scheduler()
+
 
 @app.route("/api/teams")
 def api_teams():
@@ -4602,6 +4719,127 @@ def api_teams():
         })
     
     return jsonify({"teams": teams})
+
+
+def build_team_overview_snapshot(period_type: str = "last3months") -> Dict[str, Any]:
+    teams_file_path = os.path.join(BASE_DIR, "configuration", "teams.json")
+    if not os.path.exists(teams_file_path):
+        return {"teams": [], "period": "Overall", "generated_at": datetime.utcnow().isoformat() + "Z"}
+    try:
+        with open(teams_file_path, "r", encoding="utf-8") as f:
+            teams_config = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        teams_config = {}
+    if not teams_config:
+        return {"teams": [], "period": "Overall", "generated_at": datetime.utcnow().isoformat() + "Z"}
+
+    normalized_period = (period_type or "last3months").strip().lower()
+    if normalized_period == "last3months":
+        current_date = datetime.now()
+        three_months_ago = current_date - timedelta(days=90)
+        from_date = three_months_ago.strftime("%Y-%m-01")
+        to_date = current_date.strftime("%Y-%m-%d")
+        period_label = "Last 3 Months"
+    else:
+        from_date = "2000-01-01"
+        to_date = datetime.now().strftime("%Y-%m-%d")
+        period_label = "Overall"
+
+    alias_lookup = load_alias_lookup()
+    size_payload = compute_subsystem_size_rankings(STATS_ROOT)
+    subsystem_line_lookup: Dict[str, int] = {}
+    subsystem_line_lookup_lower: Dict[str, int] = {}
+    rankings = size_payload.get("rankings") if isinstance(size_payload, dict) else {}
+    if isinstance(rankings, dict):
+        for name, entry in rankings.items():
+            if not isinstance(entry, dict):
+                continue
+            total_lines = int(entry.get("total_lines") or 0)
+            subsystem_line_lookup[name] = total_lines
+            subsystem_line_lookup_lower[name.lower()] = total_lines
+
+    def resolve_subsystem_lines(subsystem_name: str) -> int:
+        if not subsystem_name:
+            return 0
+        if subsystem_name in subsystem_line_lookup:
+            return subsystem_line_lookup[subsystem_name]
+        lowered = subsystem_name.lower()
+        if lowered in subsystem_line_lookup_lower:
+            return subsystem_line_lookup_lower[lowered]
+        if "/" in subsystem_name:
+            short = subsystem_name.split("/")[-1]
+            if short in subsystem_line_lookup:
+                return subsystem_line_lookup[short]
+            short_lower = short.lower()
+            if short_lower in subsystem_line_lookup_lower:
+                return subsystem_line_lookup_lower[short_lower]
+        return 0
+
+    teams_analytics: List[Dict[str, Any]] = []
+    for team_id, team_info in teams_config.items():
+        team_name = team_info.get("name", team_id)
+        members = team_info.get("members", [])
+        responsible_subsystems = get_team_responsible_subsystems(team_id)
+        canonical_members = canonicalize_team_members(members, alias_lookup)
+        team_stats = {
+            "id": team_id,
+            "name": team_name,
+            "description": team_info.get("description", ""),
+            "member_count": len(canonical_members),
+            "members": canonical_members,
+            "responsible_subsystems": responsible_subsystems,
+            "responsible_subsystems_count": len(responsible_subsystems),
+            "total_commits": 0,
+            "total_additions": 0,
+            "total_deletions": 0,
+            "total_lines_changed": 0,
+            "active_subsystems": set(),
+            "languages": {},
+            "active_months": set(),
+        }
+        for member in canonical_members:
+            member_stats = aggregate_user_data_for_period(member, from_date, to_date)
+            if member_stats:
+                team_stats["total_commits"] += member_stats.get("total_commits", 0)
+                team_stats["total_additions"] += member_stats.get("total_lines_added", member_stats.get("total_additions", 0))
+                team_stats["total_deletions"] += member_stats.get("total_lines_deleted", member_stats.get("total_deletions", 0))
+                for repo in member_stats.get("per_repo", {}).keys():
+                    team_stats["active_subsystems"].add(repo)
+                for lang, lang_data in member_stats.get("languages", {}).items():
+                    team_stats["languages"].setdefault(lang, 0)
+                    team_stats["languages"][lang] += lang_data.get("net_lines", 0)
+                for date_str, payload in member_stats.get("per_date", {}).items():
+                    if payload.get("commits", 0) > 0:
+                        month_key = date_str[:7]
+                        team_stats["active_months"].add(month_key)
+        team_stats["total_lines_changed"] = team_stats["total_additions"] + team_stats["total_deletions"]
+        team_stats["active_subsystems_count"] = len(team_stats["active_subsystems"])
+        team_stats["active_months_count"] = len(team_stats["active_months"])
+        team_stats["active_subsystems"] = list(team_stats["active_subsystems"])
+        team_stats["active_months"] = list(team_stats["active_months"])
+        if team_stats["languages"]:
+            team_stats["primary_language"] = max(team_stats["languages"], key=team_stats["languages"].get)
+        else:
+            team_stats["primary_language"] = "N/A"
+        teams_analytics.append(team_stats)
+
+    for team_stats in teams_analytics:
+        total_responsible_lines = 0
+        covered_subsystems = 0
+        for subsystem_name in team_stats.get("responsible_subsystems", []):
+            lines = resolve_subsystem_lines(subsystem_name)
+            if lines > 0:
+                total_responsible_lines += lines
+                covered_subsystems += 1
+        team_stats["responsible_lines_of_code"] = total_responsible_lines
+        team_stats["responsible_subsystems_with_stats"] = covered_subsystems
+
+    teams_analytics.sort(key=lambda x: x["total_commits"], reverse=True)
+    return {
+        "teams": teams_analytics,
+        "period": period_label,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @app.route("/api/teams/<team_id>/month/<from_date>/<to_date>")
@@ -5973,159 +6211,19 @@ def api_team_year(team_id: str, year: int):
 @app.route("/api/teams/overview")
 def api_teams_overview():
     """Get overview analytics for all teams."""
-    period_type = request.args.get('period', 'overall')  # 'overall' or 'last3months'
-    
-    teams_file_path = os.path.join(BASE_DIR, "configuration/teams.json")
-    
-    if not os.path.exists(teams_file_path):
-        return jsonify({"teams": []})
-    
-    try:
-        with open(teams_file_path, "r", encoding="utf-8") as f:
-            teams_config = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        teams_config = {}
-    
-    if not teams_config:
-        return jsonify({"teams": []})
-    
-    # Determine date range based on period_type
-    if period_type == 'last3months':
-        # Get the current date and calculate 3 months ago
-        current_date = datetime.now()
-        three_months_ago = current_date - timedelta(days=90)
-        from_date = three_months_ago.strftime("%Y-%m-01")  # Start from the beginning of the month
-        to_date = current_date.strftime("%Y-%m-%d")
-        period_label = "Last 3 Months"
-    else:
-        # For overall, use a very wide date range to capture all data
-        # This will include all available data across all time periods
-        from_date = "2000-01-01"  # Start far in the past to capture all data
-        to_date = datetime.now().strftime("%Y-%m-%d")  # End today
-        period_label = "Overall"
-    
-    alias_lookup = load_alias_lookup()
+    period_type = (request.args.get('period', 'overall') or 'overall').strip().lower()
+    force_refresh = request.args.get('refresh') in {'1', 'true', 'True', 'YES', 'yes'}
 
-    size_payload = compute_subsystem_size_rankings(STATS_ROOT)
-    subsystem_line_lookup: Dict[str, int] = {}
-    subsystem_line_lookup_lower: Dict[str, int] = {}
-    rankings = size_payload.get("rankings") if isinstance(size_payload, dict) else {}
-    if isinstance(rankings, dict):
-        for name, entry in rankings.items():
-            if not isinstance(entry, dict):
-                continue
-            total_lines = int(entry.get("total_lines") or 0)
-            subsystem_line_lookup[name] = total_lines
-            subsystem_line_lookup_lower[name.lower()] = total_lines
+    if period_type == 'overall' and not force_refresh:
+        cached = load_json(TEAM_OVERVIEW_CACHE_FILE, default={})
+        if cached.get("teams"):
+            cached.setdefault("period", "Overall")
+            return jsonify(cached)
 
-    def resolve_subsystem_lines(subsystem_name: str) -> int:
-        if not subsystem_name:
-            return 0
-        if subsystem_name in subsystem_line_lookup:
-            return subsystem_line_lookup[subsystem_name]
-        lowered = subsystem_name.lower()
-        if lowered in subsystem_line_lookup_lower:
-            return subsystem_line_lookup_lower[lowered]
-        if "/" in subsystem_name:
-            short = subsystem_name.split("/")[-1]
-            if short in subsystem_line_lookup:
-                return subsystem_line_lookup[short]
-            short_lower = short.lower()
-            if short_lower in subsystem_line_lookup_lower:
-                return subsystem_line_lookup_lower[short_lower]
-        return 0
-    
-    teams_analytics = []
-    
-    for team_id, team_info in teams_config.items():
-        team_name = team_info.get("name", team_id)
-        members = team_info.get("members", [])
-        responsible_subsystems = get_team_responsible_subsystems(team_id)
-        
-        canonical_members = canonicalize_team_members(members, alias_lookup)
-        
-        # Initialize team stats
-        team_stats = {
-            "id": team_id,
-            "name": team_name,
-            "description": team_info.get("description", ""),
-            "member_count": len(canonical_members),
-            "members": canonical_members,
-            "responsible_subsystems": responsible_subsystems,
-            "responsible_subsystems_count": len(responsible_subsystems),
-            "total_commits": 0,
-            "total_additions": 0,
-            "total_deletions": 0,
-            "total_lines_changed": 0,
-            "active_subsystems": set(),
-            "languages": {},
-            "active_months": set()
-        }
-        
-        # Aggregate data from all team members
-        for member in canonical_members:
-            # Always use aggregate_user_data_for_period for consistency
-            # This ensures we get the most up-to-date data across all periods
-            member_stats = aggregate_user_data_for_period(member, from_date, to_date)
-            
-            if member_stats:
-                team_stats["total_commits"] += member_stats.get("total_commits", 0)
-                team_stats["total_additions"] += member_stats.get("total_lines_added", member_stats.get("total_additions", 0))
-                team_stats["total_deletions"] += member_stats.get("total_lines_deleted", member_stats.get("total_deletions", 0))
-                
-                # Track subsystems this team works on
-                for repo in member_stats.get("per_repo", {}).keys():
-                    team_stats["active_subsystems"].add(repo)
-                
-                # Aggregate languages
-                for lang, lang_data in member_stats.get("languages", {}).items():
-                    if lang not in team_stats["languages"]:
-                        team_stats["languages"][lang] = 0
-                    team_stats["languages"][lang] += lang_data.get("net_lines", 0)
-                
-                # Track active months based on commits
-                for date_str in member_stats.get("per_date", {}).keys():
-                    if member_stats["per_date"][date_str].get("commits", 0) > 0:
-                        # Extract year-month from date
-                        try:
-                            month_key = date_str[:7]  # YYYY-MM format
-                            team_stats["active_months"].add(month_key)
-                        except:
-                            pass
-        
-        # Calculate derived metrics
-        team_stats["total_lines_changed"] = team_stats["total_additions"] + team_stats["total_deletions"]
-        team_stats["active_subsystems_count"] = len(team_stats["active_subsystems"])
-        team_stats["active_months_count"] = len(team_stats["active_months"])
-        
-        # Convert sets to lists for JSON serialization
-        team_stats["active_subsystems"] = list(team_stats["active_subsystems"])
-        team_stats["active_months"] = list(team_stats["active_months"])
-        
-        # Find primary language (language with most lines)
-        if team_stats["languages"]:
-            team_stats["primary_language"] = max(team_stats["languages"], key=team_stats["languages"].get)
-        else:
-            team_stats["primary_language"] = "N/A"
-        
-        teams_analytics.append(team_stats)
-    
-    # Calculate total lines of code under team responsibility using snapshot data
-    for team_stats in teams_analytics:
-        total_responsible_lines = 0
-        covered_subsystems = 0
-        for subsystem_name in team_stats.get("responsible_subsystems", []):
-            lines = resolve_subsystem_lines(subsystem_name)
-            if lines > 0:
-                total_responsible_lines += lines
-                covered_subsystems += 1
-        team_stats["responsible_lines_of_code"] = total_responsible_lines
-        team_stats["responsible_subsystems_with_stats"] = covered_subsystems
-    
-    # Sort teams by total commits (descending) for ranking
-    teams_analytics.sort(key=lambda x: x["total_commits"], reverse=True)
-    
-    return jsonify({"teams": teams_analytics, "period": period_label})
+    snapshot = build_team_overview_snapshot(period_type)
+    if period_type == 'overall' and snapshot.get("teams"):
+        save_json(TEAM_OVERVIEW_CACHE_FILE, snapshot)
+    return jsonify(snapshot)
 
 
 def aggregate_user_data_for_period(user_slug, from_date, to_date):
@@ -6978,9 +7076,11 @@ if __name__ == "__main__":
     parser.add_argument("--host", "--listen-address", dest="host", default="127.0.0.1", help="Host/IP to bind the dashboard server")
     parser.add_argument("--port", type=int, default=5001, help="Port to bind the dashboard server")
     parser.add_argument("--read-only", action="store_true", help="Run dashboard in read-only mode (disable updates/settings)")
+    parser.add_argument("--disable-logo", action="store_true", help="Hide repo-squirrel branding in the sidebar header")
     args = parser.parse_args()
 
     app.config["READ_ONLY_MODE"] = args.read_only
+    app.config["SHOW_LOGO"] = not args.disable_logo
 
     app.run(host=args.host, port=args.port, debug=True,
             exclude_patterns=["repos/*", "repos/**/*", "stats/*", "stats/**/*"])

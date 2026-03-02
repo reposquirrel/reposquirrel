@@ -435,6 +435,43 @@ def run_pagerduty_sync_if_configured(config_dir: Path, output_dir: Path) -> None
             print("[MASTER] PagerDuty sync skipped (no data returned)")
 
 
+def generate_precomputed_assets(output_dir: Path) -> None:
+    output_dir = output_dir.resolve()
+    ownership_target = output_dir / "ownership_distribution.json"
+    team_overview_target = output_dir / "team_overview_overall.json"
+    os.environ["DISABLE_DASHBOARD_SCHEDULER"] = "1"
+    os.environ["REPO_SQUIRREL_STATS_ROOT"] = str(output_dir)
+    try:
+        from dashboard_server import build_ownership_distribution_snapshot, build_team_overview_snapshot
+    except Exception as exc:  # noqa: BLE001
+        print(f"[MASTER] Skipping precomputed assets: unable to import dashboard server ({exc})")
+        return
+    try:
+        ownership_snapshot = build_ownership_distribution_snapshot(stats_root=str(output_dir))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[MASTER] Failed to build ownership distribution snapshot: {exc}")
+        ownership_snapshot = None
+    if ownership_snapshot:
+        try:
+            ownership_target.parent.mkdir(parents=True, exist_ok=True)
+            ownership_target.write_text(json.dumps(ownership_snapshot, indent=2), encoding="utf-8")
+            print(f"[MASTER] Ownership distribution snapshot updated ({ownership_target})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[MASTER] Failed to save ownership distribution snapshot: {exc}")
+    try:
+        team_snapshot = build_team_overview_snapshot("overall")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[MASTER] Failed to build team overview snapshot: {exc}")
+        team_snapshot = None
+    if team_snapshot and team_snapshot.get("teams"):
+        try:
+            team_overview_target.parent.mkdir(parents=True, exist_ok=True)
+            team_overview_target.write_text(json.dumps(team_snapshot, indent=2), encoding="utf-8")
+            print(f"[MASTER] Team overview snapshot updated ({team_overview_target})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[MASTER] Failed to save team overview snapshot: {exc}")
+
+
 def main() -> None:
     args = parse_args()
     if args.parallel <= 0:
@@ -525,6 +562,7 @@ def main() -> None:
                 progress_emitter.month_completed(year, month)
 
     run_pagerduty_sync_if_configured(config_dir, output_dir)
+    generate_precomputed_assets(output_dir)
     print("[MASTER] Completed all subsystem statistics runs")
 
 

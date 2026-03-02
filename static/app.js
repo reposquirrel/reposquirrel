@@ -10,6 +10,7 @@ let state = {
   userSlugIndex: {},
   teams: [],
   subsystems: [], // Unified subsystems (services and standalone repos)
+  teamOwnershipOverall: null,
   selectedUser: null,
   selectedUserMonth: null, // {from, to, label, is_yearly}
   selectedTeam: null,
@@ -10087,7 +10088,6 @@ async function addOwnershipStatistics(container) {
   try {
     console.log("Loading ownership statistics for users overview...");
     
-    // Check if section already exists
     if (container.querySelector('.ownership-statistics-section')) {
       console.log("Ownership statistics section already exists, skipping");
       return;
@@ -10103,64 +10103,42 @@ async function addOwnershipStatistics(container) {
 
     container.appendChild(ownershipSection);
 
-    // Collect ownership data from all subsystems
-    const ownershipData = {};
-    let totalOwnerships = 0;
-    let processedSubsystems = 0;
-
-    for (const subsystem of state.subsystems) {
-      try {
-        const ownershipResponse = await fetchJSON(`/api/subsystems/${encodeURIComponent(subsystem.name)}/significant-ownership`);
-        
-        if (ownershipResponse.owners && ownershipResponse.owners.length > 0) {
-          processedSubsystems++;
-          
-          ownershipResponse.owners.forEach(owner => {
-            if (!ownershipData[owner.slug]) {
-              ownershipData[owner.slug] = {
-                display_name: owner.display_name,
-                slug: owner.slug,
-                ownerships: [],
-                totalPercentage: 0
-              };
-            }
-            
-            ownershipData[owner.slug].ownerships.push({
-              subsystem: subsystem.name,
-              percentage: owner.percentage
-            });
-            
-            ownershipData[owner.slug].totalPercentage += owner.percentage;
-            totalOwnerships++;
-          });
-        }
-      } catch (error) {
-        console.warn(`Could not get ownership data for ${subsystem.name}:`, error);
-      }
+    let ownershipPayload = null;
+    try {
+      ownershipPayload = await fetchJSON('/api/users/ownership-distribution');
+    } catch (error) {
+      console.warn("Failed to load ownership distribution:", error);
     }
 
-    // Create statistics
-    const usersWithOwnership = Object.keys(ownershipData);
+    const owners = Array.isArray(ownershipPayload?.owners) ? ownershipPayload.owners : [];
+    const totals = ownershipPayload?.totals || {};
+    const usersWithOwnership = totals.users_with_ownership ?? owners.length;
+    const totalOwnerships = totals.total_ownerships ?? 0;
+    const processedSubsystems = totals.covered_subsystems ?? 0;
+    const totalSubsystems = totals.total_subsystems ?? state.subsystems.length ?? 0;
+    const avgOwnershipsPerOwner = totals.avg_per_owner ?? (usersWithOwnership ? totalOwnerships / usersWithOwnership : 0);
+
     const statsGrid = document.createElement("div");
     statsGrid.className = "ownership-stats-grid";
 
     const ownershipStats = [
-      { title: 'Users with Ownership', value: usersWithOwnership.length, subtitle: `out of ${state.users.length} developers`, emoji: '👑', color: '#8B5CF6' },
-      { title: 'Total Ownerships', value: totalOwnerships, subtitle: 'significant ownerships', emoji: '📊', color: '#10B981' },
-      { title: 'Covered Subsystems', value: processedSubsystems, subtitle: `out of ${state.subsystems.length} subsystems`, emoji: '🏗️', color: '#3B82F6' },
-      { title: 'Avg Ownerships/User', value: usersWithOwnership.length > 0 ? Math.round(totalOwnerships / usersWithOwnership.length * 10) / 10 : 0, subtitle: 'per developer', emoji: '📈', color: '#F59E0B' }
+      { title: 'Users with Ownership', value: usersWithOwnership, subtitle: `out of ${state.users.length} developers`, emoji: '👑', color: '#8B5CF6' },
+      { title: 'Total Ownerships', value: totalOwnerships, subtitle: 'significant relationships', emoji: '📊', color: '#10B981' },
+      { title: 'Covered Subsystems', value: processedSubsystems, subtitle: `out of ${totalSubsystems} subsystems`, emoji: '🏗️', color: '#3B82F6' },
+      { title: 'Avg Ownerships/User', value: avgOwnershipsPerOwner, subtitle: 'per owner', emoji: '📈', color: '#F59E0B', isFloat: true }
     ];
 
     ownershipStats.forEach(stat => {
       const statCard = document.createElement("div");
       statCard.className = "ownership-stat-card";
+      const valueText = stat.isFloat ? (Math.round(stat.value * 10) / 10).toLocaleString(undefined, { minimumFractionDigits: 1 }) : Number(stat.value || 0).toLocaleString();
       statCard.innerHTML = `
         <div class="stat-icon" style="color: ${stat.color};">
           <span class="stat-emoji">${stat.emoji}</span>
         </div>
         <div class="stat-content">
           <div class="stat-title">${stat.title}</div>
-          <div class="stat-value" style="color: ${stat.color};">${stat.value.toLocaleString()}</div>
+          <div class="stat-value" style="color: ${stat.color};">${valueText}</div>
           <div class="stat-subtitle">${stat.subtitle}</div>
         </div>
       `;
@@ -10169,15 +10147,11 @@ async function addOwnershipStatistics(container) {
 
     ownershipSection.appendChild(statsGrid);
 
-    // Show top code owners if we have data
-    if (usersWithOwnership.length > 0) {
+    if (owners.length > 0) {
       const contentLayout = document.createElement("div");
       contentLayout.className = "ownership-content-layout";
-      
-      const topOwners = Object.values(ownershipData)
-        .sort((a, b) => b.ownerships.length - a.ownerships.length)
-        .slice(0, 8); // Show more owners
 
+      const topOwners = owners.slice(0, 8);
       const topOwnersDiv = document.createElement("div");
       topOwnersDiv.className = "code-owners-section";
       topOwnersDiv.innerHTML = '<h3>👑 Top Code Owners</h3>';
@@ -10189,17 +10163,17 @@ async function addOwnershipStatistics(container) {
         const isActive = state.users.some(u => u.slug === owner.slug);
         const ownerItem = document.createElement("div");
         ownerItem.className = isActive ? "code-owner-card clickable" : "code-owner-card inactive";
-        
         if (isActive) {
           ownerItem.onclick = () => navigateToUser(owner.slug);
         } else {
           ownerItem.style.cursor = "default";
           ownerItem.title = "Inactive contributor (no recent activity in analysis period)";
         }
-        
-        const avgPercentage = Math.round(owner.totalPercentage / owner.ownerships.length);
+
+        const ownershipCount = owner.ownership_count ?? (owner.ownerships ? owner.ownerships.length : 0);
+        const avgPercentage = ownershipCount > 0 ? Math.round((owner.total_percentage || 0) / ownershipCount) : 0;
         const nameStyle = isActive ? "" : ' style="color: #dc2626; font-style: italic;"';
-        
+
         ownerItem.innerHTML = `
           <div class="owner-rank">
             <span class="rank-number">${index + 1}</span>
@@ -10207,12 +10181,12 @@ async function addOwnershipStatistics(container) {
           <div class="owner-info">
             <div class="owner-name"${nameStyle}>${owner.display_name || owner.slug}</div>
             <div class="owner-stats">
-              <span class="ownership-stat">${owner.ownerships.length} subsystems</span>
+              <span class="ownership-stat">${ownershipCount} subsystems</span>
               <span class="ownership-stat">${avgPercentage}% avg ownership</span>
             </div>
           </div>
           <div class="owner-total">
-            <span class="total-count">${Math.round(owner.totalPercentage)}%</span>
+            <span class="total-count">${Math.round(owner.total_percentage || 0)}%</span>
             <span class="total-label">total</span>
           </div>
         `;
@@ -10222,9 +10196,14 @@ async function addOwnershipStatistics(container) {
       topOwnersDiv.appendChild(ownersList);
       contentLayout.appendChild(topOwnersDiv);
       ownershipSection.appendChild(contentLayout);
+    } else {
+      const emptyMessage = document.createElement("div");
+      emptyMessage.className = "note-text";
+      emptyMessage.style.marginTop = "12px";
+      emptyMessage.textContent = "No ownership data available yet. Run the analysis pipeline to populate ownership insights.";
+      ownershipSection.appendChild(emptyMessage);
     }
     
-    // Add Top 20 Code Owners by Total Lines
     try {
       const totalOwnershipResponse = await fetchJSON('/api/developers/total-ownership');
       
@@ -10272,12 +10251,10 @@ async function addOwnershipStatistics(container) {
       }
     } catch (error) {
       console.error("Error loading total code ownership:", error);
-      // Don't break the section, just skip this list
     }
 
   } catch (error) {
     console.error("Error loading ownership statistics:", error);
-    // Don't break the overview, just skip ownership section
   }
 }
 
@@ -10547,6 +10524,23 @@ async function addOwnershipChangesAnalysis(container, abortSignal) {
 }
 */ // End of removed addOwnershipChangesAnalysis function
 
+async function ensureTeamOwnershipBaseline() {
+  if (Array.isArray(state.teamOwnershipOverall) && state.teamOwnershipOverall.length > 0) {
+    return state.teamOwnershipOverall;
+  }
+  try {
+    const ownershipResponse = await fetchJSON('/api/teams/overview?period=overall');
+    if (ownershipResponse && Array.isArray(ownershipResponse.teams) && ownershipResponse.teams.length > 0) {
+      state.teamOwnershipOverall = ownershipResponse.teams;
+      return state.teamOwnershipOverall;
+    }
+  } catch (error) {
+    console.warn('Unable to load overall team ownership snapshot:', error);
+  }
+  state.teamOwnershipOverall = [];
+  return state.teamOwnershipOverall;
+}
+
 async function showTeamsOverviewDashboard() {
   try {
     // Prevent concurrent executions
@@ -10705,6 +10699,10 @@ async function showTeamsOverviewDashboard() {
         }
     }
 
+    if (periodLabel === "Overall" && (!Array.isArray(state.teamOwnershipOverall) || state.teamOwnershipOverall.length === 0)) {
+      state.teamOwnershipOverall = teamsAnalytics;
+    }
+
     // Teams summary
     const summarySection = document.createElement("div");
     summarySection.className = "card";
@@ -10748,7 +10746,8 @@ async function showTeamsOverviewDashboard() {
 
     // Team Rankings Section
     if (teamsAnalytics.length > 0) {
-      await addTeamRankings(main, teamsAnalytics, periodLabel);
+      const ownershipBaseline = await ensureTeamOwnershipBaseline();
+      await addTeamRankings(main, teamsAnalytics, periodLabel, null, ownershipBaseline);
     }
     
     // Teams list
@@ -10846,7 +10845,7 @@ async function showTeamsOverviewDashboard() {
   }
 }
 
-async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeElement = null) {
+async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeElement = null, ownershipAnalytics = null) {
   // Check if rankings section already exists
   if (main.querySelector('.team-rankings-section:not([data-section="team-rankings"])')) {
     console.log("Team rankings section already exists, skipping");
@@ -10885,6 +10884,10 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
   const rankingsContainer = document.createElement("div");
   rankingsContainer.className = "rankings-container";
 
+  const ownershipSource = (Array.isArray(ownershipAnalytics) && ownershipAnalytics.length > 0)
+    ? ownershipAnalytics
+    : teamsAnalytics;
+
   // Create three ranking lists
   const rankings = [
     {
@@ -10919,7 +10922,7 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
       subtitle: "By responsible codebase size",
       emoji: "🏗️",
       tooltip: "Teams ranked by the total lines of code they are responsible for maintaining. Based on designated team ownership of subsystems in settings.",
-      data: [...teamsAnalytics].sort((a, b) => {
+      data: [...ownershipSource].sort((a, b) => {
         const aLines = typeof a.responsible_lines_of_code === 'number' ? a.responsible_lines_of_code : 0;
         const bLines = typeof b.responsible_lines_of_code === 'number' ? b.responsible_lines_of_code : 0;
         return bLines - aLines;
@@ -11115,8 +11118,13 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
           oldRankingsSection.remove();
         }
         
+        if ((teamsOverviewData.period || "").toLowerCase() === "overall") {
+          state.teamOwnershipOverall = teamsOverviewData.teams || [];
+        }
+
+        const ownershipBaseline = await ensureTeamOwnershipBaseline();
         // Create new rankings section
-        await addTeamRankings(main, teamsOverviewData.teams, teamsOverviewData.period, insertBeforeElement);
+        await addTeamRankings(main, teamsOverviewData.teams, teamsOverviewData.period, insertBeforeElement, ownershipBaseline);
         
       } catch (error) {
         console.error("Error loading teams rankings for period:", period, error);

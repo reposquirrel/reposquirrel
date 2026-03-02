@@ -10,6 +10,7 @@
     window.APP_CONFIG = window.APP_CONFIG || {};
     window.APP_CONFIG.readOnly = {{ read_only | tojson }};
     window.APP_CONFIG.kioskMode = {{ kiosk_mode | default(false) | tojson }};
+    window.APP_CONFIG.showLogo = {{ show_logo | default(true) | tojson }};
   </script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
@@ -24,6 +25,7 @@
             <span class="hamburger-line"></span>
             <span class="hamburger-line"></span>
           </button>
+          {% if show_logo %}
           <div class="header-text">
             <div class="logo-container">
               <img src="/static/logo-small.png" alt="repo-squirrel Logo" class="header-logo" />
@@ -33,6 +35,7 @@
               </div>
             </div>
           </div>
+          {% endif %}
         </div>
       </div>
 

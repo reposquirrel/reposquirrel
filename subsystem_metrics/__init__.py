@@ -49,51 +49,120 @@ def _iter_summary_directories(subsystem_path: str) -> List[Tuple[datetime, datet
     return entries
 
 
+def _parse_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _compute_dead_repositories(stats_root: str, threshold_months: int) -> Dict[str, Dict[str, Any]]:
+    repos_root = os.path.join(stats_root, "repos")
+    if not os.path.isdir(repos_root):
+        return {}
+    current_date = datetime.utcnow()
+    threshold_date = current_date - timedelta(days=30 * threshold_months)
+    status: Dict[str, Dict[str, Any]] = {}
+
+    for org_name in os.listdir(repos_root):
+        org_path = os.path.join(repos_root, org_name)
+        if not os.path.isdir(org_path):
+            continue
+        for repo_name in os.listdir(org_path):
+            repo_path = os.path.join(org_path, repo_name)
+            summary_root = os.path.join(repo_path, "summary")
+            if not os.path.isdir(summary_root):
+                continue
+            latest_activity: Optional[datetime] = None
+            for year_entry in os.listdir(summary_root):
+                year_path = os.path.join(summary_root, year_entry)
+                if not os.path.isdir(year_path):
+                    continue
+                for filename in os.listdir(year_path):
+                    if not filename.endswith(".json") or filename == "yearly.json":
+                        continue
+                    summary_path = os.path.join(year_path, filename)
+                    summary_data = _safe_load_json(summary_path)
+                    if not summary_data:
+                        continue
+                    period = summary_data.get("period", {})
+                    date_to = _parse_date(period.get("to"))
+                    if date_to is None:
+                        date_to = _parse_date(summary_data.get("to"))
+                    if date_to is None:
+                        year = summary_data.get("year") or year_entry
+                        month = summary_data.get("month") or filename[:-5]
+                        try:
+                            date_to = datetime(int(year), int(month), 1)
+                        except Exception:
+                            date_to = None
+                    summary_block = summary_data.get("summary", summary_data)
+                    total_commits = summary_block.get("total_commits")
+                    if not total_commits or total_commits <= 0 or date_to is None:
+                        continue
+                    if latest_activity is None or date_to > latest_activity:
+                        latest_activity = date_to
+            repo_key = f"{org_name}/{repo_name}"
+            if latest_activity is None:
+                status[repo_key] = {
+                    "is_dead": True,
+                    "last_activity_date": None,
+                    "months_since_activity": None,
+                }
+                continue
+            months_since = int((current_date - latest_activity).days / 30.44)
+            status[repo_key] = {
+                "is_dead": latest_activity < threshold_date,
+                "last_activity_date": latest_activity.strftime("%Y-%m-%d"),
+                "months_since_activity": months_since,
+            }
+    return status
+
+
 def compute_dead_subsystems(stats_root: str, threshold_months: int = 3) -> Dict[str, Dict[str, Any]]:
     subsystems_root = os.path.join(stats_root, "subsystems")
-    if not os.path.isdir(subsystems_root):
-        return {}
-
     current_date = datetime.utcnow()
     threshold_date = current_date - timedelta(days=30 * threshold_months)
     subsystem_status: Dict[str, Dict[str, Any]] = {}
 
-    for subsystem_name in os.listdir(subsystems_root):
-        subsystem_dir = os.path.join(subsystems_root, subsystem_name)
-        if not os.path.isdir(subsystem_dir):
-            continue
-
-        latest_activity: Optional[datetime] = None
-        for date_from, date_to, _folder, day_span, summary_file in _iter_summary_directories(subsystem_dir):
-            # Skip yearly/long periods (> ~35 days)
-            if day_span > 35:
+    if os.path.isdir(subsystems_root):
+        for subsystem_name in os.listdir(subsystems_root):
+            subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+            if not os.path.isdir(subsystem_dir):
                 continue
 
-            summary_data = _safe_load_json(summary_file)
-            if not summary_data:
+            latest_activity: Optional[datetime] = None
+            for date_from, date_to, _folder, day_span, summary_file in _iter_summary_directories(subsystem_dir):
+                if day_span > 35:
+                    continue
+                summary_data = _safe_load_json(summary_file)
+                if not summary_data:
+                    continue
+                total_commits = summary_data.get("total_commits", 0)
+                if total_commits and total_commits > 0:
+                    if latest_activity is None or date_to > latest_activity:
+                        latest_activity = date_to
+
+            if latest_activity is None:
+                subsystem_status[subsystem_name] = {
+                    "is_dead": True,
+                    "last_activity_date": None,
+                    "months_since_activity": None,
+                }
                 continue
 
-            total_commits = summary_data.get("total_commits", 0)
-            if total_commits and total_commits > 0:
-                if latest_activity is None or date_to > latest_activity:
-                    latest_activity = date_to
-
-        if latest_activity is None:
+            months_since = int((current_date - latest_activity).days / 30.44)
             subsystem_status[subsystem_name] = {
-                "is_dead": True,
-                "last_activity_date": None,
-                "months_since_activity": None,
+                "is_dead": latest_activity < threshold_date,
+                "last_activity_date": latest_activity.strftime("%Y-%m-%d"),
+                "months_since_activity": months_since,
             }
-            continue
 
-        months_since = int((current_date - latest_activity).days / 30.44)
-        subsystem_status[subsystem_name] = {
-            "is_dead": latest_activity < threshold_date,
-            "last_activity_date": latest_activity.strftime("%Y-%m-%d"),
-            "months_since_activity": months_since,
-        }
-
-    return subsystem_status
+    if subsystem_status:
+        return subsystem_status
+    return _compute_dead_repositories(stats_root, threshold_months)
 
 
 def compute_subsystem_top_maintainers(
@@ -432,6 +501,102 @@ def compute_subsystem_significant_ownership(
     return {"owners": sorted_owners, "threshold": ownership_threshold}
 
 
+def _extract_total_code_lines(payload: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    candidates = [payload.get("totals"), payload.get("total"), payload.get("summary", {}).get("latest", {}).get("total")]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for key in ("code_lines", "code", "lines"):
+                value = candidate.get(key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        continue
+    months = payload.get("months")
+    if isinstance(months, dict):
+        for month_key in sorted(months.keys(), reverse=True):
+            month_entry = months.get(month_key)
+            if not isinstance(month_entry, dict):
+                continue
+            month_total = month_entry.get("total") or month_entry.get("totals")
+            if isinstance(month_total, dict):
+                for key in ("code_lines", "code", "lines"):
+                    value = month_total.get(key)
+                    if value is not None:
+                        try:
+                            return int(value)
+                        except (TypeError, ValueError):
+                            continue
+    return 0
+
+
+def _collect_repo_language_totals(stats_root: str) -> List[Dict[str, Any]]:
+    repos_root = os.path.join(stats_root, "repos")
+    repo_sizes: List[Dict[str, Any]] = []
+    if not os.path.isdir(repos_root):
+        return repo_sizes
+    for org_name in os.listdir(repos_root):
+        org_path = os.path.join(repos_root, org_name)
+        if not os.path.isdir(org_path):
+            continue
+        for repo_name in os.listdir(org_path):
+            repo_path = os.path.join(org_path, repo_name)
+            if not os.path.isdir(repo_path):
+                continue
+            languages_dir = os.path.join(repo_path, "languages")
+            languages_file = os.path.join(repo_path, "languages.json")
+            latest_total = 0
+            if os.path.isdir(languages_dir):
+                for entry in os.listdir(languages_dir):
+                    entry_path = os.path.join(languages_dir, entry)
+                    if os.path.isdir(entry_path):
+                        yearly_path = os.path.join(entry_path, "yearly.json")
+                        total = _extract_total_code_lines(_safe_load_json(yearly_path)) if os.path.isfile(yearly_path) else 0
+                        if total > latest_total:
+                            latest_total = total
+                    elif entry_path.endswith(".json"):
+                        total = _extract_total_code_lines(_safe_load_json(entry_path))
+                        if total > latest_total:
+                            latest_total = total
+            elif os.path.isfile(languages_file):
+                latest_total = _extract_total_code_lines(_safe_load_json(languages_file))
+            if latest_total > 0:
+                repo_sizes.append({
+                    "name": f"{org_name}/{repo_name}",
+                    "total_lines": latest_total,
+                })
+    return repo_sizes
+
+
+def _resolve_latest_blame_file(repo_path: str) -> Optional[str]:
+    blame_dir = os.path.join(repo_path, "blame")
+    primary = os.path.join(blame_dir, "blame.json")
+    if os.path.isfile(primary):
+        return primary
+    latest = os.path.join(blame_dir, "latest.json")
+    if os.path.isfile(latest):
+        return latest
+    if not os.path.isdir(blame_dir):
+        return None
+    newest_path = None
+    newest_mtime = -1.0
+    for root, _dirs, files in os.walk(blame_dir):
+        for filename in files:
+            if not filename.endswith(".json"):
+                continue
+            candidate = os.path.join(root, filename)
+            try:
+                mtime = os.path.getmtime(candidate)
+            except OSError:
+                continue
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest_path = candidate
+    return newest_path
+
+
 def compute_subsystem_size_rankings(stats_root: str) -> Dict[str, Any]:
     subsystems_root = os.path.join(stats_root, "subsystems")
     result: Dict[str, Any] = {
@@ -442,9 +607,6 @@ def compute_subsystem_size_rankings(stats_root: str) -> Dict[str, Any]:
         "total_git_lines": 0,
     }
 
-    if not os.path.isdir(subsystems_root):
-        return result
-
     repos_path = os.path.join(stats_root, "repos")
     counted_repos = set()
     if os.path.isdir(repos_path):
@@ -454,32 +616,36 @@ def compute_subsystem_size_rankings(stats_root: str) -> Dict[str, Any]:
                 continue
             for repo_name in os.listdir(org_path):
                 repo_path = os.path.join(org_path, repo_name)
-                blame_file = os.path.join(repo_path, "blame", "blame.json")
-                if not os.path.isfile(blame_file):
+                blame_file = _resolve_latest_blame_file(repo_path)
+                if not blame_file:
                     continue
                 blame_data = _safe_load_json(blame_file)
                 if not blame_data:
                     continue
                 repo_full_name = blame_data.get("repo", "")
                 repo_simple_name = str(repo_full_name).split("/")[-1] if repo_full_name else repo_name
-                if repo_simple_name in counted_repos:
+                name_key = repo_full_name or repo_simple_name
+                if name_key in counted_repos:
                     continue
-                counted_repos.add(repo_simple_name)
+                counted_repos.add(name_key)
                 result["total_git_lines"] += int(blame_data.get("total_lines", 0) or 0)
 
     subsystem_sizes: List[Dict[str, Any]] = []
-    for subsystem_name in os.listdir(subsystems_root):
-        subsystem_dir = os.path.join(subsystems_root, subsystem_name)
-        if not os.path.isdir(subsystem_dir):
-            continue
-        languages_file = os.path.join(subsystem_dir, "languages.json")
-        totals = 0
-        if os.path.isfile(languages_file):
-            language_data = _safe_load_json(languages_file)
-            if language_data:
-                totals = int(language_data.get("totals", {}).get("code_lines", 0) or 0)
-        if totals > 0:
-            subsystem_sizes.append({"name": subsystem_name, "total_lines": totals})
+    if os.path.isdir(subsystems_root):
+        for subsystem_name in os.listdir(subsystems_root):
+            subsystem_dir = os.path.join(subsystems_root, subsystem_name)
+            if not os.path.isdir(subsystem_dir):
+                continue
+            languages_file = os.path.join(subsystem_dir, "languages.json")
+            totals = 0
+            if os.path.isfile(languages_file):
+                language_data = _safe_load_json(languages_file)
+                totals = _extract_total_code_lines(language_data)
+            if totals > 0:
+                subsystem_sizes.append({"name": subsystem_name, "total_lines": totals})
+
+    if not subsystem_sizes:
+        subsystem_sizes = _collect_repo_language_totals(stats_root)
 
     subsystem_sizes.sort(key=lambda item: item["total_lines"], reverse=True)
     result["total_subsystems"] = len(subsystem_sizes)
