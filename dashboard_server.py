@@ -4558,61 +4558,91 @@ def run_git_pull_all(force_update=False):
         for i, (repo_name, repo_path) in enumerate(repo_list):
             # Calculate progress (1% to 5% for git operations)
             progress = 1 + int((i / len(repo_list)) * 4)
-            
+            repo_start_time = datetime.now()
+
+            log_update_message({
+                'type': 'info',
+                'message': f'[{repo_start_time.strftime("%H:%M:%S")}] 🔄 {repo_name}: Fetching remote updates...',
+                'progress': progress
+            })
+
             try:
-                repo_start_time = datetime.now()
-                
-                # CUSTOMER-FRIENDLY APPROACH: Always continue with analysis
-                # Check repository status for informational purposes only
-                try:
-                    status_check = subprocess.run(
-                        ["git", "status", "--porcelain"],
-                        cwd=repo_path,
-                        capture_output=True,
-                        text=True,
-                        timeout=30  # Quick status check
-                    )
-                    
-                    # Always continue with analysis regardless of uncommitted changes
-                    if status_check.returncode == 0 and status_check.stdout.strip():
-                        log_update_message({
-                            'type': 'info',
-                            'message': f'[{repo_start_time.strftime("%H:%M:%S")}] ℹ️ {repo_name}: Local changes detected, analyzing committed history only (continuing)',
-                            'progress': progress
-                        })
-                    else:
-                        log_update_message({
-                            'type': 'info',
-                            'message': f'[{repo_start_time.strftime("%H:%M:%S")}] ✅ {repo_name}: Repository clean, ready for analysis',
-                            'progress': progress
-                        })
-                except (subprocess.TimeoutExpired, Exception) as e:
-                    # If git status fails, still continue with analysis
-                    log_update_message({
-                        'type': 'info',
-                        'message': f'[{repo_start_time.strftime("%H:%M:%S")}] ℹ️ {repo_name}: Could not check status, proceeding with analysis anyway',
-                        'progress': progress
-                    })
-                
-                # CUSTOMER-SAFE APPROACH: Read-only analysis - NEVER modify repositories
-                # This is critical for customer trust and data safety
-                log_update_message({
-                    'type': 'info',
-                    'message': f'[{repo_start_time.strftime("%H:%M:%S")}] 📊 {repo_name}: Starting read-only analysis (no repository changes)',
-                    'progress': progress
-                })
-                
-                # Continue with analysis regardless of repository state
-                success_count += 1
-                    
-            except Exception as e:
-                error_time = datetime.now()
+                fetch_result = subprocess.run(
+                    ["git", "fetch", "--all", "--prune"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+            except subprocess.TimeoutExpired:
                 log_update_message({
                     'type': 'warning',
-                    'message': f'[{error_time.strftime("%H:%M:%S")}] ⚠️ {repo_name}: {str(e)}',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git fetch timed out',
                     'progress': progress
                 })
-        
+                continue
+            except Exception as exc:
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git fetch failed ({exc})',
+                    'progress': progress
+                })
+                continue
+
+            if fetch_result.returncode != 0:
+                summary = (fetch_result.stderr or fetch_result.stdout or "git fetch failed").strip()
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git fetch failed ({summary})',
+                    'progress': progress
+                })
+                continue
+
+            try:
+                pull_result = subprocess.run(
+                    ["git", "pull", "--ff-only"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+            except subprocess.TimeoutExpired:
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git pull timed out',
+                    'progress': progress
+                })
+                continue
+            except Exception as exc:
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git pull failed ({exc})',
+                    'progress': progress
+                })
+                continue
+
+            if pull_result.returncode != 0:
+                summary = (pull_result.stderr or pull_result.stdout or "git pull failed").strip()
+                log_update_message({
+                    'type': 'warning',
+                    'message': f'[{datetime.now().strftime("%H:%M:%S")}] ⚠️ {repo_name}: git pull failed ({summary})',
+                    'progress': progress
+                })
+                continue
+
+            summary = (pull_result.stdout or pull_result.stderr or "Already up to date.").strip()
+            if "\n" in summary:
+                summary = summary.splitlines()[-1].strip()
+            if not summary:
+                summary = "Already up to date."
+
+            log_update_message({
+                'type': 'success',
+                'message': f'[{datetime.now().strftime("%H:%M:%S")}] ✅ {repo_name}: {summary}',
+                'progress': progress
+            })
+            success_count += 1
+
         return success_count > 0  # Return True if at least one repo was updated successfully
         
     except Exception as e:
