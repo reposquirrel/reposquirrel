@@ -7112,6 +7112,6 @@ if __name__ == "__main__":
     app.config["READ_ONLY_MODE"] = args.read_only
     app.config["SHOW_LOGO"] = not args.disable_logo
 
-    app.run(host=args.host, port=args.port, debug=True,
+    app.run(host=args.host, port=args.port, debug=True, use_reloader=False,
             exclude_patterns=["repos/*", "repos/**/*", "stats/*", "stats/**/*"])
 
