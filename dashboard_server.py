@@ -2748,15 +2748,6 @@ def _load_subsystem_summary(subsystem_name: str, from_date: Optional[str], to_da
         return {}
     data = load_json(path, default={})
     return _ensure_developer_rollup(data)
-
-
-def _safe_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _merge_developer_rollup(dest: Dict[str, Dict[str, Any]], slug: str, payload: Dict[str, Any]) -> None:
     if not slug or not isinstance(payload, dict):
         return
