@@ -2746,7 +2746,88 @@ def _load_subsystem_summary(subsystem_name: str, from_date: Optional[str], to_da
     path = _resolve_subsystem_summary_file(entry, from_date, to_date, is_yearly)
     if not path or not os.path.isfile(path):
         return {}
-    return load_json(path, default={})
+    data = load_json(path, default={})
+    return _ensure_developer_rollup(data)
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_developer_rollup(dest: Dict[str, Dict[str, Any]], slug: str, payload: Dict[str, Any]) -> None:
+    if not slug or not isinstance(payload, dict):
+        return
+    commits = _safe_int(payload.get("commits"))
+    if commits <= 0 and not any(payload.get(key) for key in ("lines_added", "lines_deleted", "changed_lines")):
+        return
+    entry = dest.setdefault(
+        slug,
+        {
+            "slug": slug,
+            "display_name": payload.get("display_name") or slug,
+            "commits": 0,
+            "lines_added": 0,
+            "lines_deleted": 0,
+            "lines_net": 0,
+            "changed_lines": 0,
+            "files_changed": 0,
+        },
+    )
+    if payload.get("display_name") and not entry.get("display_name"):
+        entry["display_name"] = payload.get("display_name")
+    entry["commits"] += commits
+    entry["lines_added"] += _safe_int(payload.get("lines_added"))
+    entry["lines_deleted"] += _safe_int(payload.get("lines_deleted"))
+    entry["lines_net"] += _safe_int(payload.get("lines_net"))
+    changed = payload.get("changed_lines")
+    if changed is None:
+        changed = payload.get("lines_changed")
+    if changed is None:
+        changed = _safe_int(payload.get("lines_added")) + _safe_int(payload.get("lines_deleted"))
+    entry["changed_lines"] += _safe_int(changed)
+    entry["files_changed"] += _safe_int(payload.get("files_changed"))
+
+
+def _harvest_developer_sources(source: Dict[str, Any], dest: Dict[str, Dict[str, Any]]) -> None:
+    if not isinstance(source, dict):
+        return
+    developers = source.get("developers")
+    if isinstance(developers, dict):
+        for slug, payload in developers.items():
+            if isinstance(payload, dict):
+                _merge_developer_rollup(dest, slug, payload)
+    repositories = source.get("repositories")
+    if isinstance(repositories, dict):
+        for repo_data in repositories.values():
+            if not isinstance(repo_data, dict):
+                continue
+            repo_devs = repo_data.get("developers")
+            if not isinstance(repo_devs, dict):
+                continue
+            for slug, payload in repo_devs.items():
+                if isinstance(payload, dict):
+                    _merge_developer_rollup(dest, slug, payload)
+
+
+def _ensure_developer_rollup(summary_data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(summary_data, dict):
+        return summary_data
+    developers = summary_data.get("developers")
+    if isinstance(developers, dict) and developers:
+        return summary_data
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    months = summary_data.get("months")
+    if isinstance(months, dict):
+        for month_entry in months.values():
+            if isinstance(month_entry, dict):
+                _harvest_developer_sources(month_entry, aggregated)
+    _harvest_developer_sources(summary_data, aggregated)
+    if aggregated:
+        summary_data["developers"] = aggregated
+    return summary_data
 
 
 def _normalize_language_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

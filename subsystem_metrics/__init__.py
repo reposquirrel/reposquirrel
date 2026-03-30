@@ -1,3 +1,4 @@
+import calendar
 import json
 import os
 from collections import defaultdict
@@ -47,6 +48,196 @@ def _iter_summary_directories(subsystem_path: str) -> List[Tuple[datetime, datet
         day_span = (date_to - date_from).days
         entries.append((date_from, date_to, entry, day_span, summary_file))
     return entries
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_maintainer_entry(maintainer_data: Dict[str, Dict[str, Any]], slug: str, dev_data: Dict[str, Any]) -> None:
+    commits = _to_int(dev_data.get("commits"))
+    if commits <= 0:
+        return
+    entry = maintainer_data.setdefault(
+        slug,
+        {
+            "slug": slug,
+            "display_name": dev_data.get("display_name") or slug,
+            "commits": 0,
+            "lines_added": 0,
+            "lines_deleted": 0,
+            "changed_lines": 0,
+        },
+    )
+    entry["display_name"] = entry.get("display_name") or dev_data.get("display_name") or slug
+    entry["commits"] += commits
+    entry["lines_added"] += _to_int(dev_data.get("lines_added"))
+    entry["lines_deleted"] += _to_int(dev_data.get("lines_deleted"))
+    changed_lines = dev_data.get("changed_lines")
+    if changed_lines is None:
+        changed_lines = dev_data.get("lines_changed")
+    if changed_lines is None:
+        changed_lines = _to_int(dev_data.get("lines_added")) + _to_int(dev_data.get("lines_deleted"))
+    entry["changed_lines"] += _to_int(changed_lines)
+    if "lines_net" in dev_data:
+        entry["lines_net"] = entry.get("lines_net", 0) + _to_int(dev_data.get("lines_net"))
+    if "files_changed" in dev_data:
+        entry["files_changed"] = entry.get("files_changed", 0) + _to_int(dev_data.get("files_changed"))
+
+
+def _collect_developers_from_summary(summary_data: Dict[str, Any], maintainer_data: Dict[str, Dict[str, Any]]) -> None:
+    developers = summary_data.get("developers")
+    if isinstance(developers, dict) and developers:
+        for slug, dev_data in developers.items():
+            if isinstance(dev_data, dict):
+                _merge_maintainer_entry(maintainer_data, slug, dev_data)
+        return
+    repositories = summary_data.get("repositories")
+    if not isinstance(repositories, dict):
+        return
+    for repo_data in repositories.values():
+        if not isinstance(repo_data, dict):
+            continue
+        repo_developers = repo_data.get("developers")
+        if not isinstance(repo_developers, dict):
+            continue
+        for slug, dev_data in repo_developers.items():
+            if isinstance(dev_data, dict):
+                _merge_maintainer_entry(maintainer_data, slug, dev_data)
+
+
+def _iter_monthly_summary_files(summary_dir: str):
+    if not summary_dir or not os.path.isdir(summary_dir):
+        return
+    for entry in os.listdir(summary_dir):
+        entry_path = os.path.join(summary_dir, entry)
+        if os.path.isdir(entry_path) and entry.isdigit():
+            for filename in os.listdir(entry_path):
+                if not filename.endswith(".json") or filename == "yearly.json":
+                    continue
+                yield os.path.join(entry_path, filename), entry, filename[:-5]
+        elif os.path.isfile(entry_path) and entry.endswith(".json") and entry != "yearly.json":
+            yield entry_path, None, entry[:-5]
+
+
+def _extract_period_end(summary_data: Dict[str, Any], year_hint: Optional[str], month_hint: Optional[str]) -> Optional[datetime]:
+    period = summary_data.get("period") or {}
+    date_to = _parse_date(period.get("to")) or _parse_date(summary_data.get("to"))
+    if date_to:
+        return date_to
+    year_val = summary_data.get("year")
+    month_val = summary_data.get("month")
+    if year_val is None and year_hint and year_hint.isdigit():
+        year_val = int(year_hint)
+    if month_val is None and month_hint:
+        cleaned = month_hint.strip()
+        if "-" in cleaned:
+            parts = [part for part in cleaned.split("-") if part]
+            if len(parts) >= 2 and parts[0].isdigit():
+                year_val = year_val or int(parts[0])
+                candidate = parts[-1]
+                if candidate.isdigit():
+                    month_val = int(candidate)
+        elif cleaned.isdigit():
+            month_val = int(cleaned)
+    try:
+        year_int = int(year_val) if year_val is not None else None
+    except (TypeError, ValueError):
+        year_int = None
+    try:
+        month_int = int(month_val) if month_val is not None else None
+    except (TypeError, ValueError):
+        month_int = None
+    if isinstance(month_int, int) and not 1 <= month_int <= 12:
+        month_int = None
+    if year_int and month_int:
+        last_day = calendar.monthrange(year_int, month_int)[1]
+        return datetime(year_int, month_int, last_day)
+    return None
+
+
+def _resolve_manifest_entries(stats_root: str, subsystem_name: str) -> List[Dict[str, Any]]:
+    subsystem_name = (subsystem_name or "").strip()
+    if not subsystem_name:
+        return []
+    manifest = _get_subsystem_entries(stats_root)
+    if not manifest:
+        return []
+    by_name = manifest.get("by_name") or {}
+    by_repo = manifest.get("by_repo") or {}
+    candidates: List[Dict[str, Any]] = []
+    seen: set = set()
+    search_keys = [subsystem_name]
+    lowered = subsystem_name.lower()
+    if lowered not in search_keys:
+        search_keys.append(lowered)
+    for key in search_keys:
+        bucket = by_name.get(key)
+        if not bucket:
+            continue
+        for entry in bucket:
+            entry_id = (entry.get("repo_rel"), entry.get("display_name"), entry.get("summary_dir"))
+            if entry_id in seen:
+                continue
+            candidates.append(entry)
+            seen.add(entry_id)
+    if not candidates and "/" in subsystem_name:
+        bucket = by_repo.get(subsystem_name)
+        if bucket:
+            for entry in bucket:
+                entry_id = (entry.get("repo_rel"), entry.get("display_name"), entry.get("summary_dir"))
+                if entry_id in seen:
+                    continue
+                candidates.append(entry)
+                seen.add(entry_id)
+    if not candidates:
+        for entry in manifest.get("entries", []):
+            if entry.get("display_name") == subsystem_name:
+                entry_id = (entry.get("repo_rel"), entry.get("display_name"), entry.get("summary_dir"))
+                if entry_id not in seen:
+                    candidates.append(entry)
+                    seen.add(entry_id)
+                break
+    return candidates
+
+
+def _collect_manifest_summary_data(stats_root: str, subsystem_name: str, cutoff: datetime, maintainer_data: Dict[str, Dict[str, Any]]) -> bool:
+    collected = False
+    for entry in _resolve_manifest_entries(stats_root, subsystem_name):
+        summary_dir = entry.get("summary_dir")
+        if not summary_dir:
+            continue
+        for path, year_hint, month_hint in _iter_monthly_summary_files(summary_dir):
+            summary_data = _safe_load_json(path)
+            if not summary_data:
+                continue
+            period_end = _extract_period_end(summary_data, year_hint, month_hint)
+            if period_end is None or period_end < cutoff:
+                continue
+            _collect_developers_from_summary(summary_data, maintainer_data)
+            collected = True
+    return collected
+
+
+def _collect_legacy_summary_data(stats_root: str, subsystem_name: str, cutoff: datetime, maintainer_data: Dict[str, Dict[str, Any]]) -> bool:
+    subsystem_path = os.path.join(stats_root, "subsystems", subsystem_name)
+    if not os.path.isdir(subsystem_path):
+        return False
+    collected = False
+    for date_from, date_to, _folder, day_span, summary_file in _iter_summary_directories(subsystem_path):
+        if day_span > 35:
+            continue
+        if date_to < cutoff:
+            continue
+        summary_data = _safe_load_json(summary_file)
+        if not summary_data:
+            continue
+        _collect_developers_from_summary(summary_data, maintainer_data)
+        collected = True
+    return collected
 
 
 def _parse_date(value: Optional[str]) -> Optional[datetime]:
@@ -170,51 +361,15 @@ def compute_subsystem_top_maintainers(
     subsystem_name: str,
     lookback_days: int = 90,
 ) -> Dict[str, Any]:
-    subsystem_path = os.path.join(stats_root, "subsystems", subsystem_name)
-    if not os.path.isdir(subsystem_path):
-        return {"maintainers": [], "lookback_days": lookback_days}
-
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     maintainer_data: Dict[str, Dict[str, Any]] = {}
 
-    for date_from, _date_to, _folder, day_span, summary_file in _iter_summary_directories(subsystem_path):
-        if day_span > 35 or date_from < cutoff:
-            continue
+    collected = _collect_manifest_summary_data(stats_root, subsystem_name, cutoff, maintainer_data)
+    if not collected:
+        _collect_legacy_summary_data(stats_root, subsystem_name, cutoff, maintainer_data)
 
-        summary_data = _safe_load_json(summary_file)
-        if not summary_data:
-            continue
-
-        repositories = summary_data.get("repositories", {})
-        if not isinstance(repositories, dict):
-            continue
-
-        for repo_data in repositories.values():
-            developers = repo_data.get("developers", {}) if isinstance(repo_data, dict) else {}
-            if not isinstance(developers, dict):
-                continue
-
-            for dev_slug, dev_data in developers.items():
-                if not isinstance(dev_data, dict):
-                    continue
-                commits = dev_data.get("commits", 0)
-                if commits <= 0:
-                    continue
-                entry = maintainer_data.setdefault(
-                    dev_slug,
-                    {
-                        "slug": dev_slug,
-                        "display_name": dev_data.get("display_name", dev_slug),
-                        "commits": 0,
-                        "lines_added": 0,
-                        "lines_deleted": 0,
-                        "changed_lines": 0,
-                    },
-                )
-                entry["commits"] += commits
-                entry["lines_added"] += dev_data.get("lines_added", 0)
-                entry["lines_deleted"] += dev_data.get("lines_deleted", 0)
-                entry["changed_lines"] += dev_data.get("changed_lines", 0)
+    if not maintainer_data:
+        return {"maintainers": [], "lookback_days": lookback_days}
 
     top_maintainers = sorted(
         maintainer_data.values(),
