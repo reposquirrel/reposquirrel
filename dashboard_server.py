@@ -3216,6 +3216,16 @@ def root_index():
     )
 
 
+@app.route("/kiosk")
+def kiosk_mode():
+    return render_template(
+        "index.html",
+        read_only=bool(app.config.get("READ_ONLY_MODE", False)),
+        kiosk_mode=True,
+        show_logo=bool(app.config.get("SHOW_LOGO", True)),
+    )
+
+
 @app.route("/api/settings/repositories", methods=["GET", "POST"])
 def api_settings_repositories():
     if request.method == "GET":
