@@ -10,7 +10,7 @@ let state = {
   userSlugIndex: {},
   teams: [],
   subsystems: [], // Unified subsystems (services and standalone repos)
-  teamOwnershipOverall: null,
+  teamOwnership: null,
   selectedUser: null,
   selectedUserMonth: null, // {from, to, label, is_yearly}
   selectedTeam: null,
@@ -10525,20 +10525,20 @@ async function addOwnershipChangesAnalysis(container, abortSignal) {
 */ // End of removed addOwnershipChangesAnalysis function
 
 async function ensureTeamOwnershipBaseline() {
-  if (Array.isArray(state.teamOwnershipOverall) && state.teamOwnershipOverall.length > 0) {
-    return state.teamOwnershipOverall;
+  if (Array.isArray(state.teamOwnership) && state.teamOwnership.length > 0) {
+    return state.teamOwnership;
   }
   try {
-    const ownershipResponse = await fetchJSON('/api/teams/overview?period=overall');
+    const ownershipResponse = await fetchJSON('/api/teams/overview');
     if (ownershipResponse && Array.isArray(ownershipResponse.teams) && ownershipResponse.teams.length > 0) {
-      state.teamOwnershipOverall = ownershipResponse.teams;
-      return state.teamOwnershipOverall;
+      state.teamOwnership = ownershipResponse.teams;
+      return state.teamOwnership;
     }
   } catch (error) {
-    console.warn('Unable to load overall team ownership snapshot:', error);
+    console.warn('Unable to load team ownership snapshot:', error);
   }
-  state.teamOwnershipOverall = [];
-  return state.teamOwnershipOverall;
+  state.teamOwnership = [];
+  return state.teamOwnership;
 }
 
 async function showTeamsOverviewDashboard() {
@@ -10582,125 +10582,32 @@ async function showTeamsOverviewDashboard() {
       return;
     }
 
-    // Load team analytics data with preference for recent activity
+    // Load team analytics data for Last 3 Months
     let teamsAnalytics = [];
     let periodLabel = "Last 3 Months";
-    const preferredInitialPeriod = "last3months";
     let initialDataLoaded = false;
 
     try {
-        const preferredData = await fetchJSON(`/api/teams/overview?period=${preferredInitialPeriod}`);
-        if (preferredData && Array.isArray(preferredData.teams) && preferredData.teams.length > 0) {
-            teamsAnalytics = preferredData.teams;
-            periodLabel = preferredData.period || "Last 3 Months";
+        const data = await fetchJSON('/api/teams/overview');
+        if (data && Array.isArray(data.teams) && data.teams.length > 0) {
+            teamsAnalytics = data.teams;
+            periodLabel = data.period || "Last 3 Months";
             initialDataLoaded = true;
         } else {
-            console.warn("Preferred period data empty, falling back to overall analytics");
+            console.warn("No team analytics data available");
         }
     } catch (error) {
-        console.warn("Failed to load preferred period data, falling back to overall analytics:", error);
+        console.warn("Failed to load team analytics data:", error);
     }
 
     if (!initialDataLoaded) {
-        periodLabel = "Overall";
-        try {
-            console.log("Initial team overview load - using consistent yearly data");
-            
-            // Use the same logic as period toggle to ensure consistency from first load
-            const currentYear = new Date().getFullYear();
-            
-            // Fetch yearly data for each team to ensure consistency
-            const yearlyTeamData = [];
-            const teamPromises = state.teams.slice(0, 8).map(async team => { // Limit to first 8 teams for performance
-                try {
-                    const yearlyData = await fetchJSON(`/api/teams/${encodeURIComponent(team.id)}/year/${currentYear}`);
-                    
-                    console.log(`Team ${team.id} yearly data structure:`, {
-                        total_commits: yearlyData.total_commits,
-                        per_subsystem_keys: Object.keys(yearlyData.per_subsystem || {}),
-                        subsystems_keys: Object.keys(yearlyData.subsystems || {}),
-                        all_keys: Object.keys(yearlyData)
-                    });
-                    
-                    // Try different possible field names for subsystem data
-                    const subsystemData = yearlyData.per_subsystem || 
-                                          yearlyData.subsystems || 
-                                          yearlyData.subsystem_breakdown ||
-                                          yearlyData.subsystem_summary ||
-                                          yearlyData.per_repo ||
-                                          {};
-                                          
-                    // Also try counting from members' subsystem contributions if direct subsystem data isn't available
-                    let activeSubsystemsCount = Object.keys(subsystemData).length;
-                    
-                    // If no subsystem data found, try to derive from other sources
-                    if (activeSubsystemsCount === 0) {
-                        // Check if there are members with per-subsystem data
-                        if (yearlyData.members && Array.isArray(yearlyData.members)) {
-                            const allSubsystems = new Set();
-                            yearlyData.members.forEach(member => {
-                                if (member.per_subsystem) {
-                                    Object.keys(member.per_subsystem).forEach(sub => allSubsystems.add(sub));
-                                }
-                                if (member.subsystems) {
-                                    Object.keys(member.subsystems).forEach(sub => allSubsystems.add(sub));
-                                }
-                            });
-                            activeSubsystemsCount = allSubsystems.size;
-                        }
-                    }
-                    
-                    console.log(`Team ${team.id} calculated active subsystems: ${activeSubsystemsCount}`);
-                    
-                    return {
-                        id: team.id,
-                        name: team.name,
-                        total_commits: yearlyData.total_commits || 0,
-                        total_lines_changed: (yearlyData.total_additions || 0) + (yearlyData.total_deletions || 0),
-                        total_additions: yearlyData.total_additions || 0,
-                        total_deletions: yearlyData.total_deletions || 0,
-                        active_subsystems_count: activeSubsystemsCount,
-                        responsible_subsystems_count: yearlyData.responsible_subsystems?.length || 0,
-                        responsible_lines_of_code: yearlyData.total_responsible_lines || 0,
-                        member_count: team.members?.length || 0  // Add member count from original team data
-                    };
-                } catch (error) {
-                    console.warn(`Failed to fetch yearly data for team ${team.id}:`, error);
-                    return null;
-                }
-            });
-            
-            const resolvedTeamData = (await Promise.all(teamPromises)).filter(team => team !== null);
-            
-            if (resolvedTeamData.length > 0) {
-                console.log("Successfully fetched consistent yearly data for initial load:", resolvedTeamData.length, "teams");
-                teamsAnalytics = resolvedTeamData;
-                periodLabel = "Overall";
-                initialDataLoaded = true;
-            } else {
-                throw new Error("No yearly team data could be fetched");
-            }
-            
-        } catch (error) {
-            console.warn("Failed to fetch consistent yearly data for initial load, falling back to overview API:", error);
-            
-            // Fallback to original overview API
-            try {
-                const response = await fetch("/api/teams/overview");
-                if (response.ok) {
-                    const data = await response.json();
-                    teamsAnalytics = data.teams || [];
-                    periodLabel = data.period || "Overall";
-                    initialDataLoaded = true;
-                }
-            } catch (fallbackError) {
-                console.warn("Failed to load team analytics:", fallbackError);
-            }
-        }
+        console.warn("Unable to load team analytics data. Team rankings will be unavailable.");
+        teamsAnalytics = [];
     }
 
-    if (periodLabel === "Overall" && (!Array.isArray(state.teamOwnershipOverall) || state.teamOwnershipOverall.length === 0)) {
-      state.teamOwnershipOverall = teamsAnalytics;
+    // Store team ownership data (always Last 3 Months now)
+    if (!Array.isArray(state.teamOwnership) || state.teamOwnership.length === 0) {
+      state.teamOwnership = teamsAnalytics;
     }
 
     // Teams summary
@@ -10857,29 +10764,15 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
   rankingsSection.setAttribute("data-section", "team-rankings");
   rankingsSection.innerHTML = `<h2>🏆 Team Rankings - ${periodLabel}</h2>`;
 
-  // Add period information note only when needed
-  if (periodLabel.includes("Last 3 Months") || periodLabel.includes("last3months")) {
-    const periodNote = document.createElement("div");
-    periodNote.className = "period-note";
-    periodNote.innerHTML = `
-      <p><strong>📅 Note:</strong> These rankings show data for the last 3 months. For complete yearly statistics, view individual team details.</p>
-    `;
-    rankingsSection.appendChild(periodNote);
-  }
-
-  // Add period toggle buttons
-  const periodToggle = document.createElement("div");
-  periodToggle.className = "period-toggle";
-  periodToggle.innerHTML = `
-    <button class="period-btn" data-period="overall">Overall</button>
-    <button class="period-btn" data-period="last3months">Last 3 Months</button>
+  // Add period information note
+  const periodNote = document.createElement("div");
+  periodNote.className = "period-note";
+  periodNote.innerHTML = `
+    <p><strong>📅 Note:</strong> These rankings show data for the last 3 months. For complete yearly statistics, view individual team details.</p>
   `;
-  
-  // Set active button based on current period
-  const isLast3Months = periodLabel === "Last 3 Months";
-  periodToggle.querySelector(`[data-period="${isLast3Months ? 'last3months' : 'overall'}"]`).classList.add('active');
-  
-  rankingsSection.appendChild(periodToggle);
+  rankingsSection.appendChild(periodNote);
+
+  // No period toggle - always show Last 3 Months
 
   const rankingsContainer = document.createElement("div");
   rankingsContainer.className = "rankings-container";
@@ -10937,7 +10830,7 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
 
   rankings.forEach(ranking => {
     const rankingCard = document.createElement("div");
-    rankingCard.className = "ranking-list";
+    rankingCard.className = "ranking-list-no-scroll";
     
     rankingCard.innerHTML = `
       <div class="ranking-header">
@@ -11005,132 +10898,7 @@ async function addTeamRankings(main, teamsAnalytics, periodLabel, insertBeforeEl
     });
   });
 
-  // Add event listeners for period toggle buttons
-  const periodButtons = rankingsSection.querySelectorAll('.period-btn');
-  periodButtons.forEach(button => {
-    button.addEventListener('click', async (e) => {
-      e.preventDefault();
-      const period = button.getAttribute('data-period');
-      
-      // Update active button
-      periodButtons.forEach(btn => btn.classList.remove('active'));
-      button.classList.add('active');
-      
-      // Reload rankings for the selected period
-      try {
-        console.log("Loading teams overview for period:", period);
-        
-        let teamsOverviewData;
-        
-        if (period === 'overall') {
-          // For "overall", we want to ensure we get yearly data that matches team details
-          console.log("Fetching yearly data to ensure consistency with team details...");
-          
-          try {
-            // Get the current year
-            const currentYear = new Date().getFullYear();
-            
-            // Fetch yearly data for each team to ensure consistency
-            const yearlyTeamData = [];
-            const teamPromises = state.teams.slice(0, 8).map(async team => { // Limit to first 8 teams for performance
-              try {
-                const yearlyData = await fetchJSON(`/api/teams/${encodeURIComponent(team.id)}/year/${currentYear}`);
-                
-                // Try different possible field names for subsystem data
-                const subsystemData = yearlyData.per_subsystem || 
-                                      yearlyData.subsystems || 
-                                      yearlyData.subsystem_breakdown ||
-                                      yearlyData.subsystem_summary ||
-                                      yearlyData.per_repo ||
-                                      {};
-                                      
-                // Also try counting from members' subsystem contributions if direct subsystem data isn't available
-                let activeSubsystemsCount = Object.keys(subsystemData).length;
-                
-                // If no subsystem data found, try to derive from other sources
-                if (activeSubsystemsCount === 0) {
-                  // Check if there are members with per-subsystem data
-                  if (yearlyData.members && Array.isArray(yearlyData.members)) {
-                    const allSubsystems = new Set();
-                    yearlyData.members.forEach(member => {
-                      if (member.per_subsystem) {
-                        Object.keys(member.per_subsystem).forEach(sub => allSubsystems.add(sub));
-                      }
-                      if (member.subsystems) {
-                        Object.keys(member.subsystems).forEach(sub => allSubsystems.add(sub));
-                      }
-                    });
-                    activeSubsystemsCount = allSubsystems.size;
-                  }
-                }
-                
-                return {
-                  id: team.id,
-                  name: team.name,
-                  total_commits: yearlyData.total_commits || 0,
-                  total_lines_changed: (yearlyData.total_additions || 0) + (yearlyData.total_deletions || 0),
-                  total_additions: yearlyData.total_additions || 0,
-                  total_deletions: yearlyData.total_deletions || 0,
-                  active_subsystems_count: activeSubsystemsCount,
-                  responsible_subsystems_count: yearlyData.responsible_subsystems?.length || 0,
-                  responsible_lines_of_code: yearlyData.total_responsible_lines || 0,
-                  member_count: team.members?.length || 0  // Add member count from original team data
-                };
-              } catch (error) {
-                console.warn(`Failed to fetch yearly data for team ${team.id}:`, error);
-                return null;
-              }
-            });
-            
-            const resolvedTeamData = (await Promise.all(teamPromises)).filter(team => team !== null);
-            
-            if (resolvedTeamData.length > 0) {
-              console.log("Successfully fetched consistent yearly data for", resolvedTeamData.length, "teams");
-              teamsOverviewData = {
-                teams: resolvedTeamData,
-                period: "Overall"
-              };
-            } else {
-              throw new Error("No yearly team data could be fetched");
-            }
-            
-          } catch (error) {
-            console.warn("Failed to fetch consistent yearly data, falling back to overview API:", error);
-            teamsOverviewData = await fetchJSON(`/api/teams/overview?period=${period}`);
-          }
-        } else {
-          teamsOverviewData = await fetchJSON(`/api/teams/overview?period=${period}`);
-        }
-        
-        console.log("Final teams overview data:", {
-          period: teamsOverviewData.period,
-          teamsCount: teamsOverviewData.teams?.length,
-          sampleTeamData: teamsOverviewData.teams?.[0]
-        });
-        
-        // Find and remove the current rankings section specifically
-        const oldRankingsSection = main.querySelector('.team-rankings-section[data-section="team-rankings"]');
-        let insertBeforeElement = null;
-        
-        if (oldRankingsSection) {
-          // Remember where to insert the new section
-          insertBeforeElement = oldRankingsSection.nextElementSibling;
-          oldRankingsSection.remove();
-        }
-        
-        if ((teamsOverviewData.period || "").toLowerCase() === "overall") {
-          state.teamOwnershipOverall = teamsOverviewData.teams || [];
-        }
-
-        const ownershipBaseline = await ensureTeamOwnershipBaseline();
-        // Create new rankings section
-        await addTeamRankings(main, teamsOverviewData.teams, teamsOverviewData.period, insertBeforeElement, ownershipBaseline);
-        
-      } catch (error) {
-        console.error("Error loading teams rankings for period:", period, error);
-      }
-    });
-  });
+  // No period toggle functionality needed - always showing Last 3 Months
 }
 
 async function addSubsystemLanguageDistribution(container) {

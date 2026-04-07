@@ -44,7 +44,7 @@ PAGERDUTY_STATS_DIR = os.path.join(STATS_ROOT, "pagerduty")
 PAGERDUTY_OVERVIEW_FILE = os.path.join(PAGERDUTY_STATS_DIR, "overview.json")
 PAGERDUTY_INCIDENTS_FILE = os.path.join(PAGERDUTY_STATS_DIR, "incidents_last_year.json")
 OWNERSHIP_DISTRIBUTION_FILE = os.path.join(STATS_ROOT, "ownership_distribution.json")
-TEAM_OVERVIEW_CACHE_FILE = os.path.join(STATS_ROOT, "team_overview_overall.json")
+TEAM_OVERVIEW_CACHE_FILE = os.path.join(STATS_ROOT, "team_overview_last3months.json")
 SSH_KNOWN_HOSTS_FILE = os.path.join(CONFIG_DIR, "known_hosts")
 ALIASES_FILE = os.path.join(CONFIG_DIR, "alias.json")
 IGNORE_USERS_FILE = os.path.join(CONFIG_DIR, "ignore_user.txt")
@@ -4824,29 +4824,24 @@ def api_teams():
     return jsonify({"teams": teams})
 
 
-def build_team_overview_snapshot(period_type: str = "last3months") -> Dict[str, Any]:
+def build_team_overview_snapshot() -> Dict[str, Any]:
     teams_file_path = os.path.join(BASE_DIR, "configuration", "teams.json")
     if not os.path.exists(teams_file_path):
-        return {"teams": [], "period": "Overall", "generated_at": datetime.utcnow().isoformat() + "Z"}
+        return {"teams": [], "period": "Last 3 Months", "generated_at": datetime.utcnow().isoformat() + "Z"}
     try:
         with open(teams_file_path, "r", encoding="utf-8") as f:
             teams_config = json.load(f)
     except (json.JSONDecodeError, IOError):
         teams_config = {}
     if not teams_config:
-        return {"teams": [], "period": "Overall", "generated_at": datetime.utcnow().isoformat() + "Z"}
+        return {"teams": [], "period": "Last 3 Months", "generated_at": datetime.utcnow().isoformat() + "Z"}
 
-    normalized_period = (period_type or "last3months").strip().lower()
-    if normalized_period == "last3months":
-        current_date = datetime.now()
-        three_months_ago = current_date - timedelta(days=90)
-        from_date = three_months_ago.strftime("%Y-%m-01")
-        to_date = current_date.strftime("%Y-%m-%d")
-        period_label = "Last 3 Months"
-    else:
-        from_date = "2000-01-01"
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        period_label = "Overall"
+    # Always use Last 3 Months period
+    current_date = datetime.now()
+    three_months_ago = current_date - timedelta(days=90)
+    from_date = three_months_ago.strftime("%Y-%m-01")
+    to_date = current_date.strftime("%Y-%m-%d")
+    period_label = "Last 3 Months"
 
     alias_lookup = load_alias_lookup()
     size_payload = compute_subsystem_size_rankings(STATS_ROOT)
@@ -4876,6 +4871,21 @@ def build_team_overview_snapshot(period_type: str = "last3months") -> Dict[str, 
             short_lower = short.lower()
             if short_lower in subsystem_line_lookup_lower:
                 return subsystem_line_lookup_lower[short_lower]
+
+        # NEW: Try reverse matching - look for full names that end with our subsystem name
+        for full_name, lines in subsystem_line_lookup.items():
+            if "/" in full_name:
+                short_name = full_name.split("/")[-1]
+                if short_name == subsystem_name:
+                    return lines
+
+        # Try case-insensitive reverse matching
+        for full_name, lines in subsystem_line_lookup_lower.items():
+            if "/" in full_name:
+                short_name = full_name.split("/")[-1].lower()
+                if short_name == lowered:
+                    return lines
+
         return 0
 
     teams_analytics: List[Dict[str, Any]] = []
@@ -6313,18 +6323,17 @@ def api_team_year(team_id: str, year: int):
 
 @app.route("/api/teams/overview")
 def api_teams_overview():
-    """Get overview analytics for all teams."""
-    period_type = (request.args.get('period', 'overall') or 'overall').strip().lower()
+    """Get overview analytics for all teams (Last 3 Months)."""
     force_refresh = request.args.get('refresh') in {'1', 'true', 'True', 'YES', 'yes'}
 
-    if period_type == 'overall' and not force_refresh:
+    if not force_refresh:
         cached = load_json(TEAM_OVERVIEW_CACHE_FILE, default={})
         if cached.get("teams"):
-            cached.setdefault("period", "Overall")
+            cached.setdefault("period", "Last 3 Months")
             return jsonify(cached)
 
-    snapshot = build_team_overview_snapshot(period_type)
-    if period_type == 'overall' and snapshot.get("teams"):
+    snapshot = build_team_overview_snapshot()
+    if snapshot.get("teams"):
         save_json(TEAM_OVERVIEW_CACHE_FILE, snapshot)
     return jsonify(snapshot)
 
