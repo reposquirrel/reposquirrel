@@ -51,6 +51,7 @@ IGNORE_USERS_FILE = os.path.join(CONFIG_DIR, "ignore_user.txt")
 TEAMS_CONFIG_FILE = os.path.join(CONFIG_DIR, "teams.json")
 SERVICES_CONFIG_FILE = os.path.join(CONFIG_DIR, "services.json")
 CAPACITY_CONFIG_FILE = os.path.join(CONFIG_DIR, "capacity_config.json")
+TEAM_RESPONSIBILITIES_FILE = os.path.join(CONFIG_DIR, "team_subsystem_responsibilities.json")
 
 REPO_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CLONE_TASK_RETENTION_SECONDS = 1800
