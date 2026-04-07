@@ -11013,7 +11013,7 @@ async function addSubsystemLanguageDistribution(container) {
       
       const chartContainer = document.createElement("div");
       chartContainer.className = "chart-container";
-      chartContainer.innerHTML = '<canvas id="language-distribution-chart" style="max-height: 300px;"></canvas>';
+      chartContainer.innerHTML = '<canvas id="language-distribution-chart" width="400" height="300"></canvas>';
       languageSection.appendChild(chartContainer);
       console.log("🔍 DEBUG: Created chart container with canvas");
       
@@ -11036,17 +11036,20 @@ async function addSubsystemLanguageDistribution(container) {
           
           console.log("🔍 DEBUG: Chart data prepared - labels:", labels, "data:", data);
           
-          const ctx = document.getElementById("language-distribution-chart");
-          console.log("🔍 DEBUG: Canvas element found:", ctx);
-          
-          if (ctx && labels.length > 0) {
+          const canvas = document.getElementById("language-distribution-chart");
+          console.log("🔍 DEBUG: Canvas element found:", canvas);
+
+          if (canvas && labels.length > 0) {
             console.log("🔍 DEBUG: Creating Chart.js chart...");
-            
+
             // Destroy existing chart if it exists
-            if (state.charts.languageDistribution) {
+            const existingChart = Chart.getChart(canvas);
+            if (existingChart) {
               console.log("🔍 DEBUG: Destroying existing chart");
-              state.charts.languageDistribution.destroy();
+              existingChart.destroy();
             }
+
+            const ctx = canvas.getContext("2d");
             state.charts.languageDistribution = new Chart(ctx, {
               type: "bar",
               data: {
@@ -11108,7 +11111,7 @@ async function addSubsystemLanguageDistribution(container) {
             console.log("🔍 DEBUG: Chart.js chart created successfully");
           } else {
             console.error("🚨 ERROR: Could not create language chart - canvas element not found or no data");
-            console.log("🔍 DEBUG: ctx element:", ctx);
+            console.log("🔍 DEBUG: canvas element:", canvas);
             console.log("🔍 DEBUG: labels.length:", labels.length);
           }
           
