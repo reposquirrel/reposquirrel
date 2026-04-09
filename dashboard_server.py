@@ -18,6 +18,9 @@ import calendar
 import configparser
 import unicodedata
 import uuid
+import signal
+import glob
+import atexit
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Any, List, Tuple, Optional, Set, Iterable
 from collections import defaultdict, Counter, deque
@@ -3293,13 +3296,15 @@ def api_settings_integrations():
 def api_update_last_run():
     settings = load_update_settings()
     state = get_background_state_snapshot()
+    # Return flat structure that matches frontend expectations
     return jsonify({
         "last_update": settings.get("last_update"),
-        "background": {
-            "enabled": settings.get("background_enabled", False),
-            "interval_hours": settings.get("interval_hours", 24),
-            "state": state,
-        },
+        "background_enabled": settings.get("background_enabled", False),
+        "interval_hours": settings.get("interval_hours", 24),
+        "background_running": state.get("running", False),
+        "next_run": state.get("next_run"),
+        "last_manual_completed_at": settings.get("last_manual_completed_at"),
+        "last_background_completed_at": settings.get("last_background_completed_at"),
     })
 
 
@@ -4385,7 +4390,11 @@ def perform_background_update(reason: str = 'scheduled') -> bool:
         return True
     finally:
         if temp_dir and os.path.isdir(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(temp_dir)
+                logger.info('Background update cleaned up temporary workspace: %s', temp_dir)
+            except Exception as e:
+                logger.warning('Failed to cleanup background update directory %s: %s', temp_dir, e)
             if not success:
                 logger.info('Background update cleaned up temporary workspace after failure')
         record_last_update('success' if success else 'failed', 'background')
@@ -4585,7 +4594,11 @@ def run_full_update_async(force_update=False):
         })
     finally:
         if temp_dir and os.path.isdir(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(temp_dir)
+                logger.info('Manual update cleaned up temporary workspace: %s', temp_dir)
+            except Exception as e:
+                logger.warning('Failed to cleanup manual update directory %s: %s', temp_dir, e)
         update_process_active = False
         record_last_update('success' if overall_success else 'failed', 'manual')
 
@@ -4739,10 +4752,62 @@ def run_git_pull_all(force_update=False):
 
 
 
+def cleanup_orphaned_temp_directories():
+    """Clean up leftover temporary directories from previous runs."""
+    try:
+        pattern = os.path.join(BASE_DIR, "background-update-*")
+        temp_dirs = glob.glob(pattern)
+        manual_pattern = os.path.join(BASE_DIR, "manual-update-*")
+        temp_dirs.extend(glob.glob(manual_pattern))
+
+        cleaned_count = 0
+        for temp_dir in temp_dirs:
+            if os.path.isdir(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info('Startup cleanup: removed orphaned temp directory %s', temp_dir)
+                    cleaned_count += 1
+                except Exception as e:
+                    logger.warning('Startup cleanup: failed to remove temp directory %s: %s', temp_dir, e)
+
+        if cleaned_count > 0:
+            logger.info('Startup cleanup: removed %d orphaned temporary directories', cleaned_count)
+
+    except Exception as e:
+        logger.error('Startup cleanup failed: %s', e)
+
+
+def cleanup_on_shutdown(signum=None, frame=None):
+    """Clean up resources when the server shuts down."""
+    logger.info('Dashboard server shutting down, cleaning up...')
+
+    # Stop background scheduler
+    if background_scheduler_thread and background_scheduler_thread.is_alive():
+        logger.info('Stopping background scheduler...')
+        background_scheduler_stop_event.set()
+        background_scheduler_event.set()
+        background_scheduler_thread.join(timeout=5)
+
+    # Cancel any running background update
+    background_cancel_event.set()
+
+    # Clean up any remaining temp directories
+    try:
+        cleanup_orphaned_temp_directories()
+    except Exception as e:
+        logger.error('Error during shutdown cleanup: %s', e)
+
+    logger.info('Dashboard server shutdown cleanup complete')
+    if signum:
+        sys.exit(0)
+
+
 def launch_background_scheduler():
     start_background_scheduler()
 
 if not os.environ.get("DISABLE_DASHBOARD_SCHEDULER"):
+    # Clean up any orphaned temp directories from previous runs
+    cleanup_orphaned_temp_directories()
     launch_background_scheduler()
 
 
@@ -7192,6 +7257,14 @@ def static_files(filename: str):
 
 
 if __name__ == "__main__":
+    # Setup signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, cleanup_on_shutdown)
+    signal.signal(signal.SIGTERM, cleanup_on_shutdown)
+    atexit.register(cleanup_on_shutdown)
+
+    # Clean up orphaned temp directories from previous runs
+    cleanup_orphaned_temp_directories()
+
     # You can set host="0.0.0.0" if you want to reach it from other machines
     # Exclude repos directory from file watcher to prevent restarts during cloning
     parser = argparse.ArgumentParser(description="Dashboard server")
