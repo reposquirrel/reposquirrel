@@ -5,7 +5,7 @@
 docker run -p 5000:5000 -v repos:/app/repos -v stats:/app/stats -v configuration:/app/configuration ghcr.io/reposquirrel/reposquirrel:latest
 ```
 
-A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases. Also integrates with for example pagerDuty to give helicopter view of the developement and support activities.
+A comprehensive Git repository analytics tool that provides detailed insights into developer contributions, subsystem ownership, and codebase evolution over time. Perfect for understanding who owns what in large, multi-repository codebases. Also integrates with tools like PagerDuty to give a helicopter view of development and support activities.
 
 ![Line of code Evolution](screenshots/lines_of_code_evolution.png)
 ![Developer Details](screenshots/developer_details.png)
@@ -57,6 +57,21 @@ Loop curated repo metrics and/or PagerDuty responders on hallway displays via `/
 - For manual setup, dependency installation, configuration file formats, project structure, and Docker/Makefile workflows, see the [Development Guide](docs/development_guide.md).
 - Once running, visit `http://localhost:5000` to configure repositories, teams, subsystems, aliases, and to launch “Run Update” jobs.
 
+### Manual Run
+
+Prerequisites:
+- **Python 3.9+** and **Git** on the command line
+- **tokei** for language statistics — install from https://github.com/XAMPPRocky/tokei (e.g. `cargo install tokei --features all`)
+
+Set up a virtual environment and start the dashboard:
+```bash
+python3 -m venv venv
+source venv/bin/activate        # on Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python dashboard_server.py
+```
+Then open `http://localhost:5000`. To leave the virtual environment later, run `deactivate`.
+
 ![Subsystem details](screenshots/subsystem_details.png)
 
 ## Screenshots
@@ -75,7 +90,7 @@ Loop curated repo metrics and/or PagerDuty responders on hallway displays via `/
 - **Historical analysis** - How has contribution changed over time?
 - **Onboarding insights** - Who are the experts in each area?
 - **Resource planning** - Where is development effort being spent?
-- **Kiosk mode ** - Show visualizations / alerts in the developement room or management area, based on git or pagerDuty
+- **Kiosk mode** - Show visualizations / alerts in the development room or management area, based on git or PagerDuty
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
