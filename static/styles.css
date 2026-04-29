@@ -5325,3 +5325,79 @@ body.kiosk-mode #kiosk-stage {
   border: 1px solid rgba(45, 212, 191, 0.5);
   color: #ccfbf1;
 }
+
+/* Print / Save-as-PDF
+   Goal: Chrome's native print should capture the whole page (not just the
+   visible viewport). The live UI uses fixed-height flex containers with
+   internal scrollbars (`#app { height: 100vh }`, `.sidebar { overflow:hidden }`,
+   `.main { overflow:auto }`) which is what clips the print output. Below we
+   release those constraints, hide chrome that isn't part of the content,
+   and switch to a light background so it reads on paper. */
+@media print {
+  @page {
+    margin: 12mm;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+
+  /* Release the fixed viewport layout so the page flows naturally. */
+  #app {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .main {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  /* Hide UI chrome that shouldn't appear in the exported PDF. */
+  .sidebar,
+  .hamburger-button,
+  .hamburger-dropdown,
+  .last-update-banner,
+  .modal,
+  #kiosk-stage {
+    display: none !important;
+  }
+
+  /* Many inner containers cap themselves with max-height + overflow:auto
+     for the live view. For print, let them expand to full content. */
+  .sidebar-list,
+  .log-content,
+  .users-checkbox-list,
+  .ignored-users-list,
+  .member-selector,
+  .teams-list,
+  .repos-list,
+  .subsystems-list,
+  .responsibilities-list,
+  .language-capacity-list,
+  .aliases-list-v2,
+  .available-users-grid {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* Keep cards and charts together on a page when possible. */
+  .card,
+  .kpi-card,
+  .chart-container {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Ensure dark-theme backgrounds print with their colors so charts/badges
+     remain legible (Chrome respects this when "Background graphics" is on,
+     which is the default for Save as PDF). */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
