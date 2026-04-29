@@ -7642,6 +7642,98 @@ async function renderTeamDashboard(team, period, summary) {
 
     developerWorthCard.appendChild(developerWorthList);
     developerWorthCard.appendChild(thresholdNote);
+
+    // Weighted capacity: combine team size with individual blame equivalents
+    // to get a more realistic picture than a raw headcount comparison.
+    if (summary.capacity_analysis && summary.capacity_analysis.team_size) {
+      const analysis = summary.capacity_analysis;
+      const teamSize = analysis.team_size;
+      const requiredDevs = analysis.required_developers || 0;
+
+      const highPerformers = summary.developer_capacity_profiles.filter(
+        p => (p.developer_equivalent || 0) >= 1.0
+      );
+      const blameSum = highPerformers.reduce(
+        (acc, p) => acc + (p.developer_equivalent || 0),
+        0
+      );
+      const remainingMembers = Math.max(0, teamSize - highPerformers.length);
+      const weightedCapacity = remainingMembers + blameSum;
+      const thresholds = analysis.thresholds || {};
+      const warningThreshold = thresholds.warning ?? 90;
+      const criticalThreshold = thresholds.critical ?? 100;
+      const weightedPercent = weightedCapacity > 0
+        ? Math.round((requiredDevs / weightedCapacity) * 1000) / 10
+        : 0;
+
+      const borderColors = {
+        'green': '#10b981',
+        'yellow': '#f59e0b',
+        'red': '#ef4444',
+        'gray': '#6b7280'
+      };
+      let percentColor = borderColors.gray;
+      if (weightedCapacity > 0) {
+        if (weightedPercent <= warningThreshold) percentColor = borderColors.green;
+        else if (weightedPercent <= criticalThreshold) percentColor = borderColors.yellow;
+        else percentColor = borderColors.red;
+      }
+
+      const weightedSection = document.createElement("div");
+      weightedSection.style.marginTop = "16px";
+      weightedSection.style.padding = "12px";
+      weightedSection.style.backgroundColor = "var(--background-secondary)";
+      weightedSection.style.borderRadius = "8px";
+      weightedSection.style.borderLeft = `4px solid ${percentColor}`;
+
+      const weightedHeader = document.createElement("div");
+      weightedHeader.className = "title-with-help";
+      weightedHeader.style.marginBottom = "8px";
+      const formulaParts = [];
+      if (remainingMembers > 0) {
+        formulaParts.push(`${remainingMembers} baseline dev${remainingMembers === 1 ? '' : 's'}`);
+      }
+      highPerformers.forEach(p => {
+        formulaParts.push(`${p.display_name}: ${p.developer_equivalent.toFixed(1)}`);
+      });
+      const formulaText = formulaParts.length > 0 ? formulaParts.join(' + ') : 'no contributors';
+      weightedHeader.innerHTML = `
+        <h3 style="margin: 0;">⚖️ Weighted Capacity</h3>
+        <span class="help-icon">?
+          <span class="tooltip">Combines the raw team size with individual blame ownership to give a more realistic capacity number. For each developer listed above with ≥1.0 theoretical devs of blame, we replace their single headcount with their actual blame weight. Formula: (team size − qualifying devs) + sum(blame of qualifying devs). The % uses the same convention as Team Capacity Analysis: theoretical need ÷ weighted capacity × 100 — so ≤90% = healthy, ≤100% = warning, >100% = overloaded.</span>
+        </span>
+      `;
+      weightedSection.appendChild(weightedHeader);
+
+      const weightedRow = document.createElement("div");
+      weightedRow.style.display = "flex";
+      weightedRow.style.justifyContent = "space-between";
+      weightedRow.style.alignItems = "center";
+      weightedRow.style.flexWrap = "wrap";
+      weightedRow.style.gap = "12px";
+
+      const weightedValue = document.createElement("div");
+      weightedValue.innerHTML = `<strong>Weighted capacity:</strong> ${weightedCapacity.toFixed(1)} devs <span style="color: ${percentColor}; font-weight: bold;">(${weightedPercent.toFixed(1)}%)</span>`;
+
+      const weightedNeed = document.createElement("div");
+      weightedNeed.style.color = "var(--text-secondary)";
+      weightedNeed.innerHTML = `vs. theoretical need of ${requiredDevs.toFixed(1)} devs`;
+
+      weightedRow.appendChild(weightedValue);
+      weightedRow.appendChild(weightedNeed);
+      weightedSection.appendChild(weightedRow);
+
+      const formulaLine = document.createElement("div");
+      formulaLine.style.marginTop = "8px";
+      formulaLine.style.fontSize = "0.85em";
+      formulaLine.style.color = "var(--text-secondary)";
+      formulaLine.style.fontFamily = "monospace";
+      formulaLine.textContent = `= ${formulaText}`;
+      weightedSection.appendChild(formulaLine);
+
+      developerWorthCard.appendChild(weightedSection);
+    }
+
     main.appendChild(developerWorthCard);
   }
 
