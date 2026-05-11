@@ -4485,6 +4485,24 @@ body {
   min-width: 140px;
 }
 
+.integration-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #1f2937;
+}
+
+.integration-section h4 {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 15px;
+}
+
+.integration-section small {
+  color: #94a3b8;
+}
+
 .modal-description {
   color: #94a3b8;
   margin: 0;

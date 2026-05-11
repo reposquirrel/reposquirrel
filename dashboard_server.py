@@ -35,6 +35,7 @@ from subsystem_metrics import (
     compute_subsystem_significant_ownership,
     compute_subsystem_size_rankings,
 )
+import pagerduty_sync
 
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -3262,11 +3263,20 @@ def api_settings_integrations():
     def _build_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         pagerduty = data.get("pagerduty", {}) if isinstance(data, dict) else {}
         token = pagerduty.get("api_token")
+        available = pagerduty.get("available_services") or []
+        if not isinstance(available, list):
+            available = []
+        selected = pagerduty.get("selected_service_ids") or []
+        if not isinstance(selected, list):
+            selected = []
         return {
             "pagerduty": {
                 "has_token": bool(token),
                 "token_preview": (token[:4] + "…" + token[-2:]) if token and len(token) > 6 else None,
                 "updated_at": pagerduty.get("updated_at"),
+                "available_services": available,
+                "selected_service_ids": [str(item) for item in selected if isinstance(item, str)],
+                "services_fetched_at": pagerduty.get("services_fetched_at"),
             }
         }
 
@@ -3274,22 +3284,129 @@ def api_settings_integrations():
     if request.method == "GET":
         return jsonify(_build_payload(data))
 
+    if app.config.get("READ_ONLY_MODE", False):
+        return jsonify({"error": "Integrations are disabled in read-only mode."}), 403
+
     body = request.get_json(silent=True) or {}
     pagerduty_payload = body.get("pagerduty") or {}
+    if not isinstance(pagerduty_payload, dict):
+        return jsonify({"error": "Missing pagerduty payload"}), 400
     new_token = pagerduty_payload.get("api_token")
-    if new_token is None:
+    new_selected = pagerduty_payload.get("selected_service_ids")
+    if new_token is None and new_selected is None:
         return jsonify({"error": "Missing pagerduty payload"}), 400
 
     updated = load_json(INTEGRATIONS_FILE, default={}) if os.path.exists(INTEGRATIONS_FILE) else {}
     updated.setdefault("pagerduty", {})
-    if new_token.strip():
-        updated["pagerduty"]["api_token"] = new_token.strip()
-        updated["pagerduty"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
-    else:
-        updated["pagerduty"].pop("api_token", None)
-        updated["pagerduty"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    if new_token is not None:
+        if new_token.strip():
+            updated["pagerduty"]["api_token"] = new_token.strip()
+        else:
+            updated["pagerduty"].pop("api_token", None)
+            updated["pagerduty"].pop("available_services", None)
+            updated["pagerduty"].pop("selected_service_ids", None)
+            updated["pagerduty"].pop("services_fetched_at", None)
+        updated["pagerduty"]["updated_at"] = now_iso
+    if new_selected is not None:
+        if not isinstance(new_selected, list):
+            return jsonify({"error": "selected_service_ids must be a list"}), 400
+        cleaned: List[str] = []
+        seen: Set[str] = set()
+        for item in new_selected:
+            if not isinstance(item, str):
+                continue
+            trimmed = item.strip()
+            if trimmed and trimmed not in seen:
+                seen.add(trimmed)
+                cleaned.append(trimmed)
+        updated["pagerduty"]["selected_service_ids"] = cleaned
     save_json(INTEGRATIONS_FILE, updated)
     return jsonify(_build_payload(updated))
+
+
+@app.route("/api/integrations/pagerduty/services", methods=["POST"])
+def api_integrations_pagerduty_services():
+    if app.config.get("READ_ONLY_MODE", False):
+        return jsonify({"error": "Integrations are disabled in read-only mode."}), 403
+    token = pagerduty_sync._load_pagerduty_token(BASE_DIR)
+    if not token:
+        return jsonify({"error": "No PagerDuty token configured"}), 400
+    try:
+        services = pagerduty_sync._fetch_pagerduty_services(token)
+    except Exception as exc:
+        return jsonify({"error": f"Failed to fetch PagerDuty services: {exc}"}), 502
+
+    updated = load_json(INTEGRATIONS_FILE, default={}) if os.path.exists(INTEGRATIONS_FILE) else {}
+    updated.setdefault("pagerduty", {})
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    updated["pagerduty"]["available_services"] = services
+    updated["pagerduty"]["services_fetched_at"] = now_iso
+    save_json(INTEGRATIONS_FILE, updated)
+
+    selected = updated["pagerduty"].get("selected_service_ids") or []
+    return jsonify({
+        "services": services,
+        "selected_service_ids": [str(item) for item in selected if isinstance(item, str)],
+        "services_fetched_at": now_iso,
+    })
+
+
+@app.route("/api/integrations/pagerduty/sync", methods=["POST"])
+def api_integrations_pagerduty_sync():
+    if app.config.get("READ_ONLY_MODE", False):
+        return jsonify({"error": "Integrations are disabled in read-only mode."}), 403
+    if update_process_active:
+        return jsonify({"error": "A full update is currently running. Please wait for it to finish."}), 409
+    token = pagerduty_sync._load_pagerduty_token(BASE_DIR)
+    if not token:
+        return jsonify({"error": "No PagerDuty token configured"}), 400
+    if getattr(pagerduty_sync, "requests", None) is None:
+        return jsonify({"error": "Python 'requests' package is required for PagerDuty sync. Install it with 'pip install requests'."}), 500
+
+    sync_logger = logging.getLogger("pagerduty_sync.integrations-route")
+    sync_logger.setLevel(logging.INFO)
+    captured_messages: List[str] = []
+
+    class _CapturingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                captured_messages.append(record.getMessage())
+            except Exception:
+                captured_messages.append(str(record.msg))
+
+    handler = _CapturingHandler(level=logging.INFO)
+    sync_logger.addHandler(handler)
+    try:
+        summary = pagerduty_sync.sync_pagerduty_data(
+            BASE_DIR,
+            BASE_DIR,
+            lookback_days=getattr(pagerduty_sync, "DEFAULT_LOOKBACK_DAYS", 365),
+            logger=sync_logger,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"PagerDuty sync failed: {exc}"}), 502
+    finally:
+        sync_logger.removeHandler(handler)
+
+    if summary is None:
+        detail = ""
+        for message in reversed(captured_messages):
+            lower = message.lower()
+            if "warning" in lower or "failed" in lower or "error" in lower:
+                detail = message
+                break
+        if not detail and captured_messages:
+            detail = captured_messages[-1]
+        if not detail:
+            detail = "PagerDuty sync returned no data."
+        return jsonify({"error": f"PagerDuty sync failed: {detail}"}), 502
+    totals = summary.get("totals") or {}
+    return jsonify({
+        "status": "ok",
+        "total_incidents": totals.get("total", 0),
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    })
 
 
 @app.route("/api/update/last-run")
@@ -3334,6 +3451,78 @@ def api_users_list():
 @app.route("/api/users/overview")
 def api_users_overview():
     return jsonify(build_users_overview_payload())
+
+
+@app.route("/api/users/top-contributors")
+def api_users_top_contributors():
+    """Return top 20 contributors with detailed comparison stats (subsystems, languages, commits, etc.)."""
+    limit = request.args.get("limit", 20, type=int)
+    requested_year = request.args.get("year", None, type=int)
+
+    user_periods = list_user_months()
+    ignored = load_ignored_user_slugs()
+    visible_users = [slug for slug in user_periods.keys() if slug not in ignored]
+
+    # Collect all available yearly periods
+    available_years = set()
+    for slug in visible_users:
+        for period in user_periods.get(slug, []):
+            if period.get("is_yearly"):
+                year_str = period.get("label") or period["from"][:4]
+                try:
+                    available_years.add(int(year_str))
+                except (ValueError, TypeError):
+                    pass
+
+    available_years_sorted = sorted(available_years, reverse=True)
+
+    # Find the target yearly period matching the requested year (or latest)
+    target_period = None
+    for slug in visible_users:
+        for period in user_periods.get(slug, []):
+            if not period.get("is_yearly"):
+                continue
+            if requested_year:
+                year_str = period.get("label") or period["from"][:4]
+                try:
+                    if int(year_str) != requested_year:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+            if not target_period or period["from"] > target_period["from"]:
+                target_period = period
+
+    if not target_period:
+        return jsonify({"contributors": [], "period": None, "available_years": available_years_sorted})
+
+    from_date = target_period["from"]
+    to_date = target_period["to"]
+
+    # Gather stats for all visible users
+    contributors = []
+    for slug in visible_users:
+        member_data = aggregate_user_data_for_period(slug, from_date, to_date)
+        entry = _build_member_contribution_entry(member_data)
+        if entry["commits"] > 0:
+            entry["slug"] = slug
+            entry["display_name"] = _get_user_display_name(slug, user_periods)
+            contributors.append(entry)
+
+    # Sort by commits descending, take top N
+    contributors.sort(key=lambda x: x["commits"], reverse=True)
+    top = contributors[:limit]
+
+    return jsonify({
+        "contributors": top,
+        "period": {
+            "label": target_period.get("label", ""),
+            "from": from_date,
+            "to": to_date,
+            "is_yearly": target_period.get("is_yearly", False),
+        },
+        "total_contributors": len(contributors),
+        "available_years": available_years_sorted,
+    })
 
 
 @app.route("/api/users/badges-overview")

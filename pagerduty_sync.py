@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - handled gracefully at runtime
 INCIDENTS_URL = "https://api.pagerduty.com/incidents"
 INCIDENT_LOG_ENTRIES_URL = "https://api.pagerduty.com/incidents/{incident_id}/log_entries"
 USERS_URL = "https://api.pagerduty.com/users"
+SERVICES_URL = "https://api.pagerduty.com/services"
 HEADERS_BASE = {
     "Accept": "application/vnd.pagerduty+json;version=2",
     "Content-Type": "application/json",
@@ -349,6 +350,33 @@ def _fetch_pagerduty_users(token: str) -> List[Dict[str, Any]]:
             break
         params["offset"] = params.get("offset", 0) + params.get("limit", 100)
     return users
+
+
+def _fetch_pagerduty_services(token: str) -> List[Dict[str, Any]]:
+    headers = dict(HEADERS_BASE)
+    headers["Authorization"] = f"Token token={token}"
+    params: Dict[str, Any] = {"limit": 100, "offset": 0}
+    services: List[Dict[str, Any]] = []
+    while True:
+        response = _get_with_retry(SERVICES_URL, headers, params=params)
+        payload = response.json()
+        batch = payload.get("services") or []
+        if isinstance(batch, list):
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                service_id = item.get("id")
+                if not service_id:
+                    continue
+                services.append({
+                    "id": str(service_id),
+                    "name": item.get("name") or "",
+                    "description": item.get("description") or "",
+                })
+        if not payload.get("more"):
+            break
+        params["offset"] = params.get("offset", 0) + params.get("limit", 100)
+    return services
 
 
 def _find_latest_user_summary(user_dir: str) -> Optional[str]:
@@ -1126,6 +1154,27 @@ def sync_pagerduty_data(
         log.info("Python 'requests' package is required for PagerDuty sync. Install it with 'pip install requests'.")
         return None
 
+    integrations_cfg = _load_integrations(base_dir)
+    pagerduty_cfg = integrations_cfg.get("pagerduty") or {}
+    raw_selected = pagerduty_cfg.get("selected_service_ids") or []
+    selected_service_ids: List[str] = []
+    if isinstance(raw_selected, list):
+        seen: set = set()
+        for value in raw_selected:
+            if not isinstance(value, str):
+                continue
+            trimmed = value.strip()
+            if trimmed and trimmed not in seen:
+                seen.add(trimmed)
+                selected_service_ids.append(trimmed)
+    extra_params: Optional[Dict[str, Any]] = None
+    if selected_service_ids:
+        extra_params = {"service_ids[]": selected_service_ids}
+        log.info(
+            "Filtering PagerDuty incidents by %s selected service(s)",
+            len(selected_service_ids),
+        )
+
     since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     until = datetime.now(timezone.utc)
     log.info(
@@ -1151,7 +1200,7 @@ def sync_pagerduty_data(
             iso_utc(window_end),
         )
         try:
-            batch = _fetch_incidents(token, window_start, window_end)
+            batch = _fetch_incidents(token, window_start, window_end, extra_params=extra_params)
         except Exception as exc:  # pragma: no cover - network failure
             log.info("Warning: failed to fetch PagerDuty incidents: %s", exc)
             return None

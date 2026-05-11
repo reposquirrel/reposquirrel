@@ -9929,9 +9929,10 @@ async function showUsersOverviewDashboard() {
       main.appendChild(yearlySection);
     }
     
+    await addTopContributorsTable(main);
     await addBadgeStatistics(main);
     await addOwnershipStatistics(main);
-    
+
     state.loadingUsersOverview = false;
     console.log("Users overview dashboard loading completed");
     
@@ -9947,10 +9948,209 @@ async function showUsersOverviewDashboard() {
   }
 }
 
+async function addTopContributorsTable(container) {
+  try {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = createTitleWithTooltip(
+      "📊 Top Contributors Comparison",
+      "Sortable comparison table showing subsystems touched, languages used, commits, and line changes for the most active developers.",
+      "h2"
+    );
+    container.appendChild(card);
+
+    const controlsRow = document.createElement("div");
+    controlsRow.style.display = "flex";
+    controlsRow.style.alignItems = "center";
+    controlsRow.style.gap = "10px";
+    controlsRow.style.marginBottom = "12px";
+
+    const yearLabel = document.createElement("span");
+    yearLabel.textContent = "Year:";
+    yearLabel.style.fontWeight = "500";
+    controlsRow.appendChild(yearLabel);
+
+    const yearSelect = document.createElement("select");
+    yearSelect.className = "year-select";
+    yearSelect.style.padding = "4px 8px";
+    yearSelect.style.borderRadius = "4px";
+    yearSelect.style.border = "1px solid var(--border)";
+    yearSelect.style.background = "var(--background-secondary)";
+    yearSelect.style.color = "var(--text-primary)";
+    controlsRow.appendChild(yearSelect);
+
+    const tableContainer = document.createElement("div");
+    card.appendChild(controlsRow);
+    card.appendChild(tableContainer);
+
+    async function loadContributors(year) {
+      const url = year
+        ? `/api/users/top-contributors?limit=20&year=${year}`
+        : '/api/users/top-contributors?limit=20';
+      const data = await fetchJSON(url);
+      if (!data || !data.contributors || data.contributors.length === 0) {
+        tableContainer.innerHTML = '<div class="note-text">No contributor data available for this period.</div>';
+        return data;
+      }
+
+      tableContainer.innerHTML = "";
+
+      const columns = [
+        { key: "display_name", label: "Developer", sortable: true, type: "string", defaultDirection: "asc" },
+        { key: "subsystems_touched", label: "Subsystems", sortable: true, type: "number", defaultDirection: "desc" },
+        { key: "languages_used", label: "Languages", sortable: true, type: "number", defaultDirection: "desc" },
+        { key: "commits", label: "Commits", sortable: true, type: "number", defaultDirection: "desc" },
+        { key: "additions", label: "Lines added", sortable: true, type: "number", defaultDirection: "desc" },
+        { key: "deletions", label: "Lines deleted", sortable: true, type: "number", defaultDirection: "desc" },
+        { key: "net_lines", label: "Net lines", sortable: true, type: "number", defaultDirection: "desc" }
+      ];
+
+      let sortState = { key: "commits", direction: "desc" };
+      const columnMap = columns.reduce((acc, col) => { acc[col.key] = col; return acc; }, {});
+      const formatNumber = (v) => (Number(v) || 0).toLocaleString();
+
+      const table = document.createElement("table");
+      table.className = "data-table team-members-table sortable-table";
+
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      const columnIndicators = {};
+
+      columns.forEach((col) => {
+        const th = document.createElement("th");
+        th.textContent = col.label;
+        if (col.sortable) {
+          th.dataset.sortKey = col.key;
+          th.style.cursor = "pointer";
+          const indicator = document.createElement("span");
+          indicator.className = "sort-indicator";
+          indicator.style.marginLeft = "6px";
+          indicator.style.fontSize = "0.8em";
+          indicator.style.opacity = "0.7";
+          indicator.style.visibility = "hidden";
+          columnIndicators[col.key] = indicator;
+          th.appendChild(indicator);
+          th.addEventListener("click", () => {
+            if (sortState.key === col.key) {
+              sortState.direction = sortState.direction === "asc" ? "desc" : "asc";
+            } else {
+              sortState = { key: col.key, direction: col.defaultDirection || (col.type === "string" ? "asc" : "desc") };
+            }
+            renderContributorRows();
+          });
+        }
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      const tableBody = document.createElement("tbody");
+      table.appendChild(tableBody);
+
+      function compareContributors(a, b) {
+        const col = columnMap[sortState.key] || columns[0];
+        let valA, valB;
+        if (col.type === "string") {
+          valA = (a[col.key] || "").toLowerCase();
+          valB = (b[col.key] || "").toLowerCase();
+        } else {
+          valA = Number(a[col.key]) || 0;
+          valB = Number(b[col.key]) || 0;
+        }
+        if (valA === valB) return (a.display_name || "").localeCompare(b.display_name || "");
+        const dir = sortState.direction === "asc" ? 1 : -1;
+        return valA < valB ? -1 * dir : 1 * dir;
+      }
+
+      function updateIndicators() {
+        Object.entries(columnIndicators).forEach(([key, ind]) => {
+          if (sortState.key === key) {
+            ind.textContent = sortState.direction === "asc" ? "↑" : "↓";
+            ind.style.visibility = "visible";
+          } else {
+            ind.textContent = "";
+            ind.style.visibility = "hidden";
+          }
+        });
+      }
+
+      function renderContributorRows() {
+        const sorted = [...data.contributors].sort(compareContributors);
+        tableBody.innerHTML = "";
+        sorted.forEach((contributor) => {
+          const row = document.createElement("tr");
+          row.className = "clickable-row";
+          row.addEventListener("click", () => navigateToUser(contributor.slug));
+
+          columns.forEach((col) => {
+            const cell = document.createElement("td");
+            if (col.key === "display_name") {
+              cell.appendChild(createClickableDeveloperName(contributor.slug, contributor.display_name, "inline"));
+            } else {
+              const value = contributor[col.key] || 0;
+              cell.textContent = formatNumber(value);
+              if (col.key === "additions" || (col.key === "net_lines" && value >= 0)) {
+                cell.style.color = "#22c55e";
+              } else if (col.key === "deletions" || (col.key === "net_lines" && value < 0)) {
+                cell.style.color = "#ef4444";
+              }
+            }
+            row.appendChild(cell);
+          });
+
+          tableBody.appendChild(row);
+        });
+        updateIndicators();
+      }
+
+      renderContributorRows();
+      tableContainer.appendChild(table);
+
+      if (data.total_contributors > data.contributors.length) {
+        const note = document.createElement("div");
+        note.className = "note-text";
+        note.style.marginTop = "8px";
+        note.textContent = `Showing top ${data.contributors.length} of ${data.total_contributors} active contributors.`;
+        tableContainer.appendChild(note);
+      }
+
+      return data;
+    }
+
+    // Initial load (latest year)
+    const initialData = await loadContributors(null);
+    if (!initialData) {
+      card.remove();
+      return;
+    }
+
+    // Populate year selector
+    const availableYears = initialData.available_years || [];
+    if (availableYears.length <= 1) {
+      controlsRow.style.display = "none";
+    } else {
+      availableYears.forEach((yr) => {
+        const opt = document.createElement("option");
+        opt.value = yr;
+        opt.textContent = yr;
+        yearSelect.appendChild(opt);
+      });
+      if (initialData.period && initialData.period.label) {
+        yearSelect.value = initialData.period.label;
+      }
+      yearSelect.addEventListener("change", () => {
+        loadContributors(parseInt(yearSelect.value, 10));
+      });
+    }
+  } catch (error) {
+    console.warn("Could not load top contributors table:", error);
+  }
+}
+
 async function addBadgeStatistics(container) {
   try {
     console.log("Loading badge statistics for users overview...");
-    
+
     if (container.querySelector('.badge-statistics-section')) {
       console.log("Badge statistics section already exists, skipping");
       return;
@@ -13223,7 +13423,27 @@ function initializeIntegrations() {
       clearButton.title = "Disabled in read-only mode";
     }
   }
- 
+
+  const fetchServicesButton = $("fetch-pagerduty-services-btn");
+  if (fetchServicesButton) {
+    fetchServicesButton.addEventListener("click", fetchPagerDutyServices);
+    if (READ_ONLY_MODE) {
+      fetchServicesButton.disabled = true;
+      fetchServicesButton.title = "Disabled in read-only mode";
+    }
+  }
+
+  const updatePagerDutyButton = $("update-pagerduty-btn");
+  if (updatePagerDutyButton) {
+    updatePagerDutyButton.addEventListener("click", updatePagerDutyData);
+    if (READ_ONLY_MODE) {
+      updatePagerDutyButton.disabled = true;
+      updatePagerDutyButton.title = "Disabled in read-only mode";
+    }
+  }
+
+  setupPagerDutyServicesSearch();
+
   refreshIntegrationsStatus(true);
 }
 
@@ -13273,10 +13493,12 @@ async function loadIntegrationsSettings() {
     }
     state.integrations = data || state.integrations;
     renderPagerDutyIntegration(data?.pagerduty || {});
+    renderPagerDutyServices(data?.pagerduty || {});
     updateAlertsModeVisibility();
   } catch (error) {
     console.error("Failed to load integration settings:", error);
     renderPagerDutyIntegration({ error: error.message });
+    renderPagerDutyServices({});
   }
 }
 
@@ -13338,6 +13560,7 @@ async function savePagerDutyToken() {
 
     state.integrations = data || state.integrations;
     renderPagerDutyIntegration(data?.pagerduty || {});
+    renderPagerDutyServices(data?.pagerduty || {});
     updateAlertsModeVisibility();
     alert("PagerDuty token saved.");
   } catch (error) {
@@ -13374,6 +13597,7 @@ async function clearPagerDutyToken() {
 
     state.integrations = data || state.integrations;
     renderPagerDutyIntegration(data?.pagerduty || {});
+    renderPagerDutyServices(data?.pagerduty || {});
     resetPagerDutyDataCache();
     updateAlertsModeVisibility();
     alert("PagerDuty token removed.");
@@ -13391,6 +13615,227 @@ function setIntegrationButtonState(button, loading, label) {
   if (label) {
     button.textContent = label;
   }
+}
+
+window.pagerdutyServicesData = [];
+window.pagerdutySelectedIds = [];
+let pagerdutyServicesSaveTimer = null;
+
+function escapePagerDutyText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderPagerDutyServices(info = {}) {
+  const list = $("pagerduty-services-list");
+  const statusEl = $("pagerduty-services-status");
+  if (!list) return;
+
+  const services = Array.isArray(info.available_services) ? info.available_services : [];
+  const selected = Array.isArray(info.selected_service_ids) ? info.selected_service_ids : [];
+  window.pagerdutyServicesData = services;
+  window.pagerdutySelectedIds = selected.slice();
+
+  if (statusEl) {
+    if (info.services_fetched_at) {
+      statusEl.textContent = `Last fetched ${formatDateTime(info.services_fetched_at)}`;
+    } else {
+      statusEl.textContent = "";
+    }
+  }
+
+  list.innerHTML = "";
+  if (!info.has_token) {
+    list.innerHTML = '<div style="text-align: center; color: #9ca3af; padding: 20px;">Save a PagerDuty API token to fetch services.</div>';
+    return;
+  }
+  if (services.length === 0) {
+    list.innerHTML = '<div style="text-align: center; color: #9ca3af; padding: 20px;">No services fetched yet — click Fetch services.</div>';
+    return;
+  }
+
+  services.forEach((service) => {
+    const id = service?.id;
+    if (!id) return;
+    const name = service.name || id;
+    const isChecked = selected.includes(id);
+    const item = document.createElement("div");
+    item.className = "user-checkbox-item";
+    item.innerHTML = `
+      <label>
+        <input type="checkbox" value="${escapePagerDutyText(id)}" ${isChecked ? "checked" : ""} ${READ_ONLY_MODE ? "disabled" : ""} onchange="togglePagerDutyService('${escapePagerDutyText(id)}')">
+        <span>${escapePagerDutyText(name)}</span>
+      </label>
+    `;
+    list.appendChild(item);
+  });
+}
+
+function togglePagerDutyService(serviceId) {
+  if (READ_ONLY_MODE) return;
+  const selected = window.pagerdutySelectedIds || [];
+  const index = selected.indexOf(serviceId);
+  if (index === -1) {
+    selected.push(serviceId);
+  } else {
+    selected.splice(index, 1);
+  }
+  window.pagerdutySelectedIds = selected;
+  schedulePagerDutyServicesSave();
+}
+
+function schedulePagerDutyServicesSave() {
+  if (pagerdutyServicesSaveTimer) {
+    clearTimeout(pagerdutyServicesSaveTimer);
+  }
+  pagerdutyServicesSaveTimer = setTimeout(savePagerDutyServicesSelection, 300);
+}
+
+async function savePagerDutyServicesSelection() {
+  pagerdutyServicesSaveTimer = null;
+  const statusEl = $("pagerduty-services-status");
+  const payload = { pagerduty: { selected_service_ids: window.pagerdutySelectedIds || [] } };
+  try {
+    const response = await fetch("/api/settings/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.integrations = data || state.integrations;
+    if (statusEl && data?.pagerduty?.services_fetched_at) {
+      statusEl.textContent = `Last fetched ${formatDateTime(data.pagerduty.services_fetched_at)}`;
+    }
+  } catch (error) {
+    console.error("Failed to save PagerDuty services selection:", error);
+    if (statusEl) {
+      statusEl.textContent = `Save failed: ${error.message}`;
+    }
+  }
+}
+
+async function fetchPagerDutyServices() {
+  if (READ_ONLY_MODE) {
+    alert("Integrations are disabled in read-only mode.");
+    return;
+  }
+  const button = $("fetch-pagerduty-services-btn");
+  const statusEl = $("pagerduty-services-status");
+  const tokenInput = $("pagerduty-api-token");
+  const hasTokenOnServer = !!state.integrations?.pagerduty?.has_token;
+  const unsavedTokenEntered = !!(tokenInput && tokenInput.value && tokenInput.value.trim());
+  if (!hasTokenOnServer) {
+    if (statusEl) {
+      statusEl.textContent = unsavedTokenEntered
+        ? "Save your token first."
+        : "Enter and save a PagerDuty API token first.";
+    }
+    return;
+  }
+
+  setIntegrationButtonState(button, true, "Fetching…");
+  if (statusEl) {
+    statusEl.textContent = "Fetching services…";
+  }
+  try {
+    const response = await fetch("/api/integrations/pagerduty/services", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    state.integrations = state.integrations || {};
+    state.integrations.pagerduty = {
+      ...(state.integrations.pagerduty || {}),
+      available_services: data.services || [],
+      selected_service_ids: data.selected_service_ids || [],
+      services_fetched_at: data.services_fetched_at,
+    };
+    renderPagerDutyServices({
+      has_token: true,
+      available_services: data.services || [],
+      selected_service_ids: data.selected_service_ids || [],
+      services_fetched_at: data.services_fetched_at,
+    });
+  } catch (error) {
+    console.error("Failed to fetch PagerDuty services:", error);
+    if (statusEl) {
+      statusEl.textContent = `Fetch failed: ${error.message}`;
+    }
+  } finally {
+    setIntegrationButtonState(button, false, "Fetch services");
+  }
+}
+
+async function updatePagerDutyData() {
+  if (READ_ONLY_MODE) {
+    alert("Integrations are disabled in read-only mode.");
+    return;
+  }
+  const button = $("update-pagerduty-btn");
+  const statusEl = $("pagerduty-sync-status");
+  const hasTokenOnServer = !!state.integrations?.pagerduty?.has_token;
+  if (!hasTokenOnServer) {
+    if (statusEl) {
+      statusEl.textContent = "Save a PagerDuty API token first.";
+    }
+    return;
+  }
+
+  setIntegrationButtonState(button, true, "Updating…");
+  if (statusEl) {
+    statusEl.textContent = "Syncing PagerDuty incidents — this may take a minute…";
+  }
+  try {
+    const response = await fetch("/api/integrations/pagerduty/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    const total = typeof data.total_incidents === "number" ? data.total_incidents : 0;
+    const whenLabel = data.completed_at ? formatDateTime(data.completed_at) : "now";
+    if (statusEl) {
+      statusEl.textContent = `Synced ${total} incident${total === 1 ? "" : "s"} at ${whenLabel}.`;
+    }
+    resetPagerDutyDataCache();
+  } catch (error) {
+    console.error("Failed to update PagerDuty data:", error);
+    if (statusEl) {
+      statusEl.textContent = `Update failed: ${error.message}`;
+    }
+  } finally {
+    setIntegrationButtonState(button, false, "Update PagerDuty");
+  }
+}
+
+function setupPagerDutyServicesSearch() {
+  const searchInput = $("pagerduty-services-search");
+  const list = $("pagerduty-services-list");
+  if (!searchInput || !list) return;
+  searchInput.addEventListener("input", function () {
+    const term = this.value.toLowerCase();
+    const items = list.querySelectorAll(".user-checkbox-item");
+    items.forEach((item) => {
+      const labelSpan = item.querySelector("label span");
+      const labelText = labelSpan ? labelSpan.textContent.toLowerCase() : "";
+      const input = item.querySelector("input");
+      const idText = input ? (input.value || "").toLowerCase() : "";
+      item.style.display = labelText.includes(term) || idText.includes(term) ? "" : "none";
+    });
+  });
 }
 
 async function loadIgnoreUsers() {

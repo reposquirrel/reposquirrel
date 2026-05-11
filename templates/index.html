@@ -580,6 +580,26 @@
             <button id="save-pagerduty-token" class="btn btn-primary">Save Token</button>
             <button id="clear-pagerduty-token" class="btn btn-secondary">Clear Token</button>
           </div>
+          <div class="integration-section" id="pagerduty-services-section">
+            <h4>PagerDuty Services</h4>
+            <small>Select which services to sync. Leave empty to sync all services.</small>
+            <div class="integration-actions">
+              <button id="fetch-pagerduty-services-btn" class="btn btn-secondary">Fetch services</button>
+              <span id="pagerduty-services-status" class="integration-status-text"></span>
+            </div>
+            <div class="search-box">
+              <input type="text" id="pagerduty-services-search" placeholder="Search services…" />
+            </div>
+            <div id="pagerduty-services-list" class="users-checkbox-list"></div>
+          </div>
+          <div class="integration-section" id="pagerduty-sync-section">
+            <h4>Update PagerDuty Data</h4>
+            <small>Re-fetch incidents and responder stats without running a full analysis.</small>
+            <div class="integration-actions">
+              <button id="update-pagerduty-btn" class="btn btn-primary">Update PagerDuty</button>
+              <span id="pagerduty-sync-status" class="integration-status-text"></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

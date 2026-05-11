@@ -1,2 +1,2 @@
 #!/bin/bash
-python master.py --parallel 4
+python3 master.py --parallel 4
